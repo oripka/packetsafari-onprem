@@ -1,0 +1,23 @@
+{
+  "version": "10.0.0-onprem.1",
+  "channel": "stable",
+  "configSchemaVersion": 1,
+  "requiredEnv": [
+    "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
+    "REDIS_PASSWORD",
+    "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
+    "PACKETSAFARI_MAIL_SERVER",
+    "PACKETSAFARI_MAIL_PORT",
+    "PACKETSAFARI_MAIL_DEFAULT_SENDER",
+    "PACKETSAFARI_MAIL_USERNAME",
+    "PACKETSAFARI_MAIL_PASSWORD"
+  ],
+  "images": {
+    "frontend": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/frontend@sha256:frontenddigest",
+    "backend": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/backend@sha256:backenddigest",
+    "worker": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/backend@sha256:backenddigest",
+    "redis": "redis/redis-stack-server:latest",
+    "es01": "docker.elastic.co/elasticsearch/elasticsearch:7.17.8",
+    "sharkd": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/sharkd@sha256:sharkddigest"
+  }
+}

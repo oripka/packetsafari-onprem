@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "packetsafari-onprem"
+version = "0.1.0"
+description = "PacketSafari on-prem host operations CLI and TUI."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+packetsafari-ops = "packetsafari_onprem.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["packetsafari_onprem*"]

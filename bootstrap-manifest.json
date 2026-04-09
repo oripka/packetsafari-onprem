@@ -1,0 +1,8 @@
+{
+  "version": "0.1.0",
+  "files": {
+    "packetsafari_onprem/cli.py": {
+      "sha256": "fa38a931687626348982c0b1b61b5133f7d2f027910d19bb88210c062c6d33fe"
+    }
+  }
+}
