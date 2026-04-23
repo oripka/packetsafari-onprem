@@ -50,16 +50,6 @@ services:
     volumes:
       - packetsafari-esdata:/usr/share/elasticsearch/data
 
-  securityworker:
-    image: "{{ securityworker_image }}"
-    container_name: packetsafari-securityworker
-    restart: always
-    env_file:
-      - "{{ runtime_env_path }}"
-    volumes:
-      - packetsafari-storage:/storage
-      - "{{ host_runtime_root }}:{{ container_runtime_root }}"
-
   sharkd:
     image: "{{ sharkd_image }}"
     container_name: packetsafari-sharkd

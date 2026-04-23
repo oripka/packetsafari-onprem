@@ -453,11 +453,12 @@ def docker_exec_backend(layout: RuntimeLayout, args: list[str]) -> None:
 
 
 def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, onboarding_mode: bool) -> None:
+    onboarding_value = quote_env_value("true" if onboarding_mode else "false")
     lines = [
         "# Managed by PacketSafari on-prem Python operations.",
         "# Finalize onboarding writes the managed runtime env, then the first admin is created manually from inside the backend container.",
         f'PACKETSAFARI_ONPREM_ENABLED="true"',
-        f'PACKETSAFARI_ONPREM_ONBOARDING_ENABLED={"\"true\"" if onboarding_mode else "\"false\""}',
+        f"PACKETSAFARI_ONPREM_ONBOARDING_ENABLED={onboarding_value}",
         f'PACKETSAFARI_ONPREM_RUNTIME_DIR={quote_env_value(str(layout.container_runtime_root))}',
         f'PACKETSAFARI_ONPREM_STATE_PATH={quote_env_value(str(layout.container_runtime_root / "state" / "deployment-state.json"))}',
         f'PACKETSAFARI_ONPREM_ENV_PATH={quote_env_value(str(layout.container_runtime_root / "env" / "runtime.env"))}',

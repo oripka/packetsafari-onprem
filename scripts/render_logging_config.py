@@ -89,12 +89,12 @@ def main() -> int:
 [sources.docker]
 type = "docker_logs"
 docker_host = "unix:///var/run/docker.sock"
-include_containers = ["packetsafari-backend", "packetsafari-worker", "packetsafari-securityworker"]
+include_containers = ["packetsafari-backend", "packetsafari-worker"]
 
 [transforms.audit_only]
 type = "filter"
 inputs = ["docker"]
-condition = '.label."com.docker.compose.service" == "backend" || .label."com.docker.compose.service" == "worker" || .label."com.docker.compose.service" == "securityworker"'
+condition = '.label."com.docker.compose.service" == "backend" || .label."com.docker.compose.service" == "worker"'
 
 {_sink_config(forwarder_type).strip()}
 """.strip() + "\n"

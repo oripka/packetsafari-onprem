@@ -130,7 +130,6 @@ The installer expects `images` to be a flat map of digest-pinned image reference
     "frontend": "registry.example.com/packetsafari/frontend@sha256:...",
     "backend": "registry.example.com/packetsafari/backend@sha256:...",
     "worker": "registry.example.com/packetsafari/backend@sha256:...",
-    "securityworker": "registry.example.com/packetsafari/securityworker@sha256:...",
     "sharkd": "registry.example.com/packetsafari/sharkd@sha256:..."
   }
 }
