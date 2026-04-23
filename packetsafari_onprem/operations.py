@@ -519,7 +519,9 @@ def install_release(args) -> dict:
     sync_bundle(layout)
 
     license_path = Path(args.license).expanduser()
-    manifest_path = Path(args.manifest or (bundle_root() / "examples" / "release-manifest.json")).expanduser()
+    manifest_path = Path(args.manifest).expanduser()
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
     public_key_path = bundle_root() / "keys" / "license-public.pem"
 
     verify_license(license_path, public_key_path)

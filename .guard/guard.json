@@ -1,0 +1,48 @@
+{
+  "allowPty": true,
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": [],
+    "allowLocalBinding": true,
+    "allowLoopbackConnections": false,
+    "allowLoopbackHighPorts": false,
+    "allowLoopbackPorts": [
+      3000,
+      3001,
+      4983
+    ],
+    "allowUnixSockets": [
+      "${GUARD_RUN_DIR}"
+    ],
+    "allowMachLookup": [
+      "com.apple.FSEvents",
+      "com.apple.fseventsd",
+      "com.apple.FileCoordination"
+    ]
+  },
+  "filesystem": {
+    "denyRead": [
+      "/Users",
+      "/Volumes",
+      "/Applications",
+      "/cores",
+      "/home"
+    ],
+    "allowRead": [
+      "${GUARD_PROJECT_DIR}",
+      "${GUARD_RUN_DIR}"
+    ],
+    "allowWrite": [
+      "${GUARD_PROJECT_DIR}",
+      "${GUARD_RUN_DIR}"
+    ],
+    "denyWrite": [
+      ".env",
+      ".env.*",
+      "keys/",
+      "secrets/",
+      "*.key",
+      "*.pem"
+    ]
+  }
+}

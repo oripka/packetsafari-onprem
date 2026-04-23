@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser("install", help="Install PacketSafari on-prem into onboarding mode.")
     install.add_argument("--license", required=True)
-    install.add_argument("--manifest")
+    install.add_argument("--manifest", required=True)
     install.add_argument("--non-interactive", action="store_true")
     install.add_argument("--audit-log-enabled")
     install.add_argument("--audit-log-persist")

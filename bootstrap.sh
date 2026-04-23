@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_RAW_BASE="${PACKETSAFARI_ONPREM_RAW_BASE:-https://raw.githubusercontent.com/packetsafari/packetsafari-onprem/main}"
-ARCHIVE_URL="${PACKETSAFARI_ONPREM_ARCHIVE_URL:-https://github.com/packetsafari/packetsafari-onprem/archive/refs/heads/main.tar.gz}"
+REPO_RAW_BASE="${PACKETSAFARI_ONPREM_RAW_BASE:-https://raw.githubusercontent.com/oripka/packetsafari-onprem/main}"
+ARCHIVE_URL="${PACKETSAFARI_ONPREM_ARCHIVE_URL:-https://github.com/oripka/packetsafari-onprem/archive/refs/heads/main.tar.gz}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT

@@ -18,19 +18,19 @@ Customer-facing Python-native installer, operator CLI, and simple interactive me
 Supported customer entrypoints:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/packetsafari/packetsafari-onprem/main/bootstrap.sh | bash -s -- install --license /path/to/license-token.json
+curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/bootstrap.sh | bash -s -- install --license /path/to/license-token.json --manifest ./release-manifest.json
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/packetsafari/packetsafari-onprem/main/bootstrap.sh | bash -s -- tui
+curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/bootstrap.sh | bash -s -- tui
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/packetsafari/packetsafari-onprem/main/bootstrap.sh | bash -s -- upgrade --manifest ./release-manifest.json
+curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/bootstrap.sh | bash -s -- upgrade --manifest ./release-manifest.json
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/packetsafari/packetsafari-onprem/main/bootstrap.sh | bash -s -- rollback
+curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/bootstrap.sh | bash -s -- rollback
 ```
 
 `bootstrap.sh` downloads the full on-prem bundle, verifies the Python CLI checksum from `bootstrap-manifest.json`, and then launches the operator menu directly with `python3`.
@@ -62,7 +62,7 @@ That host runtime root is bind-mounted into the app containers at `/storage/onpr
 Primary commands:
 
 ```bash
-packetsafari-ops install --license /path/to/license-token.json --non-interactive
+packetsafari-ops install --license /path/to/license-token.json --manifest ./release-manifest.json --non-interactive
 packetsafari-ops status --json
 packetsafari-ops tui
 packetsafari-ops upgrade --manifest ./release-manifest.json
@@ -130,6 +130,7 @@ The installer expects `images` to be a flat map of digest-pinned image reference
     "frontend": "registry.example.com/packetsafari/frontend@sha256:...",
     "backend": "registry.example.com/packetsafari/backend@sha256:...",
     "worker": "registry.example.com/packetsafari/backend@sha256:...",
+    "securityworker": "registry.example.com/packetsafari/securityworker@sha256:...",
     "sharkd": "registry.example.com/packetsafari/sharkd@sha256:..."
   }
 }
