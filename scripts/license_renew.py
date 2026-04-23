@@ -10,6 +10,12 @@ from pathlib import Path
 from license_common import b64url_decode, read_token
 
 
+def _bool_claim(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--token", required=True)
@@ -27,11 +33,17 @@ def main() -> int:
         "--customer-id", str(payload.get("customerId") or ""),
         "--customer-email", str(payload.get("customerEmail") or ""),
         "--license-id", str(payload.get("licenseId") or ""),
+        "--deployment-id", str(payload.get("deployment_id") or payload.get("deploymentId") or payload.get("licenseId") or ""),
+        "--support-tier", str(payload.get("support_tier") or payload.get("supportTier") or "standard"),
+        "--max-users", str(payload.get("max_users") or payload.get("maxUsers") or 25),
+        "--max-agent-runs-per-month", str(payload.get("max_agent_runs_per_month") or payload.get("maxAgentRunsPerMonth") or 1000),
         "--channel", str(payload.get("channel") or "stable"),
         "--days", str(args.days),
         "--output", args.output,
         "--notes", str(payload.get("notes") or ""),
     ]
+    if not _bool_claim(payload.get("agent_enabled", payload.get("agentEnabled", True))):
+        cmd.append("--no-agent")
     subprocess.run(cmd, check=True)
     return 0
 

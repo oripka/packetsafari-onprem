@@ -7,6 +7,7 @@ Customer-facing Python-native installer, operator CLI, and simple interactive me
 - `bootstrap.sh` - GitHub-hosted `curl | bash` bootstrap shim that downloads the bundle and launches the Python CLI
 - `packetsafari_onprem/` - Python control plane for install, status, onboarding, upgrade, rollback, diagnostics, and the interactive operator menu
 - `scripts/license_*.py` - offline entitlement token tooling
+- `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
 - `scripts/render_compose.py` - render pinned on-prem compose files from release manifests
 - `scripts/configure_logging.py` - audit logging defaults helper
 - `scripts/render_logging_config.py` - render Vector config for optional audit log forwarding
@@ -94,6 +95,19 @@ Create it manually from inside the backend container after finalize:
 ```bash
 docker exec -it packetsafari-backend python3 /app/scripts/create_initial_admin.py --email admin@example.com
 ```
+
+## License Claims
+
+On-prem licenses are signed offline entitlement tokens. Current tokens carry explicit claims for `agent_enabled`, `max_users`, `max_agent_runs_per_month`, `offline_expiry`, `customer_id`, `deployment_id`, and `support_tier`.
+
+Create and verify tokens with:
+
+```bash
+python3 scripts/license_create.py --private-key keys/license-private.pem --customer-id customer-acme --customer-email security@example.com --license-id lic-acme-001 --deployment-id dep-acme-prod --support-tier standard --max-users 25 --max-agent-runs-per-month 1000 --agent-enabled --days 365 --output /tmp/packetsafari-license-token.json
+python3 scripts/license_verify.py --token /tmp/packetsafari-license-token.json --public-key keys/license-public.pem
+```
+
+See `docs/license-claims.md` for the full claim schema. The private signing key is internal-only and must never be installed on a customer host.
 
 ## Audit Logging Modes
 

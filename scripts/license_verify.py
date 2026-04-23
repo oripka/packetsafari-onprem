@@ -20,7 +20,7 @@ def main() -> int:
     signature = b64url_decode(token["signature"])
     openssl_verify(Path(args.public_key), payload_bytes, signature)
     payload = json.loads(payload_bytes.decode("utf-8"))
-    expires_at = str(payload.get("expiresAt") or "").strip()
+    expires_at = str(payload.get("offline_expiry") or payload.get("offlineExpiry") or payload.get("expiresAt") or "").strip()
     if expires_at:
         expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).astimezone(timezone.utc)
         if expiry < datetime.now(timezone.utc):
