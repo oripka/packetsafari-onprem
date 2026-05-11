@@ -157,11 +157,10 @@ def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str,
 
 
 def ensure_rsa_key(private_key: Path, public_key: Path) -> None:
-    if private_key.exists() and public_key.exists():
-        return
     private_key.parent.mkdir(parents=True, exist_ok=True)
-    run(["openssl", "genrsa", "-out", str(private_key), "3072"])
-    private_key.chmod(0o600)
+    if not private_key.exists():
+        run(["openssl", "genrsa", "-out", str(private_key), "3072"])
+        private_key.chmod(0o600)
     run(["openssl", "rsa", "-in", str(private_key), "-pubout", "-out", str(public_key)])
 
 
