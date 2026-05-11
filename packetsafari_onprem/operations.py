@@ -1121,7 +1121,75 @@ def _generated_env_default(key: str) -> str:
         "PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD",
     }:
         return secrets.token_urlsafe(48)
+    if upper == "POSTGRES_DB":
+        return "packetsafari"
+    if upper == "POSTGRES_USER":
+        return "packetsafari"
+    if upper == "POSTGRES_PASSWORD":
+        return secrets.token_urlsafe(48)
+    if upper == "PACKETSAFARI_RUNTIME_POSTGRES_ENABLED":
+        return "true"
+    if upper == "PACKETSAFARI_RUNTIME_POSTGRES_URL":
+        postgres_db = os.getenv("POSTGRES_DB", "packetsafari")
+        postgres_user = os.getenv("POSTGRES_USER", "packetsafari")
+        postgres_password = os.getenv("POSTGRES_PASSWORD", "")
+        return f"postgresql+psycopg2://{postgres_user}:{postgres_password}@postgres:5432/{postgres_db}"
+    if upper in {
+        "PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_HOST",
+        "PACKETSAFARI_RUNTIME_CACHE_REDIS_HOST",
+    }:
+        return "redis"
+    if upper in {
+        "PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PORT",
+        "PACKETSAFARI_RUNTIME_CACHE_REDIS_PORT",
+    }:
+        return "6379"
+    if upper in {
+        "PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_DB",
+        "PACKETSAFARI_RUNTIME_CACHE_REDIS_DB",
+        "PACKETSAFARI_RUNTIME_CHECKPOINT_REDIS_DB",
+    }:
+        return "0"
     return ""
+
+
+def _redis_alias_default(values: dict[str, str]) -> str:
+    for key in (
+        "REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD",
+    ):
+        value = str(values.get(key) or "").strip()
+        if value:
+            return value
+    return secrets.token_urlsafe(48)
+
+
+def _postgres_url_default(values: dict[str, str]) -> str:
+    postgres_db = str(values.get("POSTGRES_DB") or "packetsafari").strip()
+    postgres_user = str(values.get("POSTGRES_USER") or "packetsafari").strip()
+    postgres_password = str(values.get("POSTGRES_PASSWORD") or "").strip()
+    if not postgres_password:
+        postgres_password = secrets.token_urlsafe(48)
+        values["POSTGRES_PASSWORD"] = postgres_password
+    values.setdefault("POSTGRES_DB", postgres_db)
+    values.setdefault("POSTGRES_USER", postgres_user)
+    return f"postgresql+psycopg2://{postgres_user}:{postgres_password}@postgres:5432/{postgres_db}"
+
+
+def _generated_env_default_for_values(key: str, values: dict[str, str]) -> str:
+    upper = key.upper()
+    if upper in {
+        "REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD",
+    }:
+        return _redis_alias_default(values)
+    if upper == "PACKETSAFARI_RUNTIME_POSTGRES_URL":
+        return _postgres_url_default(values)
+    return _generated_env_default(key)
 
 
 def configure_required_env(args) -> dict:
@@ -1160,7 +1228,7 @@ def configure_required_env(args) -> dict:
     values = dict(existing)
     prompted: list[str] = []
     for key in missing:
-        generated_default = _generated_env_default(key)
+        generated_default = _generated_env_default_for_values(key, values)
         if generated_default:
             prompt = f"{key} [press enter to generate]: "
         else:
@@ -1469,8 +1537,18 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         f"PACKETSAFARI_RUNTIME_POSTGRES_URL={quote_env_value(f'postgresql+psycopg2://{postgres_user}:{postgres_password}@postgres:5432/{postgres_db}')}",
         f"REDIS_PASSWORD={quote_env_value(redis_password)}",
         f"PACKETSAFARI_RUNTIME_REDIS_PASSWORD={quote_env_value(redis_password)}",
+        'PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_HOST="redis"',
+        'PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PORT="6379"',
+        'PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_DB="0"',
         f"PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD={quote_env_value(redis_password)}",
+        'PACKETSAFARI_RUNTIME_CACHE_REDIS_HOST="redis"',
+        'PACKETSAFARI_RUNTIME_CACHE_REDIS_PORT="6379"',
+        'PACKETSAFARI_RUNTIME_CACHE_REDIS_DB="0"',
         f"PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD={quote_env_value(redis_password)}",
+        'PACKETSAFARI_RUNTIME_CHECKPOINT_REDIS_DB="0"',
+        'PACKETSAFARI_CAPTURE_SHARKD_HOST="sharkd"',
+        'PACKETSAFARI_CAPTURE_SHARKD_PORT="4448"',
+        'PACKETSAFARI_CAPTURE_SHARKD_PROTOCOL="ws"',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
         f"PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET={quote_env_value(sharkd_secret)}",
     ]
@@ -2058,7 +2136,7 @@ def run_target_migrations(layout: RuntimeLayout) -> None:
     docker_compose_run(
         layout,
         "backend",
-        ["python3", "/app/scripts/sql_storage_upgrade.py", "upgrade"],
+        ["sh", "-c", "PACKETSAFARI_SKIP_SERVICE_INIT=true python3 /app/scripts/sql_storage_upgrade.py upgrade"],
     )
 
 

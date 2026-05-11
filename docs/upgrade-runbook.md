@@ -1,5 +1,36 @@
 # PacketSafari On-Prem Upgrade Runbook
 
+## Host Prerequisites
+
+Use Ubuntu Server 24.04 LTS or newer for fresh install and deployment drills.
+
+Minimum single-node sizing:
+
+- CPU: 4 vCPU
+- RAM: 16 GiB
+- Disk: 120 GiB root or data volume
+- Architecture: match the release artifact, for example `linux-arm64` requires an ARM64 host
+
+Install required packages:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-v2 zstd tar openssl curl python3
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Log out and back in after adding the user to the `docker` group, or run
+deployment commands with `sudo`.
+
+Expose only the ports needed for the deployment:
+
+- `22/tcp` for operator SSH
+- `3000/tcp` for the frontend if accessed directly
+- `8080/tcp` for backend health/API if accessed directly
+
+Keep `4448/tcp` sharkd access internal to the host or private network.
+
 ## Customer Commands
 
 ```bash

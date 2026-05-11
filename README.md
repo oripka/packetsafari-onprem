@@ -63,11 +63,31 @@ Use `PACKETSAFARI_ONPREM_BASIC_AUTH=user:pass` or `PACKETSAFARI_ONPREM_DOWNLOAD_
 
 ## Host Prerequisites
 
-- Linux host with Docker and the Docker Compose plugin installed
-- `curl`, `python3`, `tar`, `openssl`, and `zstd`/GNU tar zstd support available on the host
+- Ubuntu Server 24.04 LTS or newer
+- Docker and the Docker Compose plugin installed
+- `curl`, `python3`, `tar`, `openssl`, and `zstd` available on the host
 - write access to the managed runtime root (default: `/opt/packetsafari`)
-- network access to pull the release images referenced by the selected manifest
-- `python3` available on the host for the bootstrap shim and installed operator wrapper
+- network access to the authenticated release URLs for connected installs, or local/USB access to the offline bundle
+- enough disk for the bundle, image load, database, captures, and rollback snapshots
+
+Minimum single-node sizing for test and small deployments:
+
+- CPU: 4 vCPU
+- RAM: 16 GiB
+- Disk: 120 GiB root or data volume
+- Architecture: must match the release artifact, for example `linux-arm64` requires an ARM64 host
+
+Install host packages on Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-v2 zstd tar openssl curl python3
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Log out and back in after adding the user to the `docker` group, or run
+deployment commands with `sudo`.
 
 ## Runtime Layout
 
