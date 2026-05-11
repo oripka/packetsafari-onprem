@@ -143,7 +143,7 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
 - `upgrade --manifest` runs a connected upgrade: validate the manifest, verify the license, stop app services, back up PostgreSQL and `/storage`, pull the target images, render Compose, run migrations from the target backend image, start with `--pull never`, run health checks, and promote only after success.
-- `upgrade --bundle` runs the same transaction without network access: verify `checksums.txt.sig`, verify all file checksums, load Docker images from the bundle, retag them as local offline images, render Compose to those local refs, and start with `--pull never`.
+- `upgrade --bundle` runs the same transaction without network access: verify `checksums.txt.sig`, verify all file checksums, load Docker images from the bundle, retag them as local `packetsafari/<service>:<version>` images, render Compose to those local refs, and start with `--pull never`.
 - `rollback` restores the latest full snapshot, including PostgreSQL and `/storage`. Legacy metadata-only snapshots are still supported but are reported as metadata-only restores.
 
 ## Single-Host SaaS Upgrade Profile

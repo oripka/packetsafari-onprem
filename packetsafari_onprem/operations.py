@@ -1965,7 +1965,7 @@ def _image_archive_service(path: Path) -> str:
 
 def _offline_image_ref(service: str, version_value: str) -> str:
     safe_version = re.sub(r"[^0-9A-Za-z_.-]+", "-", version_value.strip() or "release")
-    return f"packetsafari-offline/{service}:{safe_version}"
+    return f"packetsafari/{service}:{safe_version}"
 
 
 def _inspect_image_id(ref: str) -> str:

@@ -171,7 +171,7 @@ in onboarding mode.
 4. Check `minUpgradeableFrom`, `upgradeableFrom`, and required env keys.
 5. Stop frontend, backend, worker, and sharkd.
 6. Back up metadata, PostgreSQL, and `/storage`.
-7. Pull connected images, or load offline image archives and retag local refs.
+7. Pull connected images, or load offline image archives and retag them as local `packetsafari/<service>:<version>` refs.
 8. Render the target Compose file.
 9. Start PostgreSQL/Redis and run migrations from the target backend image.
 10. Start all services with `docker compose up -d --pull never`.

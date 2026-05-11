@@ -22,6 +22,7 @@ APP_SERVICES = {
     "backend": "backend-production",
     "sharkd": "sharkd-production",
 }
+IMAGE_REPOSITORY_PREFIX = "packetsafari"
 INFRA_IMAGES = {
     "redis": "redis/redis-stack-server:latest",
     "postgres": "postgres:16",
@@ -101,7 +102,7 @@ def git_value(app_root: Path, args: list[str]) -> str:
 def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_cache_bust: str) -> dict[str, str]:
     images: dict[str, str] = {}
     for service, target in APP_SERVICES.items():
-        image = f"packetsafari-local/{service}:{version}"
+        image = f"{IMAGE_REPOSITORY_PREFIX}/{service}:{version}"
         print(f"Building {service} image: {image}")
         run(
             [
@@ -129,7 +130,7 @@ def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_c
 def prepare_infra_images(version: str, *, pull: bool) -> dict[str, str]:
     images: dict[str, str] = {}
     for service, source in INFRA_IMAGES.items():
-        target = f"packetsafari-local/{service}:{version}"
+        target = f"{IMAGE_REPOSITORY_PREFIX}/{service}:{version}"
         if pull:
             print(f"Pulling {source}")
             run(["docker", "image", "pull", source])
@@ -289,7 +290,7 @@ def main() -> int:
     parser.add_argument("--output-dir")
     parser.add_argument("--platform", default=default_docker_platform(), help="Image platform to build, defaults to native host architecture or DOCKER_PLATFORM.")
     parser.add_argument("--wireshark-cache-bust", default="local-release")
-    parser.add_argument("--skip-build", action="store_true", help="Use existing packetsafari-local/* image tags.")
+    parser.add_argument("--skip-build", action="store_true", help="Use existing packetsafari/* image tags.")
     parser.add_argument("--skip-infra-pull", action="store_true", help="Do not pull postgres/redis before tagging local copies.")
     parser.add_argument("--no-dev-license", action="store_true", help="Do not generate a development license token.")
     parser.add_argument("--customer-email", default="local-dev@packetsafari.com")
@@ -307,7 +308,7 @@ def main() -> int:
 
     if args.skip_build:
         images = {
-            service: f"packetsafari-local/{service}:{version}"
+            service: f"{IMAGE_REPOSITORY_PREFIX}/{service}:{version}"
             for service in APP_SERVICES
         }
         images["worker"] = images["backend"]
