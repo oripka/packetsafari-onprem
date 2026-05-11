@@ -144,6 +144,16 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--saas-operator-token", help="Internal SaaS deployment token. May also be read from the host secret file or environment.")
     upgrade.add_argument("--health-timeout", type=int, default=180)
     upgrade.add_argument("--skip-health-check", action="store_true")
+    upgrade.add_argument(
+        "--skip-image-pull",
+        action="store_true",
+        help="Do not pull images for manifest upgrades. Intended for local registry mirrors and disposable upgrade simulations where images are already present.",
+    )
+    upgrade.add_argument(
+        "--simulate-failure-phase",
+        choices=["preflight", "compose", "migration", "healthcheck", "promote"],
+        help="Disposable test-host only: fail at a selected upgrade phase after optional DB/storage mutation. Requires PACKETSAFARI_ENABLE_UPGRADE_SIMULATION=true.",
+    )
 
     rollback = subparsers.add_parser("rollback", help="Restore the latest runtime snapshot.")
     rollback.add_argument(

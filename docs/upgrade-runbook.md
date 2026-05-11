@@ -201,6 +201,47 @@ The migration and promotion gates stay the same.
   runtime metadata automatically, keep traffic stopped, and restore data from
   the external backup before restarting service.
 
+## Upgrade Failure Drills
+
+Run these only on disposable development hosts. The simulation flag is guarded
+so it cannot be triggered accidentally in customer environments.
+
+```bash
+PACKETSAFARI_ENABLE_UPGRADE_SIMULATION=true \
+  packetsafari-ops upgrade \
+    --manifest ./release-manifest.json \
+    --profile onprem \
+    --backup-mode inline \
+    --simulate-failure-phase migration
+```
+
+Supported phases are `preflight`, `compose`, `migration`, `healthcheck`, and
+`promote`. Migration, health-check, and promotion simulations create a temporary
+PostgreSQL table and `/storage/upgrade-simulated-corruption.txt` before failing.
+After rollback, verify both are absent and the host is serving the previous
+release:
+
+```bash
+packetsafari-ops status --json
+docker exec packetsafari-postgres psql -U packetsafari -d packetsafari \
+  -Atc "select coalesce(to_regclass('public.packetsafari_upgrade_simulated_corruption')::text, 'absent');"
+docker exec packetsafari-backend test ! -e /storage/upgrade-simulated-corruption.txt
+curl -fsS http://127.0.0.1:3000/api/v2/health
+```
+
+Storage backups must not contain `/storage/onprem`; that path is the host
+runtime root bind-mounted into the app containers, not customer capture data.
+Check the latest snapshot with:
+
+```bash
+latest="$(find /opt/packetsafari/backups -mindepth 1 -maxdepth 1 -type d | sort | tail -1)"
+tar -tf "$latest/storage.tar" | grep -E '(^|/)onprem(/|$)' && echo "invalid backup"
+```
+
+If `docker compose stop` hangs on a service, `packetsafari-ops` enforces a
+host-side timeout and falls back to `docker compose kill` for the requested
+services before continuing rollback or upgrade.
+
 ## Bundle Build
 
 ```bash

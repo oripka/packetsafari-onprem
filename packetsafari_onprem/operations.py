@@ -48,6 +48,7 @@ INVALID_REQUIRED_ENV_VALUES = {
     "ps_proxy_paddle_api_key",
 }
 BACKUP_MODES = {"inline", "require-recent", "skip"}
+UPGRADE_SIMULATION_PHASES = {"preflight", "compose", "migration", "healthcheck", "promote"}
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
@@ -282,6 +283,46 @@ def resolve_backup_mode(args, *, profile: str) -> str:
     if mode == "skip" and not _truthy(os.getenv("PACKETSAFARI_ALLOW_UNBACKED_UPGRADE")):
         raise RuntimeError("Unbacked upgrades are disabled. Set PACKETSAFARI_ALLOW_UNBACKED_UPGRADE=true only for disposable development hosts.")
     return mode
+
+
+def requested_upgrade_simulation_phase(args) -> str:
+    phase = str(getattr(args, "simulate_failure_phase", "") or "").strip().lower()
+    if not phase:
+        return ""
+    if phase not in UPGRADE_SIMULATION_PHASES:
+        raise RuntimeError(f"Unsupported upgrade simulation failure phase: {phase}")
+    if not _truthy(os.getenv("PACKETSAFARI_ENABLE_UPGRADE_SIMULATION")):
+        raise RuntimeError("Upgrade failure simulation is disabled. Set PACKETSAFARI_ENABLE_UPGRADE_SIMULATION=true only on disposable test hosts.")
+    return phase
+
+
+def maybe_fail_upgrade_simulation(layout: RuntimeLayout, args, phase: str) -> None:
+    requested = requested_upgrade_simulation_phase(args)
+    if requested != phase:
+        return
+    if phase in {"migration", "healthcheck", "promote"}:
+        postgres = _postgres_env(layout)
+        env = {"PGPASSWORD": postgres["POSTGRES_PASSWORD"]}
+        docker_compose_exec(
+            layout,
+            "postgres",
+            [
+                "psql",
+                "-U",
+                postgres["POSTGRES_USER"],
+                "-d",
+                postgres["POSTGRES_DB"],
+                "-c",
+                "create table if not exists packetsafari_upgrade_simulated_corruption(id integer primary key, phase text); insert into packetsafari_upgrade_simulated_corruption(id, phase) values (1, 'simulation') on conflict (id) do update set phase = excluded.phase;",
+            ],
+            env=env,
+        )
+        docker_compose_run(
+            layout,
+            "backend",
+            ["sh", "-c", "printf simulation > /storage/upgrade-simulated-corruption.txt"],
+        )
+    raise RuntimeError(f"Simulated upgrade failure during {phase}.")
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -968,6 +1009,11 @@ def sync_bundle(layout: RuntimeLayout) -> None:
         if child.name in {"install.sh", "upgrade.sh", "rollback.sh", "install-helper.sh", ".venv", "build", "packetsafari_onprem.egg-info"}:
             continue
         target = destination / child.name
+        try:
+            if child.resolve() == target.resolve():
+                continue
+        except FileNotFoundError:
+            pass
         if child.is_dir():
             shutil.copytree(
                 child,
@@ -1406,12 +1452,18 @@ def _compose_file_args(layout: RuntimeLayout) -> list[str]:
     return args
 
 
+def _compose_env_file_args(layout: RuntimeLayout) -> list[str]:
+    args = ["--env-file", str(layout.runtime_env_path)]
+    if layout.runtime_sizing_env_path.exists():
+        args.extend(["--env-file", str(layout.runtime_sizing_env_path)])
+    return args
+
+
 def _compose_base_command(layout: RuntimeLayout) -> list[str]:
     return [
         "docker",
         "compose",
-        "--env-file",
-        str(layout.runtime_env_path),
+        *_compose_env_file_args(layout),
         *_compose_file_args(layout),
         *_compose_logging_args(layout.runtime_env_path),
     ]
@@ -1479,7 +1531,13 @@ def docker_compose_stop(layout: RuntimeLayout, *, services: list[str] | None = N
     command = [*_compose_base_command(layout), "stop", "-t", str(timeout)]
     if services:
         command.extend(services)
-    subprocess.run(command, check=True)
+    try:
+        subprocess.run(command, check=True, timeout=timeout + 30)
+    except subprocess.TimeoutExpired:
+        kill_command = [*_compose_base_command(layout), "kill"]
+        if services:
+            kill_command.extend(services)
+        subprocess.run(kill_command, check=True)
 
 
 def docker_compose_run(
@@ -1619,7 +1677,11 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         'PACKETSAFARI_CAPTURE_SHARKD_PROTOCOL="ws"',
         'PACKETSAFARI_PUBLIC_BASE_URL=""',
         'CORS_ALLOWED_ORIGINS=""',
-        'PACKETSAFARI_AUTH_COOKIE_SECURE="true"',
+        # Fresh on-prem installs commonly start over plain HTTP on an appliance
+        # IP address. Secure cookies would not be sent by browsers in that mode.
+        # Operators should set this to true when publishing PacketSafari behind
+        # HTTPS.
+        'PACKETSAFARI_AUTH_COOKIE_SECURE="false"',
         'NUXT_PUBLIC_API_BASE="/api/v2/"',
         'NUXT_PUBLIC_SHARKD_WS_URL=""',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
@@ -1737,7 +1799,7 @@ def status(layout: RuntimeLayout) -> dict:
         "composeSizingFile": str(layout.compose_sizing_file),
         "composeFiles": compose_files,
         "sizing": _read_json(layout.sizing_state_path, {}),
-        "backups": [path.name for path in sorted(layout.backup_dir.glob("*"), reverse=True)[:10]],
+        "backups": [path.name for path in sorted(layout.backup_dir.glob("*"), reverse=True) if path.is_dir()][:10],
     }
 
 
@@ -1841,7 +1903,7 @@ def backup_storage(layout: RuntimeLayout, snapshot_dir: Path) -> None:
     docker_compose_run(
         layout,
         "backend",
-        ["sh", "-c", "tar -C /storage -cpf /backup/storage.tar ."],
+        ["sh", "-c", "tar -C /storage --exclude=./onprem -cpf /backup/storage.tar ."],
         extra_volumes=[f"{snapshot_dir}:/backup"],
     )
 
@@ -1856,7 +1918,7 @@ def restore_storage(layout: RuntimeLayout, snapshot_dir: Path) -> None:
         [
             "sh",
             "-c",
-            "find /storage -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -C /storage -xpf /backup/storage.tar",
+            "find /storage -mindepth 1 -maxdepth 1 ! -name onprem -exec rm -rf -- {} + && tar -C /storage --exclude=./onprem -xpf /backup/storage.tar",
         ],
         extra_volumes=[f"{snapshot_dir}:/backup"],
     )
@@ -2253,6 +2315,15 @@ def _http_probe(url: str, *, timeout: int = 8) -> dict[str, object]:
         return {"ok": False, "status": None, "error": str(exc)}
 
 
+def _frontend_probe_base(local_api_base: str, public_base_url: str) -> str:
+    if public_base_url:
+        return public_base_url.rstrip("/")
+    parsed = urllib.parse.urlparse(local_api_base)
+    if parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 8080:
+        return urllib.parse.urlunparse((parsed.scheme or "http", f"{parsed.hostname}:3000", "", "", "", "")).rstrip("/")
+    return local_api_base.rstrip("/")
+
+
 def _compose_service_status(layout: RuntimeLayout) -> dict[str, object]:
     if not layout.compose_file.exists():
         return {"ok": False, "error": "compose_file_missing"}
@@ -2296,8 +2367,9 @@ def doctor_deployment(args) -> dict:
     runtime_env = parse_env_file(layout.runtime_env_path) if layout.runtime_env_path.exists() else {}
     checks: list[dict[str, object]] = []
 
-    def add_check(name: str, ok: bool, **details: object) -> None:
-        checks.append({"name": name, "ok": bool(ok), **details})
+    def add_check(name: str, check_ok: bool, **details: object) -> None:
+        details.pop("ok", None)
+        checks.append({"name": name, "ok": bool(check_ok), **details})
 
     try:
         required = _merged_required_env_keys(manifest, profile=profile)
@@ -2325,7 +2397,8 @@ def doctor_deployment(args) -> dict:
     config_info = _http_probe(f"{local_api_base}/api/v2/config/info")
     add_check("backend_config_info", bool(config_info.get("ok")), **config_info)
 
-    runtime_config = _http_probe(f"{local_api_base}/runtime-config.json")
+    frontend_base = _frontend_probe_base(local_api_base, public_base_url)
+    runtime_config = _http_probe(f"{frontend_base}/runtime-config.json")
     add_check("frontend_runtime_config", bool(runtime_config.get("ok")), **runtime_config)
 
     compose = _compose_service_status(layout)
@@ -2385,6 +2458,22 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
     }
 
 
+def record_upgrade_rollback_state(layout: RuntimeLayout, *, phase: str, mode: str, snapshot_dir: Path) -> None:
+    state = _read_json(layout.deployment_state_path, {})
+    state["lastAction"] = {
+        "type": "upgrade",
+        "status": "rolled_back",
+        "message": f"Upgrade failed during {phase}; restored previous release with {mode}.",
+        "updatedAt": utc_now(),
+    }
+    rollback = state.setdefault("rollback", {})
+    rollback["latestSnapshot"] = str(snapshot_dir)
+    rollback["rollbackMode"] = "restore"
+    rollback["lastFailurePhase"] = phase
+    rollback["lastRestoreMode"] = mode
+    _write_json(layout.deployment_state_path, state)
+
+
 def upgrade_release(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
@@ -2406,6 +2495,7 @@ def upgrade_release(args) -> dict:
                     raise RuntimeError("upgrade requires --manifest or --bundle.")
                 target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
             setattr(args, "_doctor_manifest_path", str(target_manifest_path))
+            maybe_fail_upgrade_simulation(layout, args, "preflight")
 
             manifest = _read_json(target_manifest_path, {})
             validate_upgrade_path(layout, manifest)
@@ -2450,23 +2540,29 @@ def upgrade_release(args) -> dict:
             phase = "compose"
             render_compose(layout, target_manifest_path)
             render_logging_config(layout)
-            if source == "manifest":
+            maybe_fail_upgrade_simulation(layout, args, "compose")
+            if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):
                 write_helper_status(layout, status="upgrading", message="Pulling target release images.")
                 docker_compose_pull(layout)
+            elif source == "manifest":
+                write_helper_status(layout, status="upgrading", message="Skipping image pull; using images already present on this host.")
 
             phase = "migration"
             write_helper_status(layout, status="upgrading", message="Running target database migrations.")
             run_target_migrations(layout)
+            maybe_fail_upgrade_simulation(layout, args, "migration")
 
             phase = "healthcheck"
             write_helper_status(layout, status="upgrading", message="Starting target release and running health checks.")
             docker_compose_up(layout, pull_policy="never")
+            maybe_fail_upgrade_simulation(layout, args, "healthcheck")
             if not bool(getattr(args, "skip_health_check", False)):
                 wait_for_health(timeout_seconds=int(getattr(args, "health_timeout", 180) or 180))
                 if profile == "saas":
                     assert_doctor_ok(args)
 
             phase = "promote"
+            maybe_fail_upgrade_simulation(layout, args, "promote")
             return _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
         except Exception as exc:
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")
@@ -2476,6 +2572,7 @@ def upgrade_release(args) -> dict:
                 mode = "full data restore" if restore_data else "metadata restore"
                 try:
                     restore_snapshot(layout, snapshot_dir, restore_data=restore_data)
+                    record_upgrade_rollback_state(layout, phase=phase, mode=mode, snapshot_dir=snapshot_dir)
                     write_helper_status(layout, status="rolled_back", message=f"Upgrade failed during {phase}; restored previous release with {mode}.")
                 except Exception as restore_exc:
                     raise RuntimeError(
