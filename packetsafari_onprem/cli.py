@@ -16,6 +16,7 @@ if __package__ in {None, ""}:
         detect_runtime_root,
         diagnostics_logs,
         diagnostics_restart,
+        doctor_deployment,
         configure_required_env,
         install_release,
         rollback_release,
@@ -37,6 +38,7 @@ else:
         detect_runtime_root,
         diagnostics_logs,
         diagnostics_restart,
+        doctor_deployment,
         configure_required_env,
         install_release,
         rollback_release,
@@ -106,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show installer/runtime status.")
     status_parser.add_argument("--json", action="store_true")
+
+    doctor = subparsers.add_parser("doctor", help="Run deployment readiness checks.")
+    doctor.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
+    doctor.add_argument("--manifest", help="Release manifest to use for required env checks. Defaults to the active manifest.")
+    doctor.add_argument("--api-base-url")
 
     upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest or offline bundle.")
     source = upgrade.add_mutually_exclusive_group(required=True)
@@ -202,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(state, indent=2))
             else:
                 print("No deployment state found.")
+        return 0
+    if args.command == "doctor":
+        print(json.dumps(doctor_deployment(args), indent=2))
         return 0
     if args.command == "upgrade":
         print(json.dumps(upgrade_release(args), indent=2))

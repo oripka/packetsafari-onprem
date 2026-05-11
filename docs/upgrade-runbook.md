@@ -73,6 +73,7 @@ use the same release artifacts but select the SaaS profile:
 ```bash
 packetsafari-ops config check-env --profile saas --manifest ./release-manifest.json
 packetsafari-ops config prompt-env --profile saas --manifest ./release-manifest.json
+packetsafari-ops doctor --profile saas --manifest ./release-manifest.json
 packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
 packetsafari-ops rollback --profile saas
 ```
@@ -81,6 +82,12 @@ The SaaS profile skips customer license entitlement checks only after the host
 proves it is a PacketSafari-operated SaaS deployment. Install a high-entropy
 operator token at `/opt/packetsafari/secrets/saas-operator-token`, then put its
 SHA-256 digest in either the release manifest or the host environment:
+
+Before promotion, SaaS upgrades run `doctor --profile saas`. The doctor check
+rejects missing or placeholder `PACKETSAFARI_PUBLIC_BASE_URL`,
+`OPENAI_API_KEY`, `PACKETSAFARI_PADDLE_API_KEY`, and
+`PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, then probes backend health/config,
+frontend `runtime-config.json`, and Compose service state.
 
 ```json
 {

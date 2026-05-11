@@ -1118,7 +1118,17 @@ def _profile_required_env_keys(profile: str) -> list[str]:
 
 def _merged_required_env_keys(manifest: dict, *, profile: str) -> list[str]:
     keys: list[str] = []
-    for item in _profile_required_env_keys(profile) + [str(item).strip() for item in (manifest.get("requiredEnv") or [])]:
+    profile_required_env = []
+    profile_required = manifest.get("profileRequiredEnv")
+    if isinstance(profile_required, dict):
+        profile_items = profile_required.get(profile)
+        if isinstance(profile_items, list):
+            profile_required_env = [str(item).strip() for item in profile_items]
+    for item in (
+        _profile_required_env_keys(profile)
+        + profile_required_env
+        + [str(item).strip() for item in (manifest.get("requiredEnv") or [])]
+    ):
         key = str(item or "").strip()
         if key and key not in keys:
             keys.append(key)
@@ -1244,7 +1254,7 @@ def _generated_env_default_for_values(key: str, values: dict[str, str]) -> str:
 
 def configure_required_env(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
-    manifest_arg = str(getattr(args, "manifest", "") or "").strip()
+    manifest_arg = str(getattr(args, "doctor_manifest", "") or getattr(args, "_doctor_manifest_path", "") or getattr(args, "manifest", "") or "").strip()
     if not manifest_arg:
         raise RuntimeError(f"config {getattr(args, 'action', '')} requires --manifest.")
     ensure_runtime_dirs(layout)
@@ -2213,6 +2223,125 @@ def wait_for_health(*, url: str = "http://127.0.0.1:8080/api/v2/health", timeout
     raise RuntimeError(f"Health check failed at {url}: {last_error}")
 
 
+def _http_probe(url: str, *, timeout: int = 8) -> dict[str, object]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read(65536)
+            content_type = response.headers.get("content-type", "")
+            payload: object | None = None
+            if "json" in content_type.lower():
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except Exception:
+                    payload = None
+            return {
+                "ok": 200 <= response.status < 300,
+                "status": response.status,
+                "contentType": content_type,
+                "payload": payload,
+            }
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "status": exc.code, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "status": None, "error": str(exc)}
+
+
+def _compose_service_status(layout: RuntimeLayout) -> dict[str, object]:
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+    command = [*_compose_base_command(layout), "ps", "--format", "json"]
+    result = subprocess.run(command, check=False, text=True, capture_output=True)
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stderr.strip() or result.stdout.strip() or f"docker compose ps exited {result.returncode}"}
+    rows: list[dict[str, object]] = []
+    raw_output = result.stdout.strip()
+    try:
+        parsed_output = json.loads(raw_output) if raw_output else None
+        if isinstance(parsed_output, list):
+            rows.extend([row for row in parsed_output if isinstance(row, dict)])
+        elif isinstance(parsed_output, dict):
+            rows.append(parsed_output)
+    except Exception:
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                rows.append(parsed)
+    unhealthy = [
+        row.get("Service") or row.get("Name")
+        for row in rows
+        if str(row.get("State") or row.get("Status") or "").lower() not in {"running", "healthy"}
+        and "running" not in str(row.get("State") or row.get("Status") or "").lower()
+    ]
+    return {"ok": not unhealthy and bool(rows), "services": rows, "unhealthy": unhealthy}
+
+
+def doctor_deployment(args) -> dict:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    profile = deployment_profile(args)
+    manifest_arg = str(getattr(args, "manifest", "") or "").strip()
+    manifest = _read_json(Path(manifest_arg), {}) if manifest_arg else _read_json(layout.release_manifest_path, {})
+    runtime_env = parse_env_file(layout.runtime_env_path) if layout.runtime_env_path.exists() else {}
+    checks: list[dict[str, object]] = []
+
+    def add_check(name: str, ok: bool, **details: object) -> None:
+        checks.append({"name": name, "ok": bool(ok), **details})
+
+    try:
+        required = _merged_required_env_keys(manifest, profile=profile)
+        missing = [key for key in required if not _required_env_value_is_valid(key, str(runtime_env.get(key, "")))]
+        add_check("required_env", not missing, required=required, missing=missing)
+    except Exception as exc:
+        add_check("required_env", False, error=str(exc))
+
+    public_base_url = str(runtime_env.get("PACKETSAFARI_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    cookie_secure = str(runtime_env.get("PACKETSAFARI_AUTH_COOKIE_SECURE") or "true").strip().lower() not in {"0", "false", "no", "off"}
+    if profile == "saas":
+        add_check("saas_public_base_url", public_base_url.startswith(("https://", "http://")), value=public_base_url)
+        add_check(
+            "saas_secure_cookie_scheme",
+            (public_base_url.startswith("https://") and cookie_secure) or not public_base_url,
+            publicBaseUrl=public_base_url,
+            cookieSecure=cookie_secure,
+            message="SaaS should use HTTPS with secure cookies. Use HTTP only on disposable development hosts.",
+        )
+
+    local_api_base = str(getattr(args, "api_base_url", "") or DEFAULT_API_BASE_URL).rstrip("/")
+    health = _http_probe(f"{local_api_base}/api/v2/health")
+    add_check("backend_health", bool(health.get("ok")), **health)
+
+    config_info = _http_probe(f"{local_api_base}/api/v2/config/info")
+    add_check("backend_config_info", bool(config_info.get("ok")), **config_info)
+
+    runtime_config = _http_probe(f"{local_api_base}/runtime-config.json")
+    add_check("frontend_runtime_config", bool(runtime_config.get("ok")), **runtime_config)
+
+    compose = _compose_service_status(layout)
+    add_check("compose_services", bool(compose.get("ok")), **compose)
+
+    ok = all(bool(check.get("ok")) for check in checks)
+    return {
+        "ok": ok,
+        "profile": profile,
+        "runtimeRoot": str(layout.runtime_root),
+        "manifest": manifest_arg or str(layout.release_manifest_path),
+        "checks": checks,
+    }
+
+
+def assert_doctor_ok(args) -> dict:
+    payload = doctor_deployment(args)
+    if not payload.get("ok"):
+        failed = [str(check.get("name")) for check in payload.get("checks", []) if not check.get("ok")]
+        raise RuntimeError(f"Deployment readiness checks failed: {', '.join(failed)}")
+    return payload
+
+
 def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, *, source: str, profile: str, backup_mode: str) -> dict:
     shutil.copy2(layout.target_release_manifest_path, layout.release_manifest_path)
     state = _read_json(layout.deployment_state_path, {})
@@ -2269,6 +2398,7 @@ def upgrade_release(args) -> dict:
                 if not manifest_arg:
                     raise RuntimeError("upgrade requires --manifest or --bundle.")
                 target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
+            setattr(args, "_doctor_manifest_path", str(target_manifest_path))
 
             manifest = _read_json(target_manifest_path, {})
             validate_upgrade_path(layout, manifest)
@@ -2326,6 +2456,8 @@ def upgrade_release(args) -> dict:
             docker_compose_up(layout, pull_policy="never")
             if not bool(getattr(args, "skip_health_check", False)):
                 wait_for_health(timeout_seconds=int(getattr(args, "health_timeout", 180) or 180))
+                if profile == "saas":
+                    assert_doctor_ok(args)
 
             phase = "promote"
             return _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)

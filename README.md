@@ -154,6 +154,7 @@ single-EC2 SaaS deployment:
 ```bash
 packetsafari-ops config check-env --profile saas --manifest ./release-manifest.json
 packetsafari-ops config prompt-env --profile saas --manifest ./release-manifest.json
+packetsafari-ops doctor --profile saas --manifest ./release-manifest.json
 packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
 packetsafari-ops rollback --profile saas
 ```
@@ -161,9 +162,16 @@ packetsafari-ops rollback --profile saas
 The SaaS profile is intentionally different from on-prem:
 
 - it skips customer entitlement checks only after an internal SaaS operator token is verified
-- it still validates the release manifest, upgrade path, required env, migrations, and health checks
+- it still validates the release manifest, upgrade path, required env, migrations, container health, and product readiness
 - it defaults to `--backup-mode require-recent`, meaning it requires proof of a fresh external backup before migrations
 - it records only metadata snapshots unless `--backup-mode inline` is selected
+
+`doctor --profile saas` checks product readiness, not just Docker liveness. It
+verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL`,
+`OPENAI_API_KEY`, `PACKETSAFARI_PADDLE_API_KEY`, and
+`PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, probes backend health/config, checks
+frontend `runtime-config.json`, and inspects Compose service state. SaaS
+upgrades run this readiness check after startup and before release promotion.
 
 Install the operator token at `/opt/packetsafari/secrets/saas-operator-token`
 and set the expected SHA-256 digest in the manifest at
