@@ -148,6 +148,8 @@ services:
     restart: always
     env_file:
       - "{{ runtime_env_path }}"
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-packetsafari} -d $${POSTGRES_DB:-packetsafari}"]
       interval: 5s

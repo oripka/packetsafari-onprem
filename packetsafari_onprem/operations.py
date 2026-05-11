@@ -553,6 +553,13 @@ def _compose_memory(value: int) -> str:
     return f"{mib}m"
 
 
+def _postgres_memory(value: int) -> str:
+    mib = max(1, int(round(float(value) / float(MIB))))
+    if mib >= 1024 and mib % 1024 == 0:
+        return f"{mib // 1024}GB"
+    return f"{mib}MB"
+
+
 def _service_cpu_plan(vcpus: int, profile: str) -> dict[str, float]:
     if profile == "large":
         frontend = 0.75
@@ -703,19 +710,19 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "CELERY_INDEX_CONCURRENCY": str(index_concurrency),
         "CELERY_AICHAT_LOGLEVEL": "info",
         "CELERY_INDEX_LOGLEVEL": "info",
-        "UWSGI_PROCESSES": str(uwsgi_processes),
-        "UWSGI_THREADS": "2",
-        "UWSGI_RELOAD_ON_RSS_MB": str(reload_on_rss),
+        "PACKETSAFARI_UWSGI_PROCESSES": str(uwsgi_processes),
+        "PACKETSAFARI_UWSGI_THREADS": "2",
+        "PACKETSAFARI_UWSGI_RELOAD_ON_RSS_MB": str(reload_on_rss),
         "PACKETSAFARI_CAPTURE_SHARKD_LRU_SIZE": str(sharkd_lru_size),
         "PACKETSAFARI_SHARKD_PACKETSTATS_RULE_SHARD_WORKERS": str(rule_shard_workers),
         "HEAVY_STAGE_MIN_AVAILABLE_MIB": str({"small": 768, "medium": 1024, "large": 1536}[effective_profile]),
-        "HEAVY_STAGE_MEMORY_SOFT_LIMIT_PERCENT": str({"small": 78.0, "medium": 82.0, "large": 84.0}[effective_profile]),
-        "HEAVY_STAGE_MEMORY_HARD_LIMIT_PERCENT": "90.0",
+        "HEAVY_STAGE_MEMORY_SOFT_LIMIT_PERCENT": str({"small": 78, "medium": 82, "large": 84}[effective_profile]),
+        "HEAVY_STAGE_MEMORY_HARD_LIMIT_PERCENT": "90",
         "PACKETSAFARI_REDIS_MAXMEMORY": _compose_memory(redis_max_bytes),
-        "POSTGRES_SHARED_BUFFERS": _compose_memory(postgres_shared_buffers),
-        "POSTGRES_EFFECTIVE_CACHE_SIZE": _compose_memory(postgres_effective_cache_size),
-        "POSTGRES_WORK_MEM": _compose_memory(postgres_work_mem),
-        "POSTGRES_MAINTENANCE_WORK_MEM": _compose_memory(postgres_maintenance_work_mem),
+        "POSTGRES_SHARED_BUFFERS": _postgres_memory(postgres_shared_buffers),
+        "POSTGRES_EFFECTIVE_CACHE_SIZE": _postgres_memory(postgres_effective_cache_size),
+        "POSTGRES_WORK_MEM": _postgres_memory(postgres_work_mem),
+        "POSTGRES_MAINTENANCE_WORK_MEM": _postgres_memory(postgres_maintenance_work_mem),
     }
 
     return {
@@ -809,13 +816,13 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "      - -c",
         "      - wal_compression=on",
         "      - -c",
-        f"      - shared_buffers={env.get('POSTGRES_SHARED_BUFFERS') or '512m'}",
+        f"      - shared_buffers={env.get('POSTGRES_SHARED_BUFFERS') or '512MB'}",
         "      - -c",
-        f"      - effective_cache_size={env.get('POSTGRES_EFFECTIVE_CACHE_SIZE') or '2g'}",
+        f"      - effective_cache_size={env.get('POSTGRES_EFFECTIVE_CACHE_SIZE') or '2GB'}",
         "      - -c",
-        f"      - work_mem={env.get('POSTGRES_WORK_MEM') or '16m'}",
+        f"      - work_mem={env.get('POSTGRES_WORK_MEM') or '16MB'}",
         "      - -c",
-        f"      - maintenance_work_mem={env.get('POSTGRES_MAINTENANCE_WORK_MEM') or '256m'}",
+        f"      - maintenance_work_mem={env.get('POSTGRES_MAINTENANCE_WORK_MEM') or '256MB'}",
         "      - -c",
         "      - bgwriter_delay=50ms",
         "      - -c",
@@ -885,7 +892,7 @@ def resolve_logging_values(args) -> dict[str, str]:
             return default
         return "true" if str(raw).strip().lower() in {"1", "true", "yes", "y", "on"} else "false"
 
-    if getattr(args, "non_interactive", False):
+    if getattr(args, "non_interactive", False) or not sys.stdin.isatty():
         values["AUDIT_LOG_ENABLED"] = _bool(getattr(args, "audit_log_enabled", None), default=values["AUDIT_LOG_ENABLED"])
         values["AUDIT_LOG_PERSIST"] = _bool(getattr(args, "audit_log_persist", None), default=values["AUDIT_LOG_PERSIST"])
         if getattr(args, "audit_retention_days", None):

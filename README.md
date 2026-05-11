@@ -53,6 +53,7 @@ Bootstrap supports private HTTP/HTTPS download sources through environment varia
 ```bash
 export PACKETSAFARI_ONPREM_RAW_BASE=https://downloads.example.com/packetsafari/onprem/10.0.1
 export PACKETSAFARI_ONPREM_ARCHIVE_URL=https://downloads.example.com/packetsafari/onprem/10.0.1/packetsafari-onprem.tar.gz
+export PACKETSAFARI_ONPREM_BOOTSTRAP_MANIFEST_URL=https://downloads.example.com/packetsafari/onprem/10.0.1/bootstrap-manifest.json
 export PACKETSAFARI_ONPREM_BEARER_TOKEN="$TOKEN"
 curl -fsSL "$PACKETSAFARI_ONPREM_RAW_BASE/bootstrap.sh" | sudo -E bash -s -- install \
   --bundle https://downloads.example.com/packetsafari/releases/packetsafari-10.0.1-offline.tar.zst \
@@ -60,6 +61,8 @@ curl -fsSL "$PACKETSAFARI_ONPREM_RAW_BASE/bootstrap.sh" | sudo -E bash -s -- ins
 ```
 
 Use `PACKETSAFARI_ONPREM_BASIC_AUTH=user:pass` or `PACKETSAFARI_ONPREM_DOWNLOAD_HEADER='x-api-key: ...'` when the hosting layer uses basic auth or a custom header. The same request options are available to `packetsafari-ops install` and `upgrade` as `--download-basic`, `--download-bearer-token`, and repeatable `--download-header`.
+
+For S3 presigned URLs, set `PACKETSAFARI_ONPREM_ARCHIVE_URL` and `PACKETSAFARI_ONPREM_BOOTSTRAP_MANIFEST_URL` to the individual presigned object URLs. The bootstrap script does not require a public bucket.
 
 ## Host Prerequisites
 
@@ -77,7 +80,7 @@ Minimum single-node sizing for test and small deployments:
 - Disk: 120 GiB root or data volume
 - Architecture: must match the release artifact, for example `linux-arm64` requires an ARM64 host
 
-Install host packages on Ubuntu:
+Bootstrap installs these packages automatically on Ubuntu when it is run as root. To install them manually, or to disable automatic package installation with `PACKETSAFARI_ONPREM_INSTALL_HOST_DEPS=false`, use:
 
 ```bash
 sudo apt-get update
@@ -321,10 +324,11 @@ On the Ubuntu VM:
 ```bash
 export PACKETSAFARI_ONPREM_RAW_BASE=http://<mac-ip>:9000
 export PACKETSAFARI_ONPREM_ARCHIVE_URL=http://<mac-ip>:9000/packetsafari-onprem.tar.gz
+export PACKETSAFARI_ONPREM_BOOTSTRAP_MANIFEST_URL=http://<mac-ip>:9000/bootstrap-manifest.json
 curl -fsSL http://<mac-ip>:9000/bootstrap.sh | sudo -E bash -s -- install \
   --bundle http://<mac-ip>:9000/packetsafari-10.0.0-beta.9-offline.tar.zst \
   --bundle-public-key http://<mac-ip>:9000/release-public.pem \
   --allow-bundled-license-public-key
 ```
 
-The local release helper intentionally generates development-only license and release signing keys in the output directory. That is suitable for VM validation only. Customer releases must use PacketSafari-controlled signing keys and a customer-specific entitlement token from an authenticated distribution channel.
+The local release helper intentionally generates development-only license and release signing keys under `/Users/otr/packetsafari-data/release-keys` by default, outside the distributable release directory. That is suitable for VM validation only. Customer releases must use PacketSafari-controlled signing keys and a customer-specific entitlement token from an authenticated distribution channel.

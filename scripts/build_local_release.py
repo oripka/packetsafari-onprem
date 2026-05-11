@@ -39,8 +39,8 @@ def default_docker_platform() -> str:
     return "linux/amd64"
 
 
-def run(command: list[str], *, cwd: Path | None = None) -> None:
-    subprocess.run(command, check=True, cwd=cwd)
+def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+    subprocess.run(command, check=True, cwd=cwd, env=env)
 
 
 def capture(command: list[str], *, cwd: Path | None = None) -> str:
@@ -101,6 +101,7 @@ def git_value(app_root: Path, args: list[str]) -> str:
 
 def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_cache_bust: str) -> dict[str, str]:
     images: dict[str, str] = {}
+    docker_env = {**os.environ, "DOCKER_BUILDKIT": os.environ.get("DOCKER_BUILDKIT", "1")}
     for service, target in APP_SERVICES.items():
         image = f"{IMAGE_REPOSITORY_PREFIX}/{service}:{version}"
         print(f"Building {service} image: {image}")
@@ -121,6 +122,7 @@ def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_c
                 ".",
             ],
             cwd=app_root,
+            env=docker_env,
         )
         images[service] = image
     images["worker"] = images["backend"]
@@ -164,8 +166,7 @@ def ensure_rsa_key(private_key: Path, public_key: Path) -> None:
     run(["openssl", "rsa", "-in", str(private_key), "-pubout", "-out", str(public_key)])
 
 
-def create_dev_license(output_dir: Path, version: str, channel: str, *, customer_email: str) -> tuple[Path, Path]:
-    key_dir = output_dir / "keys"
+def create_dev_license(output_dir: Path, key_dir: Path, version: str, channel: str, *, customer_email: str) -> tuple[Path, Path]:
     private_key = key_dir / "dev-license-private.pem"
     public_key = output_dir / "license-public.pem"
     ensure_rsa_key(private_key, public_key)
@@ -293,6 +294,7 @@ def main() -> int:
     parser.add_argument("--skip-infra-pull", action="store_true", help="Do not pull postgres/redis before tagging local copies.")
     parser.add_argument("--no-dev-license", action="store_true", help="Do not generate a development license token.")
     parser.add_argument("--customer-email", default="local-dev@packetsafari.com")
+    parser.add_argument("--key-dir", help="Private signing key directory. Defaults outside the distributable output directory.")
     parser.add_argument("--split-size-mb", type=int, default=0)
     args = parser.parse_args()
 
@@ -303,6 +305,7 @@ def main() -> int:
         raise SystemExit(f"PacketSafari app Dockerfile not found under {app_root}")
     version = str(args.version or read_app_version(app_root)).strip()
     output_dir = Path(args.output_dir or (DEFAULT_DATA_ROOT / "releases" / "local" / version)).expanduser().resolve()
+    key_dir = Path(args.key_dir or (DEFAULT_DATA_ROOT / "release-keys" / "local" / version)).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.skip_build:
@@ -320,7 +323,7 @@ def main() -> int:
     if not notes.exists():
         notes.write_text(f"PacketSafari local on-prem release {version}.\n", encoding="utf-8")
 
-    release_private_key = output_dir / "keys" / "release-private.pem"
+    release_private_key = key_dir / "release-private.pem"
     release_public_key = output_dir / "release-public.pem"
     ensure_rsa_key(release_private_key, release_public_key)
 
@@ -341,7 +344,7 @@ def main() -> int:
     ]
     dev_license = not args.no_dev_license
     if dev_license:
-        token, license_public_key = create_dev_license(output_dir, version, args.channel, customer_email=args.customer_email)
+        token, license_public_key = create_dev_license(output_dir, key_dir, version, args.channel, customer_email=args.customer_email)
         bundle_args.extend(["--license", str(token), "--license-public-key", str(license_public_key)])
     if args.split_size_mb:
         bundle_args.extend(["--split-size-mb", str(args.split_size_mb)])
@@ -357,6 +360,7 @@ def main() -> int:
         "manifest": str(manifest),
         "bootstrap": str(output_dir / "bootstrap.sh"),
         "installNotes": str(install_notes),
+        "privateKeyDir": str(key_dir),
         "devLicenseIncluded": dev_license,
     }, indent=2))
     return 0

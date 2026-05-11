@@ -15,7 +15,9 @@
       4983
     ],
     "allowUnixSockets": [
-      "${GUARD_RUN_DIR}"
+      "${GUARD_RUN_DIR}",
+      "/Users/otr/.docker/run/docker.sock",
+      "/var/run/docker.sock"
     ],
     "allowMachLookup": [
       "com.apple.FSEvents",
@@ -33,19 +35,24 @@
     ],
     "allowRead": [
       "${GUARD_PROJECT_DIR}",
-      "${GUARD_RUN_DIR}"
+      "${GUARD_RUN_DIR}",
+      "/Users/otr/code/packetsafari",
+      "/Users/otr/packetsafari-data",
+      "/Applications/Docker.app/Contents/Resources/bin/docker",
+      "/Applications/Docker.app/Contents/Resources/cli-plugins",
+      "/Users/otr/.docker/run/docker.sock"
     ],
     "allowWrite": [
       "${GUARD_PROJECT_DIR}",
-      "${GUARD_RUN_DIR}"
+      "${GUARD_RUN_DIR}",
+      "/Users/otr/packetsafari-data"
     ],
     "denyWrite": [
       ".env",
       ".env.*",
       "keys/",
       "secrets/",
-      "*.key",
-      "*.pem"
+      "*.key"
     ]
   }
 }
