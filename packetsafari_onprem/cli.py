@@ -16,6 +16,7 @@ if __package__ in {None, ""}:
         detect_runtime_root,
         diagnostics_logs,
         diagnostics_restart,
+        configure_required_env,
         install_release,
         rollback_release,
         runtime_layout,
@@ -36,6 +37,7 @@ else:
         detect_runtime_root,
         diagnostics_logs,
         diagnostics_restart,
+        configure_required_env,
         install_release,
         rollback_release,
         runtime_layout,
@@ -132,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=180,
         help="Maximum accepted age for --backup-proof in require-recent mode.",
     )
+    upgrade.add_argument("--saas-operator-token", help="Internal SaaS deployment token. May also be read from the host secret file or environment.")
     upgrade.add_argument("--health-timeout", type=int, default=180)
     upgrade.add_argument("--skip-health-check", action="store_true")
 
@@ -152,8 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
     onboard.add_argument("action", choices=["schema", "save-draft", "validate", "finalize"])
     onboard.add_argument("--draft-json", default="{}")
 
-    config = subparsers.add_parser("config", help="Inspect managed deployment config.")
-    config.add_argument("action", choices=["show"])
+    config = subparsers.add_parser("config", help="Inspect or update managed deployment config.")
+    config.add_argument("action", choices=["show", "check-env", "prompt-env"])
+    config.add_argument("--manifest", help="Release manifest path or URL used to derive required env keys.")
+    config.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
+    config.add_argument("--output", help="Env file to update for prompt-env. Defaults to the managed runtime env.")
+    add_download_args(config)
 
     iam = subparsers.add_parser("iam", help="Host-side IAM helpers.")
     iam.add_argument("action", choices=["show-initial-admin-command", "set-password"])
@@ -219,7 +226,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0
     if args.command == "config":
-        print(show_runtime_env(runtime_layout(args.runtime_root, args.container_runtime_root)))
+        if args.action == "show":
+            print(show_runtime_env(runtime_layout(args.runtime_root, args.container_runtime_root)))
+        else:
+            print(json.dumps(configure_required_env(args), indent=2))
         return 0
     if args.command == "iam":
         if args.action == "show-initial-admin-command":

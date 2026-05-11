@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import base64
+import getpass
 import hashlib
 import json
 import os
@@ -330,6 +331,46 @@ def verify_external_backup_proof(layout: RuntimeLayout, args, *, max_age_minutes
             f"limit is {max_age_minutes} minutes."
         )
     return proof
+
+
+def _saas_operator_token_candidates(layout: RuntimeLayout, explicit: str | None = None) -> list[str]:
+    candidates: list[str] = []
+    if explicit:
+        candidates.append(str(explicit).strip())
+    env_token = str(os.getenv("PACKETSAFARI_SAAS_OPERATOR_TOKEN") or "").strip()
+    if env_token:
+        candidates.append(env_token)
+    token_path = layout.secrets_dir / "saas-operator-token"
+    if token_path.exists():
+        candidates.append(token_path.read_text(encoding="utf-8").strip())
+    return [candidate for candidate in candidates if candidate]
+
+
+def _manifest_saas_token_hash(manifest: dict) -> str:
+    profiles = manifest.get("deploymentProfiles")
+    if isinstance(profiles, dict):
+        saas = profiles.get("saas")
+        if isinstance(saas, dict):
+            value = str(saas.get("operatorTokenSha256") or "").strip().lower()
+            if value:
+                return value
+    return str(os.getenv("PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256") or "").strip().lower()
+
+
+def verify_saas_operator_authorization(layout: RuntimeLayout, args, manifest: dict) -> None:
+    expected_hash = _manifest_saas_token_hash(manifest)
+    if not expected_hash:
+        raise RuntimeError(
+            "SaaS profile requires an internal operator token hash. Set deploymentProfiles.saas.operatorTokenSha256 "
+            "in the manifest or PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256 on the host."
+        )
+    for token in _saas_operator_token_candidates(layout, getattr(args, "saas_operator_token", None)):
+        if hashlib.sha256(token.encode("utf-8")).hexdigest().lower() == expected_hash:
+            return
+    raise RuntimeError(
+        "SaaS profile is not authorized on this host. Install /opt/packetsafari/secrets/saas-operator-token "
+        "or set PACKETSAFARI_SAAS_OPERATOR_TOKEN for PacketSafari-operated SaaS hosts."
+    )
 
 
 def _truthy(value: object) -> bool:
@@ -1058,6 +1099,105 @@ def validate_required_env(layout: RuntimeLayout, manifest: dict) -> None:
     missing = [key for key in required if not str(runtime_env.get(key, "")).strip()]
     if missing:
         raise RuntimeError(f"Target manifest requires missing runtime env keys: {', '.join(missing)}")
+
+
+def _required_env_keys(manifest: dict) -> list[str]:
+    return [str(item).strip() for item in (manifest.get("requiredEnv") or []) if str(item).strip()]
+
+
+def _secret_env_key(key: str) -> bool:
+    upper = key.upper()
+    return any(marker in upper for marker in ("PASSWORD", "SECRET", "TOKEN", "PRIVATE_KEY", "API_KEY", "CREDENTIAL"))
+
+
+def _generated_env_default(key: str) -> str:
+    upper = key.upper()
+    if upper in {
+        "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
+        "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
+        "REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD",
+        "PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD",
+    }:
+        return secrets.token_urlsafe(48)
+    return ""
+
+
+def configure_required_env(args) -> dict:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    manifest_arg = str(getattr(args, "manifest", "") or "").strip()
+    if not manifest_arg:
+        raise RuntimeError(f"config {getattr(args, 'action', '')} requires --manifest.")
+    ensure_runtime_dirs(layout)
+    manifest_path = materialize_source(
+        manifest_arg,
+        layout.tmp_dir / "downloads",
+        "release manifest",
+        args,
+        default_name="release-manifest.json",
+    )
+    manifest = _read_json(manifest_path, {})
+    required = _required_env_keys(manifest)
+    env_path = Path(str(getattr(args, "output", "") or "")).expanduser() if getattr(args, "output", None) else layout.runtime_env_path
+    existing = parse_env_file(env_path)
+    missing = [key for key in required if not str(existing.get(key, "")).strip()]
+    action = str(getattr(args, "action", "") or "")
+
+    if action == "check-env":
+        return {
+            "profile": deployment_profile(args),
+            "manifest": str(manifest_path),
+            "envPath": str(env_path),
+            "required": required,
+            "missing": missing,
+            "ok": not missing,
+        }
+
+    if action != "prompt-env":
+        raise RuntimeError(f"Unsupported config action for env configuration: {action}")
+
+    values = dict(existing)
+    prompted: list[str] = []
+    for key in missing:
+        generated_default = _generated_env_default(key)
+        if generated_default:
+            prompt = f"{key} [press enter to generate]: "
+        else:
+            prompt = f"{key}: "
+        while True:
+            if _secret_env_key(key):
+                value = getpass.getpass(prompt)
+            else:
+                value = input(prompt)
+            if value.strip():
+                values[key] = value.strip()
+                prompted.append(key)
+                break
+            if generated_default:
+                values[key] = generated_default
+                prompted.append(key)
+                break
+            print(f"{key} is required.")
+
+    write_env_file(
+        env_path,
+        values,
+        header_lines=[
+            "# Managed by PacketSafari ops.",
+            "# Generated/updated by packetsafari-ops config prompt-env.",
+        ],
+    )
+    return {
+        "profile": deployment_profile(args),
+        "manifest": str(manifest_path),
+        "envPath": str(env_path),
+        "required": required,
+        "prompted": prompted,
+        "missingBefore": missing,
+        "missingAfter": [key for key in required if not str(values.get(key, "")).strip()],
+        "ok": True,
+    }
 
 
 def _release_public_key_candidates(layout: RuntimeLayout, explicit: str | None = None) -> list[Path]:
@@ -2001,6 +2141,8 @@ def upgrade_release(args) -> dict:
             validate_upgrade_path(layout, manifest)
             if profile == "onprem":
                 verify_license_allows_release(layout, manifest)
+            else:
+                verify_saas_operator_authorization(layout, args, manifest)
             validate_required_env(layout, manifest)
             external_backup_proof = None
             if backup_mode == "require-recent":
@@ -2015,8 +2157,11 @@ def upgrade_release(args) -> dict:
                 "require-recent": "recording verified external backup proof",
                 "skip": "continuing without a data backup",
             }[backup_mode]
-            write_helper_status(layout, status="upgrading", message=f"Stopping app services and {backup_message}.")
-            docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd"], timeout=120)
+            if layout.compose_file.exists():
+                write_helper_status(layout, status="upgrading", message=f"Stopping app services and {backup_message}.")
+                docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd"], timeout=120)
+            else:
+                write_helper_status(layout, status="upgrading", message=f"No active Compose file found; treating this as a fresh deployment and {backup_message}.")
             snapshot_dir = snapshot_runtime(layout)
             if backup_mode == "inline":
                 complete_full_backup(layout, snapshot_dir)

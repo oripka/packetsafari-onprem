@@ -39,13 +39,39 @@ For the current SaaS deployment model where PacketSafari runs on one EC2 host,
 use the same release artifacts but select the SaaS profile:
 
 ```bash
+packetsafari-ops config check-env --profile saas --manifest ./release-manifest.json
+packetsafari-ops config prompt-env --profile saas --manifest ./release-manifest.json
 packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
 packetsafari-ops rollback --profile saas
 ```
 
-The SaaS profile skips on-prem license entitlement checks and defaults to an
-out-of-band backup policy. By default, the upgrade requires a fresh backup proof
-at `/opt/packetsafari/state/latest-backup.json` before migrations run:
+The SaaS profile skips customer license entitlement checks only after the host
+proves it is a PacketSafari-operated SaaS deployment. Install a high-entropy
+operator token at `/opt/packetsafari/secrets/saas-operator-token`, then put its
+SHA-256 digest in either the release manifest or the host environment:
+
+```json
+{
+  "deploymentProfiles": {
+    "saas": {
+      "operatorTokenSha256": "<sha256-of-token>"
+    }
+  }
+}
+```
+
+Alternatively:
+
+```bash
+export PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256="<sha256-of-token>"
+```
+
+Do not publish that token or hash to customer artifacts. This guard prevents a
+customer from selecting `--profile saas` to bypass the on-prem license path.
+
+The SaaS profile defaults to an out-of-band backup policy. By default, the
+upgrade requires a fresh backup proof at
+`/opt/packetsafari/state/latest-backup.json` before migrations run:
 
 ```json
 {

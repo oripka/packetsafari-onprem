@@ -123,16 +123,24 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 single-EC2 SaaS deployment:
 
 ```bash
+packetsafari-ops config check-env --profile saas --manifest ./release-manifest.json
+packetsafari-ops config prompt-env --profile saas --manifest ./release-manifest.json
 packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
 packetsafari-ops rollback --profile saas
 ```
 
 The SaaS profile is intentionally different from on-prem:
 
-- it skips customer entitlement checks because our SaaS host is operated by us
+- it skips customer entitlement checks only after an internal SaaS operator token is verified
 - it still validates the release manifest, upgrade path, required env, migrations, and health checks
 - it defaults to `--backup-mode require-recent`, meaning it requires proof of a fresh external backup before migrations
 - it records only metadata snapshots unless `--backup-mode inline` is selected
+
+Install the operator token at `/opt/packetsafari/secrets/saas-operator-token`
+and set the expected SHA-256 digest in the manifest at
+`deploymentProfiles.saas.operatorTokenSha256`, or in
+`PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256`. Do not publish this material to
+customer release artifacts.
 
 The default external backup proof path is `/opt/packetsafari/state/latest-backup.json`.
 An EC2 backup job should write this file only after the backup is complete and
