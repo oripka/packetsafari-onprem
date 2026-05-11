@@ -1478,9 +1478,8 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         lines.append(f"{key}={quote_env_value(value)}")
     lines.extend(
         [
-            'PACKETSAFARI_FEATURE_SAAS_PAYWALL_ENABLED="false"',
-            'PACKETSAFARI_FEATURE_COGNITO_ENABLED="false"',
-        ]
+        'PACKETSAFARI_FEATURE_SAAS_PAYWALL_ENABLED="false"',
+    ]
     )
     layout.runtime_env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
