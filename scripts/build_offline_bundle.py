@@ -25,9 +25,10 @@ def image_ref(images: dict, key: str) -> str:
     return str(value or "")
 
 
-def save_image(image: str, output: Path) -> Path:
+def save_image(image: str, output: Path, *, pull: bool) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["docker", "image", "pull", image], check=True)
+    if pull:
+        subprocess.run(["docker", "image", "pull", image], check=True)
     raw = output.with_suffix("")
     subprocess.run(["docker", "image", "save", image, "-o", str(raw)], check=True)
     if shutil.which("zstd"):
@@ -89,7 +90,11 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--release-notes")
     parser.add_argument("--sbom-dir")
+    parser.add_argument("--license", help="Optional license-token.json to include for fresh air-gapped installs.")
+    parser.add_argument("--license-public-key", help="Optional license-public.pem to include for local/dev install bundles.")
+    parser.add_argument("--release-public-key", help="Optional release-public.pem to include next to signed checksums.")
     parser.add_argument("--sign-key", help="Private key used to sign checksums.txt.")
+    parser.add_argument("--no-pull", action="store_true", help="Use local Docker image tags without pulling them first.")
     parser.add_argument("--split-size-mb", type=int, default=0)
     args = parser.parse_args()
 
@@ -105,6 +110,12 @@ def main() -> int:
         shutil.copy2(manifest_path, root / "release-manifest.json")
         if args.release_notes:
             shutil.copy2(Path(args.release_notes).expanduser(), root / "release-notes.md")
+        if args.license:
+            shutil.copy2(Path(args.license).expanduser(), root / "license-token.json")
+        if args.license_public_key:
+            shutil.copy2(Path(args.license_public_key).expanduser(), root / "license-public.pem")
+        if args.release_public_key:
+            shutil.copy2(Path(args.release_public_key).expanduser(), root / "release-public.pem")
         if args.sbom_dir:
             shutil.copytree(Path(args.sbom_dir).expanduser(), root / "sbom", dirs_exist_ok=True)
 
@@ -114,7 +125,7 @@ def main() -> int:
                 continue
             image = image_ref(images, service)
             if image:
-                archive = save_image(image, root / "images" / f"{service}.tar.zst")
+                archive = save_image(image, root / "images" / f"{service}.tar.zst", pull=not args.no_pull)
                 image_metadata.append(
                     {
                         "service": service,

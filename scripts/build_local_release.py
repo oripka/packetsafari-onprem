@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform as host_platform
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_ROOT = Path.home() / "packetsafari-data"
+APP_SERVICES = {
+    "frontend": "frontend-production",
+    "backend": "backend-production",
+    "sharkd": "sharkd-production",
+}
+INFRA_IMAGES = {
+    "redis": "redis/redis-stack-server:latest",
+    "postgres": "postgres:16",
+}
+
+
+def default_docker_platform() -> str:
+    override = os.getenv("DOCKER_PLATFORM")
+    if override:
+        return override
+    machine = host_platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "linux/arm64"
+    return "linux/amd64"
+
+
+def run(command: list[str], *, cwd: Path | None = None) -> None:
+    subprocess.run(command, check=True, cwd=cwd)
+
+
+def capture(command: list[str], *, cwd: Path | None = None) -> str:
+    result = subprocess.run(command, check=True, cwd=cwd, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def require_command(command: str) -> None:
+    if not shutil.which(command):
+        raise SystemExit(f"Required command not found: {command}")
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_app_version(app_root: Path) -> str:
+    version_path = app_root / "configuration" / "app-version.json"
+    payload = json.loads(version_path.read_text(encoding="utf-8"))
+    version = str(payload.get("version") or "").strip()
+    if not version:
+        raise SystemExit(f"Missing version in {version_path}")
+    return version
+
+
+def required_onprem_env(app_root: Path) -> list[str]:
+    registry_path = app_root / "configuration" / "env-registry.json"
+    fallback = [
+        "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
+        "REDIS_PASSWORD",
+        "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
+    ]
+    if not registry_path.exists():
+        return fallback
+    payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    required: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("required") is True and entry.get("lifecycle") == "bootstrap" and isinstance(entry.get("onPrem"), dict):
+            key = str(entry.get("key") or "").strip()
+            if key:
+                required.append(key)
+    return required or fallback
+
+
+def git_value(app_root: Path, args: list[str]) -> str:
+    try:
+        return capture(["git", *args], cwd=app_root)
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_cache_bust: str) -> dict[str, str]:
+    images: dict[str, str] = {}
+    for service, target in APP_SERVICES.items():
+        image = f"packetsafari-local/{service}:{version}"
+        print(f"Building {service} image: {image}")
+        run(
+            [
+                "docker",
+                "build",
+                "--platform",
+                platform,
+                "--target",
+                target,
+                "--build-arg",
+                "WIRESHARK_BUILD_REV=1",
+                "--build-arg",
+                f"WIRESHARK_CACHE_BUST={wireshark_cache_bust}",
+                "-t",
+                image,
+                ".",
+            ],
+            cwd=app_root,
+        )
+        images[service] = image
+    images["worker"] = images["backend"]
+    return images
+
+
+def prepare_infra_images(version: str, *, pull: bool) -> dict[str, str]:
+    images: dict[str, str] = {}
+    for service, source in INFRA_IMAGES.items():
+        target = f"packetsafari-local/{service}:{version}"
+        if pull:
+            print(f"Pulling {source}")
+            run(["docker", "image", "pull", source])
+        run(["docker", "image", "tag", source, target])
+        images[service] = target
+    return images
+
+
+def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str, images: dict[str, str], *, platform: str) -> Path:
+    manifest = {
+        "version": version,
+        "channel": channel,
+        "gitCommit": git_value(app_root, ["rev-parse", "HEAD"]),
+        "gitBranch": git_value(app_root, ["branch", "--show-current"]),
+        "builtAt": datetime.now(timezone.utc).isoformat(),
+        "configSchemaVersion": 1,
+        "platform": platform,
+        "requiredEnv": required_onprem_env(app_root),
+        "images": images,
+    }
+    path = output_dir / "release-manifest.json"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def ensure_rsa_key(private_key: Path, public_key: Path) -> None:
+    if private_key.exists() and public_key.exists():
+        return
+    private_key.parent.mkdir(parents=True, exist_ok=True)
+    run(["openssl", "genrsa", "-out", str(private_key), "3072"])
+    private_key.chmod(0o600)
+    run(["openssl", "rsa", "-in", str(private_key), "-pubout", "-out", str(public_key)])
+
+
+def create_dev_license(output_dir: Path, version: str, channel: str, *, customer_email: str) -> tuple[Path, Path]:
+    key_dir = output_dir / "keys"
+    private_key = key_dir / "dev-license-private.pem"
+    public_key = output_dir / "license-public.pem"
+    ensure_rsa_key(private_key, public_key)
+    token = output_dir / "license-token.json"
+    run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "license_create.py"),
+            "--private-key",
+            str(private_key),
+            "--customer-id",
+            "local-dev",
+            "--customer-email",
+            customer_email,
+            "--license-id",
+            f"local-dev-{version}",
+            "--deployment-id",
+            f"local-dev-{version}",
+            "--support-tier",
+            "development",
+            "--max-users",
+            "25",
+            "--max-agent-runs-per-month",
+            "1000",
+            "--channel",
+            channel,
+            "--allowed-version",
+            version,
+            "--days",
+            "30",
+            "--notes",
+            "Development-only license generated by scripts/build_local_release.py.",
+            "--output",
+            str(token),
+        ]
+    )
+    return token, public_key
+
+
+def create_onprem_archive(output_dir: Path) -> Path:
+    archive_path = output_dir / "packetsafari-onprem.tar.gz"
+    with tempfile.TemporaryDirectory(prefix="packetsafari-onprem-archive-") as temp_name:
+        archive_root = Path(temp_name) / "packetsafari-onprem-local"
+        shutil.copytree(
+            REPO_ROOT,
+            archive_root,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                ".guard",
+                ".pytest_cache",
+                ".venv",
+                "__pycache__",
+                "*.pyc",
+                "*.egg-info",
+                "build",
+                "dist",
+            ),
+        )
+        with tarfile.open(archive_path, "w:gz") as tar:
+            tar.add(archive_root, arcname=archive_root.name)
+    return archive_path
+
+
+def write_bootstrap_files(output_dir: Path) -> None:
+    shutil.copy2(REPO_ROOT / "bootstrap.sh", output_dir / "bootstrap.sh")
+    version_path = REPO_ROOT / "VERSION"
+    if version_path.exists():
+        shutil.copy2(version_path, output_dir / "VERSION")
+    else:
+        (output_dir / "VERSION").write_text("local\n", encoding="utf-8")
+    manifest = {
+        "schemaVersion": 1,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "files": {
+            "packetsafari_onprem/cli.py": {
+                "sha256": sha256(REPO_ROOT / "packetsafari_onprem" / "cli.py"),
+            },
+        },
+    }
+    (output_dir / "bootstrap-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_install_notes(output_dir: Path, bundle_name: str, *, version: str, platform: str, dev_license: bool) -> Path:
+    note = output_dir / "INSTALL.md"
+    trust_flag = " \\\n    --allow-bundled-license-public-key" if dev_license else ""
+    note.write_text(
+        f"""# PacketSafari Local On-Prem Release {version}
+
+This directory is self-contained for a local VM install test. It contains `{platform}` images, so the Ubuntu VM must use the same CPU architecture. Serve it from the Mac:
+
+```bash
+cd {output_dir}
+python3 -m http.server 9000 --bind 0.0.0.0
+```
+
+On the Ubuntu Server VM, install Docker Engine and the Compose plugin first, then run:
+
+```bash
+export PACKETSAFARI_ONPREM_RAW_BASE=http://<mac-ip>:9000
+export PACKETSAFARI_ONPREM_ARCHIVE_URL=http://<mac-ip>:9000/packetsafari-onprem.tar.gz
+curl -fsSL http://<mac-ip>:9000/bootstrap.sh | sudo -E bash -s -- install \\
+  --bundle http://<mac-ip>:9000/{bundle_name} \\
+  --bundle-public-key http://<mac-ip>:9000/release-public.pem{trust_flag}
+```
+
+For authenticated downloads, set `PACKETSAFARI_ONPREM_BEARER_TOKEN` before bootstrap and pass
+`--download-bearer-token` to `packetsafari-ops install` or `upgrade`.
+
+The generated dev license and signing keys are for local validation only. Do not ship them to customers.
+""",
+        encoding="utf-8",
+    )
+    return note
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build a locally hosted PacketSafari on-prem release directory.")
+    parser.add_argument("--app-root", default=str(REPO_ROOT.parent / "packetsafari"))
+    parser.add_argument("--version")
+    parser.add_argument("--channel", default="local")
+    parser.add_argument("--output-dir")
+    parser.add_argument("--platform", default=default_docker_platform(), help="Image platform to build, defaults to native host architecture or DOCKER_PLATFORM.")
+    parser.add_argument("--wireshark-cache-bust", default="local-release")
+    parser.add_argument("--skip-build", action="store_true", help="Use existing packetsafari-local/* image tags.")
+    parser.add_argument("--skip-infra-pull", action="store_true", help="Do not pull postgres/redis before tagging local copies.")
+    parser.add_argument("--no-dev-license", action="store_true", help="Do not generate a development license token.")
+    parser.add_argument("--customer-email", default="local-dev@packetsafari.com")
+    parser.add_argument("--split-size-mb", type=int, default=0)
+    args = parser.parse_args()
+
+    for command in ("docker", "openssl", "tar"):
+        require_command(command)
+    app_root = Path(args.app_root).expanduser().resolve()
+    if not (app_root / "Dockerfile").exists():
+        raise SystemExit(f"PacketSafari app Dockerfile not found under {app_root}")
+    version = str(args.version or read_app_version(app_root)).strip()
+    output_dir = Path(args.output_dir or (DEFAULT_DATA_ROOT / "releases" / "local" / version)).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.skip_build:
+        images = {
+            service: f"packetsafari-local/{service}:{version}"
+            for service in APP_SERVICES
+        }
+        images["worker"] = images["backend"]
+    else:
+        images = build_app_images(app_root, version, platform=args.platform, wireshark_cache_bust=args.wireshark_cache_bust)
+    images.update(prepare_infra_images(version, pull=not args.skip_infra_pull))
+
+    manifest = write_manifest(app_root, output_dir, version, args.channel, images, platform=args.platform)
+    notes = output_dir / "release-notes.md"
+    if not notes.exists():
+        notes.write_text(f"PacketSafari local on-prem release {version}.\n", encoding="utf-8")
+
+    release_private_key = output_dir / "keys" / "release-private.pem"
+    release_public_key = output_dir / "release-public.pem"
+    ensure_rsa_key(release_private_key, release_public_key)
+
+    bundle_args = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "build_offline_bundle.py"),
+        "--manifest",
+        str(manifest),
+        "--output",
+        str(output_dir / f"packetsafari-{version}-offline.tar.zst"),
+        "--release-notes",
+        str(notes),
+        "--release-public-key",
+        str(release_public_key),
+        "--sign-key",
+        str(release_private_key),
+        "--no-pull",
+    ]
+    dev_license = not args.no_dev_license
+    if dev_license:
+        token, license_public_key = create_dev_license(output_dir, version, args.channel, customer_email=args.customer_email)
+        bundle_args.extend(["--license", str(token), "--license-public-key", str(license_public_key)])
+    if args.split_size_mb:
+        bundle_args.extend(["--split-size-mb", str(args.split_size_mb)])
+    run(bundle_args)
+
+    create_onprem_archive(output_dir)
+    write_bootstrap_files(output_dir)
+    install_notes = write_install_notes(output_dir, f"packetsafari-{version}-offline.tar.zst", version=version, platform=args.platform, dev_license=dev_license)
+
+    print(json.dumps({
+        "outputDir": str(output_dir),
+        "bundle": str(output_dir / f"packetsafari-{version}-offline.tar.zst"),
+        "manifest": str(manifest),
+        "bootstrap": str(output_dir / "bootstrap.sh"),
+        "installNotes": str(install_notes),
+        "devLicenseIncluded": dev_license,
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

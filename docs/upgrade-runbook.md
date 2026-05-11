@@ -4,6 +4,7 @@
 
 ```bash
 packetsafari-ops status
+packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops upgrade --manifest ./release-manifest.json
 packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
@@ -11,7 +12,69 @@ packetsafari-ops rollback
 
 Use `--manifest` when the host can reach the image registry. Use `--bundle`
 when the host is air-gapped. Split bundles are accepted by passing any
-`.part-*` file.
+local `.part-*` file. HTTP/HTTPS sources are also accepted for complete
+manifest and bundle archives:
+
+```bash
+packetsafari-ops upgrade \
+  --manifest https://downloads.example.com/packetsafari/release-manifest.json \
+  --download-bearer-token "$TOKEN"
+
+packetsafari-ops install \
+  --bundle https://downloads.example.com/packetsafari/packetsafari-10.0.1-offline.tar.zst \
+  --bundle-public-key https://downloads.example.com/packetsafari/release-public.pem \
+  --download-header "x-api-key: $TOKEN"
+```
+
+The preferred customer source is the authenticated PacketSafari portal at
+`/app/account/releases`. The portal returns short-lived presigned URLs for
+private S3 release artifacts. Customers can download the files first and copy
+them to the on-prem host, or pass the presigned HTTPS URL directly to
+`packetsafari-ops` when the host has outbound access. Do not use public S3
+objects or a mutable GitHub branch as the production install source.
+
+## Single-Host SaaS Commands
+
+For the current SaaS deployment model where PacketSafari runs on one EC2 host,
+use the same release artifacts but select the SaaS profile:
+
+```bash
+packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
+packetsafari-ops rollback --profile saas
+```
+
+The SaaS profile skips on-prem license entitlement checks and defaults to an
+out-of-band backup policy. By default, the upgrade requires a fresh backup proof
+at `/opt/packetsafari/state/latest-backup.json` before migrations run:
+
+```json
+{
+  "provider": "aws-ebs",
+  "snapshotId": "snap-0123456789abcdef0",
+  "completedAt": "2026-05-11T10:30:00Z",
+  "verifiedRestore": true
+}
+```
+
+The proof file can also be supplied explicitly:
+
+```bash
+packetsafari-ops upgrade \
+  --profile saas \
+  --manifest ./release-manifest.json \
+  --backup-proof /var/lib/packetsafari-backups/latest.json \
+  --max-backup-age-minutes 120
+```
+
+If the EC2 host does not have a recent external snapshot, use an inline backup:
+
+```bash
+packetsafari-ops upgrade --profile saas --backup-mode inline --manifest ./release-manifest.json
+```
+
+Do not run SaaS upgrades without a data backup. `--backup-mode skip` is blocked
+unless `PACKETSAFARI_ALLOW_UNBACKED_UPGRADE=true` is set for disposable
+development hosts.
 
 ## Offline Bundle Requirements
 
@@ -27,6 +90,9 @@ packetsafari-10.0.1-offline.tar.zst
   image-metadata.json
   checksums.txt
   checksums.txt.sig
+  license-token.json       # optional, for fresh install bundles
+  license-public.pem       # development/local bundles only
+  release-public.pem       # optional public verification material
   sbom/
   release-notes.md
 ```
@@ -36,6 +102,10 @@ The host must already have the PacketSafari release public key at
 or the path passed with `--bundle-public-key`.
 
 ## Transaction Flow
+
+Fresh `install --bundle` uses the same verification and image-loading path as
+`upgrade --bundle`, but writes the initial active manifest and starts the stack
+in onboarding mode.
 
 1. Acquire an exclusive upgrade lock.
 2. Verify the bundle signature and checksums, or copy the connected manifest.
@@ -50,6 +120,10 @@ or the path passed with `--bundle-public-key`.
 11. Poll `http://127.0.0.1:8080/api/v2/health`.
 12. Promote the release manifest only after health checks pass.
 
+For `--profile saas --backup-mode require-recent`, step 6 records the verified
+external backup proof instead of taking a local PostgreSQL and `/storage` dump.
+The migration and promotion gates stay the same.
+
 ## Failure Behavior
 
 - Before migration: restore manifest, env, state, and Compose files, then
@@ -58,6 +132,9 @@ or the path passed with `--bundle-public-key`.
   the old release.
 - After a successful upgrade: `rollback` restores the latest full snapshot.
   Do not assume old containers can safely run against a newer schema.
+- During or after a SaaS migration with `--backup-mode require-recent`: restore
+  runtime metadata automatically, keep traffic stopped, and restore data from
+  the external backup before restarting service.
 
 ## Bundle Build
 

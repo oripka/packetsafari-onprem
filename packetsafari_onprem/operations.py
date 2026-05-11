@@ -8,11 +8,13 @@ import os
 import re
 import secrets
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -26,6 +28,8 @@ DEFAULT_RUNTIME_ROOT = "/opt/packetsafari"
 DEFAULT_CONTAINER_RUNTIME_ROOT = "/storage/onprem"
 DEFAULT_API_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_DATA_ROOT = str(Path.home() / "packetsafari-data")
+DEPLOYMENT_PROFILES = {"onprem", "saas"}
+BACKUP_MODES = {"inline", "require-recent", "skip"}
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
@@ -235,6 +239,200 @@ def ensure_runtime_dirs(layout: RuntimeLayout) -> None:
 
 def supports_onprem_host_actions(layout: RuntimeLayout) -> bool:
     return layout.kind == "onprem-runtime-root"
+
+
+def deployment_profile(args) -> str:
+    profile = str(getattr(args, "profile", "onprem") or "onprem").strip().lower()
+    if profile not in DEPLOYMENT_PROFILES:
+        raise RuntimeError(f"Unsupported deployment profile: {profile}")
+    return profile
+
+
+def supports_upgrade_host_actions(layout: RuntimeLayout, *, profile: str) -> bool:
+    if profile == "onprem":
+        return supports_onprem_host_actions(layout)
+    return layout.kind == "onprem-runtime-root"
+
+
+def resolve_backup_mode(args, *, profile: str) -> str:
+    raw = str(getattr(args, "backup_mode", "") or "").strip().lower()
+    mode = raw or ("inline" if profile == "onprem" else "require-recent")
+    if mode not in BACKUP_MODES:
+        raise RuntimeError(f"Unsupported backup mode: {mode}")
+    if profile == "onprem" and mode == "skip":
+        raise RuntimeError("onprem upgrades do not support --backup-mode skip.")
+    if mode == "skip" and not _truthy(os.getenv("PACKETSAFARI_ALLOW_UNBACKED_UPGRADE")):
+        raise RuntimeError("Unbacked upgrades are disabled. Set PACKETSAFARI_ALLOW_UNBACKED_UPGRADE=true only for disposable development hosts.")
+    return mode
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def verify_external_backup_proof(layout: RuntimeLayout, args, *, max_age_minutes: int) -> dict[str, object]:
+    configured = str(getattr(args, "backup_proof", "") or os.getenv("PACKETSAFARI_BACKUP_PROOF") or "").strip()
+    proof_path = Path(configured).expanduser() if configured else layout.state_dir / "latest-backup.json"
+    if not proof_path.exists():
+        raise RuntimeError(
+            f"External backup proof is required before this upgrade. Create {proof_path} after a verified snapshot, "
+            "or pass --backup-mode inline to let packetsafari-ops create a local backup."
+        )
+    if proof_path.stat().st_size <= 0:
+        raise RuntimeError(f"External backup proof is empty: {proof_path}")
+
+    try:
+        payload = json.loads(proof_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"External backup proof must be a JSON object: {proof_path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"External backup proof must be a JSON object: {proof_path}")
+
+    status = str(payload.get("status") or "").strip().lower()
+    if status and status not in {"ok", "complete", "completed", "available", "success", "succeeded"}:
+        raise RuntimeError(f"External backup proof does not show a completed backup: status={status!r}.")
+    for key in ("verifiedRestore", "restoreVerified", "restorable"):
+        if key in payload and not _truthy(payload.get(key)):
+            raise RuntimeError(f"External backup proof marks {key}=false: {proof_path}")
+
+    proof: dict[str, object] = {
+        **payload,
+        "path": str(proof_path),
+        "verifiedAt": "",
+        "ageSeconds": None,
+        "maxAgeMinutes": max_age_minutes,
+    }
+    timestamp = None
+    for key in ("verifiedAt", "completedAt", "createdAt", "timestamp"):
+        timestamp = _parse_timestamp(str(payload.get(key) or ""))
+        if timestamp is not None:
+            proof["verifiedAt"] = timestamp.isoformat()
+            break
+    if timestamp is None:
+        raise RuntimeError(f"External backup proof must include an ISO timestamp: verifiedAt, completedAt, createdAt, or timestamp.")
+
+    age_seconds = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+    proof["ageSeconds"] = age_seconds
+    if age_seconds > max(1, max_age_minutes) * 60:
+        raise RuntimeError(
+            f"External backup proof is too old: {proof_path} is {int(age_seconds // 60)} minutes old; "
+            f"limit is {max_age_minutes} minutes."
+        )
+    return proof
+
+
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_url(source: str) -> bool:
+    parsed = urllib.parse.urlparse(str(source or ""))
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _split_env_headers(value: str) -> list[str]:
+    headers: list[str] = []
+    for raw_line in value.replace(";;", "\n").splitlines():
+        header = raw_line.strip()
+        if header:
+            headers.append(header)
+    return headers
+
+
+def _download_headers(args=None) -> dict[str, str]:
+    headers: dict[str, str] = {"User-Agent": f"packetsafari-ops/{version()}"}
+    bearer = str(getattr(args, "download_bearer_token", "") or os.getenv("PACKETSAFARI_DOWNLOAD_BEARER_TOKEN") or "").strip()
+    basic = str(getattr(args, "download_basic", "") or os.getenv("PACKETSAFARI_DOWNLOAD_BASIC_AUTH") or "").strip()
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    if basic:
+        headers["Authorization"] = "Basic " + base64.b64encode(basic.encode("utf-8")).decode("ascii")
+
+    raw_headers: list[str] = []
+    raw_headers.extend(getattr(args, "download_header", []) or [])
+    raw_headers.extend(_split_env_headers(os.getenv("PACKETSAFARI_DOWNLOAD_HEADER") or ""))
+    for raw_header in raw_headers:
+        if ":" not in raw_header:
+            raise RuntimeError(f"Invalid download header {raw_header!r}; expected 'Name: value'.")
+        name, value = raw_header.split(":", 1)
+        name = name.strip()
+        if not name:
+            raise RuntimeError(f"Invalid download header {raw_header!r}; header name is empty.")
+        headers[name] = value.strip()
+    return headers
+
+
+def _download_timeout(args=None) -> int:
+    raw = getattr(args, "download_timeout", None) or os.getenv("PACKETSAFARI_DOWNLOAD_TIMEOUT") or 300
+    return max(1, int(raw))
+
+
+def _download_context(args=None):
+    if _truthy(getattr(args, "allow_insecure_download", False)) or _truthy(os.getenv("PACKETSAFARI_ALLOW_INSECURE_DOWNLOAD")):
+        return ssl._create_unverified_context()
+    return None
+
+
+def _safe_download_name(source: str, default_name: str) -> str:
+    parsed = urllib.parse.urlparse(source)
+    name = Path(parsed.path).name or default_name
+    return re.sub(r"[^0-9A-Za-z_.-]+", "-", name)
+
+
+def materialize_source(source: str | os.PathLike[str], destination_dir: Path, label: str, args=None, *, default_name: str) -> Path:
+    raw = str(source or "").strip()
+    if not raw:
+        raise RuntimeError(f"Missing {label} source.")
+    if not _is_url(raw):
+        path = Path(raw).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"{label.capitalize()} not found: {path}")
+        return path
+
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / _safe_download_name(raw, default_name)
+    partial = destination.with_name(f"{destination.name}.download")
+    request = urllib.request.Request(raw, headers=_download_headers(args))
+    context = _download_context(args)
+    try:
+        if context is not None and urllib.parse.urlparse(raw).scheme == "https":
+            response = urllib.request.urlopen(request, timeout=_download_timeout(args), context=context)
+        else:
+            response = urllib.request.urlopen(request, timeout=_download_timeout(args))
+        with response, partial.open("wb") as output:
+            shutil.copyfileobj(response, output, length=1024 * 1024)
+        partial.replace(destination)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Failed to download {label} from {raw}: HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Failed to download {label} from {raw}: {exc.reason}") from exc
+    finally:
+        partial.unlink(missing_ok=True)
+    return destination
+
+
+def _materialize_license_public_key(layout: RuntimeLayout, args, work_dir: Path, *, bundle_dir: Path | None = None) -> Path:
+    explicit = str(getattr(args, "license_public_key", "") or "").strip()
+    if explicit:
+        return materialize_source(explicit, work_dir, "license public key", args, default_name="license-public.pem")
+    bundled = bundle_dir / "license-public.pem" if bundle_dir is not None else None
+    if bundled is not None and bundled.exists() and bool(getattr(args, "allow_bundled_license_public_key", False)):
+        return bundled
+    default = bundle_root() / "keys" / "license-public.pem"
+    if default.exists():
+        return default
+    raise RuntimeError("No PacketSafari license public key found. Pass --license-public-key.")
 
 
 def _read_host_memory_bytes() -> int:
@@ -1106,6 +1304,9 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
     postgres_db = "packetsafari"
     postgres_user = "packetsafari"
     postgres_password = secrets.token_urlsafe(32)
+    redis_password = secrets.token_urlsafe(32)
+    jwt_secret = secrets.token_urlsafe(64)
+    sharkd_secret = secrets.token_urlsafe(64)
     lines = [
         "# Managed by PacketSafari on-prem Python operations.",
         "# Finalize onboarding writes the managed runtime env, then the first admin is created manually from inside the backend container.",
@@ -1126,6 +1327,12 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         f"POSTGRES_PASSWORD={quote_env_value(postgres_password)}",
         'PACKETSAFARI_RUNTIME_POSTGRES_ENABLED="true"',
         f"PACKETSAFARI_RUNTIME_POSTGRES_URL={quote_env_value(f'postgresql+psycopg2://{postgres_user}:{postgres_password}@postgres:5432/{postgres_db}')}",
+        f"REDIS_PASSWORD={quote_env_value(redis_password)}",
+        f"PACKETSAFARI_RUNTIME_REDIS_PASSWORD={quote_env_value(redis_password)}",
+        f"PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD={quote_env_value(redis_password)}",
+        f"PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD={quote_env_value(redis_password)}",
+        f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
+        f"PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET={quote_env_value(sharkd_secret)}",
     ]
     for key, value in logging_values.items():
         lines.append(f"{key}={quote_env_value(value)}")
@@ -1174,49 +1381,54 @@ def install_release(args) -> dict:
     if not supports_onprem_host_actions(layout):
         raise RuntimeError("Install is only supported for on-prem runtime roots like /opt/packetsafari, not local packetsafari-data mode.")
     ensure_runtime_dirs(layout)
-    sync_bundle(layout)
+    with upgrade_lock(layout):
+        sync_bundle(layout)
 
-    license_path = Path(args.license).expanduser()
-    manifest_path = Path(args.manifest).expanduser()
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
-    public_key_path = bundle_root() / "keys" / "license-public.pem"
+        source = "bundle" if getattr(args, "bundle", None) else "manifest"
+        if source == "bundle":
+            prepare_offline_bundle(layout, args, manifest_destination=layout.release_manifest_path, install_license=True)
+        else:
+            if not str(getattr(args, "license", "") or "").strip():
+                raise RuntimeError("install --manifest requires --license.")
+            prepare_connected_manifest(layout, str(args.manifest), args, destination=layout.release_manifest_path)
+            download_dir = layout.tmp_dir / "downloads"
+            license_path = materialize_source(args.license, download_dir, "license token", args, default_name="license-token.json")
+            public_key_path = _materialize_license_public_key(layout, args, download_dir)
+            verify_license(license_path, public_key_path)
+            shutil.copy2(license_path, layout.license_token_path)
+            shutil.copy2(public_key_path, layout.license_public_key_path)
 
-    verify_license(license_path, public_key_path)
+        release_public_key_path = bundle_root() / "keys" / "release-public.pem"
+        if release_public_key_path.exists() and not layout.release_public_key_path.exists():
+            shutil.copy2(release_public_key_path, layout.release_public_key_path)
 
-    shutil.copy2(license_path, layout.license_token_path)
-    shutil.copy2(public_key_path, layout.license_public_key_path)
-    release_public_key_path = bundle_root() / "keys" / "release-public.pem"
-    if release_public_key_path.exists():
-        shutil.copy2(release_public_key_path, layout.release_public_key_path)
-    shutil.copy2(manifest_path, layout.release_manifest_path)
-
-    logging_values = resolve_logging_values(args)
-    write_runtime_env(layout, logging_values, onboarding_mode=True)
-    sizing = write_sizing_profile(layout, profile=str(getattr(args, "size", "auto") or "auto"))
-    render_compose(layout, layout.release_manifest_path, source_root=bundle_root())
-    render_logging_config(layout, source_root=bundle_root())
-    write_deployment_state(
-        layout,
-        mode="onboarding",
-        action_type="install",
-        action_status="pending_restart",
-        action_message="Python installer prepared the on-prem stack in onboarding mode.",
-    )
-    write_helper_status(layout, status="installing", message="Starting PacketSafari in onboarding mode.")
-    docker_compose_up(layout)
-    write_helper_status(layout, status="ok", message="On-prem tooling installed.")
-    return {
-        "runtimeRoot": str(layout.runtime_root),
-        "version": version(),
-        "sizing": {
-            "profile": sizing.get("effectiveProfile"),
-            "state": str(layout.sizing_state_path),
-            "env": str(layout.runtime_sizing_env_path),
-            "compose": str(layout.compose_sizing_file),
-        },
-        "message": "PacketSafari on-prem installed in onboarding mode. Finish setup in `packetsafari-ops tui` or open /onprem/onboarding in the local UI.",
-    }
+        logging_values = resolve_logging_values(args)
+        write_runtime_env(layout, logging_values, onboarding_mode=True)
+        sizing = write_sizing_profile(layout, profile=str(getattr(args, "size", "auto") or "auto"))
+        render_compose(layout, layout.release_manifest_path, source_root=bundle_root())
+        render_logging_config(layout, source_root=bundle_root())
+        write_deployment_state(
+            layout,
+            mode="onboarding",
+            action_type="install",
+            action_status="pending_restart",
+            action_message="Python installer prepared the on-prem stack in onboarding mode.",
+        )
+        write_helper_status(layout, status="installing", message="Starting PacketSafari in onboarding mode.")
+        docker_compose_up(layout, pull_policy="never" if source == "bundle" else None)
+        write_helper_status(layout, status="ok", message="On-prem tooling installed.")
+        return {
+            "runtimeRoot": str(layout.runtime_root),
+            "version": version(),
+            "source": source,
+            "sizing": {
+                "profile": sizing.get("effectiveProfile"),
+                "state": str(layout.sizing_state_path),
+                "env": str(layout.runtime_sizing_env_path),
+                "compose": str(layout.compose_sizing_file),
+            },
+            "message": "PacketSafari on-prem installed in onboarding mode. Finish setup in `packetsafari-ops tui` or open /onprem/onboarding in the local UI.",
+        }
 
 
 def status(layout: RuntimeLayout) -> dict:
@@ -1375,6 +1587,18 @@ def complete_full_backup(layout: RuntimeLayout, snapshot_dir: Path) -> None:
             **_read_json(snapshot_dir / "snapshot.json", {}),
             "postgresBackup": "postgres.dump",
             "storageBackup": "storage.tar",
+            "completedAt": utc_now(),
+        },
+    )
+
+
+def record_external_backup_proof(snapshot_dir: Path, proof: dict[str, object]) -> None:
+    _write_json(
+        snapshot_dir / "snapshot.json",
+        {
+            **_read_json(snapshot_dir / "snapshot.json", {}),
+            "externalBackupProof": proof,
+            "backupMode": "require-recent",
             "completedAt": utc_now(),
         },
     )
@@ -1565,20 +1789,42 @@ def _tag_loaded_image(service: str, archive: Path, source_ref: str, local_ref: s
     subprocess.run(["docker", "image", "tag", image_id, local_ref], check=True)
 
 
-def prepare_offline_bundle(layout: RuntimeLayout, args) -> Path:
-    bundle_path = Path(args.bundle).expanduser()
-    if not bundle_path.exists():
-        raise FileNotFoundError(f"Bundle not found: {bundle_path}")
+def prepare_offline_bundle(
+    layout: RuntimeLayout,
+    args,
+    *,
+    manifest_destination: Path | None = None,
+    install_license: bool = False,
+) -> Path:
     work_parent = layout.tmp_dir
     work_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="upgrade-bundle-", dir=work_parent) as temp_name:
         work_dir = Path(temp_name)
+        bundle_source = str(args.bundle)
+        if _is_url(bundle_source) and ".part-" in Path(urllib.parse.urlparse(bundle_source).path).name:
+            raise RuntimeError("Remote split bundles are not supported. Reassemble before hosting, or pass a local .part-* file.")
+        bundle_path = materialize_source(
+            bundle_source,
+            work_dir / "downloads",
+            "offline bundle",
+            args,
+            default_name="packetsafari-offline.tar.zst",
+        )
+        release_public_key = None
+        if str(getattr(args, "bundle_public_key", "") or "").strip():
+            release_public_key = materialize_source(
+                args.bundle_public_key,
+                work_dir / "downloads",
+                "offline bundle public key",
+                args,
+                default_name="release-public.pem",
+            )
         archive = _materialize_bundle(bundle_path, work_dir)
         bundle_dir = _extract_bundle(archive, work_dir)
         verify_bundle_signature(
             layout,
             bundle_dir,
-            public_key=getattr(args, "bundle_public_key", None),
+            public_key=str(release_public_key) if release_public_key else None,
             allow_unsigned=bool(getattr(args, "allow_unsigned_bundle", False)),
         )
         verify_bundle_checksums(bundle_dir)
@@ -1617,21 +1863,55 @@ def prepare_offline_bundle(layout: RuntimeLayout, args) -> Path:
         manifest["sourceImages"] = images
         manifest["images"] = local_images
         manifest["offlineBundle"] = {
+            "source": bundle_source,
             "sourcePath": str(bundle_path),
             "verifiedAt": utc_now(),
             "checksums": "checksums.txt",
         }
-        shutil.copy2(bundle_dir / "release-manifest.json", layout.target_release_manifest_path.with_suffix(".source.json"))
-        _write_json(layout.target_release_manifest_path, manifest)
-        return layout.target_release_manifest_path
+        target = manifest_destination or layout.target_release_manifest_path
+        shutil.copy2(bundle_dir / "release-manifest.json", target.with_suffix(".source.json"))
+        _write_json(target, manifest)
+
+        if install_license:
+            explicit_license = str(getattr(args, "license", "") or "").strip()
+            if explicit_license:
+                license_path = materialize_source(
+                    explicit_license,
+                    work_dir / "downloads",
+                    "license token",
+                    args,
+                    default_name="license-token.json",
+                )
+            else:
+                license_path = bundle_dir / "license-token.json"
+                if not license_path.exists():
+                    raise RuntimeError("Install bundle is missing license-token.json. Pass --license or rebuild the bundle with a license token.")
+            license_public_key = _materialize_license_public_key(layout, args, work_dir / "downloads", bundle_dir=bundle_dir)
+            verify_license(license_path, license_public_key)
+            shutil.copy2(license_path, layout.license_token_path)
+            shutil.copy2(license_public_key, layout.license_public_key_path)
+            if release_public_key is not None:
+                shutil.copy2(release_public_key, layout.release_public_key_path)
+            bundled_release_public_key = bundle_dir / "release-public.pem"
+            if release_public_key is None and bundled_release_public_key.exists() and not layout.release_public_key_path.exists():
+                shutil.copy2(bundled_release_public_key, layout.release_public_key_path)
+        elif release_public_key is not None:
+            shutil.copy2(release_public_key, layout.release_public_key_path)
+
+        return target
 
 
-def prepare_connected_manifest(layout: RuntimeLayout, manifest_arg: str) -> Path:
-    manifest_path = Path(manifest_arg).expanduser()
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
-    shutil.copy2(manifest_path, layout.target_release_manifest_path)
-    return layout.target_release_manifest_path
+def prepare_connected_manifest(layout: RuntimeLayout, manifest_arg: str, args=None, *, destination: Path | None = None) -> Path:
+    manifest_path = materialize_source(
+        manifest_arg,
+        layout.tmp_dir / "downloads",
+        "release manifest",
+        args,
+        default_name="release-manifest.json",
+    )
+    target = destination or layout.target_release_manifest_path
+    shutil.copy2(manifest_path, target)
+    return target
 
 
 def run_target_migrations(layout: RuntimeLayout) -> None:
@@ -1660,12 +1940,12 @@ def wait_for_health(*, url: str = "http://127.0.0.1:8080/api/v2/health", timeout
     raise RuntimeError(f"Health check failed at {url}: {last_error}")
 
 
-def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, *, source: str) -> dict:
+def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, *, source: str, profile: str, backup_mode: str) -> dict:
     shutil.copy2(layout.target_release_manifest_path, layout.release_manifest_path)
     state = _read_json(layout.deployment_state_path, {})
     deployment = state.setdefault("deployment", {})
     deployment["installedVersion"] = str(manifest.get("version") or "")
-    deployment["mode"] = "normal"
+    deployment["mode"] = "normal" if profile == "onprem" else "saas"
     deployment["installedAt"] = utc_now()
     state["lastAction"] = {
         "type": "upgrade",
@@ -1673,10 +1953,16 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
         "message": f"Applied release {deployment['installedVersion']}.",
         "updatedAt": utc_now(),
     }
+    rollback_note = (
+        "If migrations ran, rollback restores the saved Postgres and storage backup before restarting the previous release."
+        if backup_mode == "inline"
+        else "This upgrade used an external backup proof. Automatic rollback restores runtime metadata only; restore data from the external backup if migrations must be undone."
+    )
     state["rollback"] = {
         "latestSnapshot": str(snapshot_dir),
-        "rollbackMode": "restore",
-        "note": "If migrations ran, rollback restores the saved Postgres and storage backup before restarting the previous release.",
+        "rollbackMode": "restore" if backup_mode == "inline" else "external-data-restore",
+        "backupMode": backup_mode,
+        "note": rollback_note,
     }
     _write_json(layout.deployment_state_path, state)
     write_helper_status(layout, status="ok", message=f"Upgrade to {deployment['installedVersion']} applied.")
@@ -1684,14 +1970,18 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
         "message": "Upgrade applied.",
         "version": deployment["installedVersion"],
         "source": source,
+        "profile": profile,
+        "backupMode": backup_mode,
         "snapshot": str(snapshot_dir),
     }
 
 
 def upgrade_release(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
-    if not supports_onprem_host_actions(layout):
-        raise RuntimeError("Upgrade is only supported for on-prem runtime roots like /opt/packetsafari, not local packetsafari-data mode.")
+    profile = deployment_profile(args)
+    backup_mode = resolve_backup_mode(args, profile=profile)
+    if not supports_upgrade_host_actions(layout, profile=profile):
+        raise RuntimeError(f"Upgrade profile {profile!r} is only supported for managed runtime roots like /opt/packetsafari.")
     with upgrade_lock(layout):
         ensure_runtime_dirs(layout)
         sync_bundle(layout)
@@ -1705,17 +1995,42 @@ def upgrade_release(args) -> dict:
                 manifest_arg = str(getattr(args, "manifest", "") or "").strip()
                 if not manifest_arg:
                     raise RuntimeError("upgrade requires --manifest or --bundle.")
-                target_manifest_path = prepare_connected_manifest(layout, manifest_arg)
+                target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
 
             manifest = _read_json(target_manifest_path, {})
             validate_upgrade_path(layout, manifest)
-            verify_license_allows_release(layout, manifest)
+            if profile == "onprem":
+                verify_license_allows_release(layout, manifest)
             validate_required_env(layout, manifest)
+            external_backup_proof = None
+            if backup_mode == "require-recent":
+                external_backup_proof = verify_external_backup_proof(
+                    layout,
+                    args,
+                    max_age_minutes=int(getattr(args, "max_backup_age_minutes", 180) or 180),
+                )
 
-            write_helper_status(layout, status="upgrading", message="Stopping app services and creating pre-upgrade backup.")
+            backup_message = {
+                "inline": "creating pre-upgrade backup",
+                "require-recent": "recording verified external backup proof",
+                "skip": "continuing without a data backup",
+            }[backup_mode]
+            write_helper_status(layout, status="upgrading", message=f"Stopping app services and {backup_message}.")
             docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd"], timeout=120)
             snapshot_dir = snapshot_runtime(layout)
-            complete_full_backup(layout, snapshot_dir)
+            if backup_mode == "inline":
+                complete_full_backup(layout, snapshot_dir)
+            elif backup_mode == "require-recent" and external_backup_proof is not None:
+                record_external_backup_proof(snapshot_dir, external_backup_proof)
+            else:
+                _write_json(
+                    snapshot_dir / "snapshot.json",
+                    {
+                        **_read_json(snapshot_dir / "snapshot.json", {}),
+                        "backupMode": "skip",
+                        "warning": "No data backup was captured by packetsafari-ops for this upgrade.",
+                    },
+                )
 
             phase = "compose"
             render_compose(layout, target_manifest_path)
@@ -1735,11 +2050,12 @@ def upgrade_release(args) -> dict:
                 wait_for_health(timeout_seconds=int(getattr(args, "health_timeout", 180) or 180))
 
             phase = "promote"
-            return _promote_release(layout, manifest, snapshot_dir, source=source)
+            return _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
         except Exception as exc:
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")
             if snapshot_dir is not None:
-                restore_data = phase in {"migration", "healthcheck", "promote"}
+                data_restore_required = phase in {"migration", "healthcheck", "promote"}
+                restore_data = backup_mode == "inline" and data_restore_required
                 mode = "full data restore" if restore_data else "metadata restore"
                 try:
                     restore_snapshot(layout, snapshot_dir, restore_data=restore_data)
@@ -1748,23 +2064,38 @@ def upgrade_release(args) -> dict:
                     raise RuntimeError(
                         f"Upgrade failed during {phase}: {exc}. Automatic restore also failed: {restore_exc}. Snapshot: {snapshot_dir}"
                     ) from restore_exc
+                if data_restore_required and backup_mode != "inline":
+                    raise RuntimeError(
+                        f"Upgrade failed during {phase}: {exc}. Restored previous runtime metadata only. "
+                        f"Restore Postgres and storage from the external backup before serving traffic. Snapshot: {snapshot_dir}"
+                    ) from exc
                 raise RuntimeError(f"Upgrade failed during {phase}: {exc}. Restored previous release with {mode}. Snapshot: {snapshot_dir}") from exc
             raise RuntimeError(f"Upgrade failed during {phase}: {exc}") from exc
 
 
 def rollback_release(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
-    if not supports_onprem_host_actions(layout):
-        raise RuntimeError("Rollback is only supported for on-prem runtime roots like /opt/packetsafari, not local packetsafari-data mode.")
+    profile = deployment_profile(args)
+    if not supports_upgrade_host_actions(layout, profile=profile):
+        raise RuntimeError(f"Rollback profile {profile!r} is only supported for managed runtime roots like /opt/packetsafari.")
     with upgrade_lock(layout):
         snapshot_dir = latest_snapshot_dir(layout)
         if snapshot_dir is not None:
-            restore_snapshot(layout, snapshot_dir, restore_data=True)
-            write_helper_status(layout, status="ok", message="Rollback restored latest full snapshot.")
+            snapshot = _read_json(snapshot_dir / "snapshot.json", {})
+            has_inline_data = bool(snapshot.get("postgresBackup")) and bool(snapshot.get("storageBackup"))
+            restore_data = profile == "onprem" or has_inline_data
+            restore_snapshot(layout, snapshot_dir, restore_data=restore_data)
+            message = (
+                "Rollback restored latest full snapshot."
+                if restore_data
+                else "Rollback restored latest runtime metadata snapshot. Restore data from the external backup if schema migrations were applied."
+            )
+            write_helper_status(layout, status="ok", message=message)
             return {
-                "message": "Rollback restored latest full snapshot.",
+                "message": message,
                 "snapshot": str(snapshot_dir),
-                "restoredData": True,
+                "profile": profile,
+                "restoredData": restore_data,
             }
 
     backups = {

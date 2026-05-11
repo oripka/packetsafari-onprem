@@ -54,9 +54,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--container-runtime-root", default=DEFAULT_CONTAINER_RUNTIME_ROOT)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    def add_download_args(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--download-header",
+            action="append",
+            default=[],
+            help="Additional HTTP download header, for example 'Authorization: Bearer ...'. May be repeated.",
+        )
+        command_parser.add_argument("--download-bearer-token", help="Bearer token used for HTTP/HTTPS release downloads.")
+        command_parser.add_argument("--download-basic", help="Basic auth credentials as USER:PASS for HTTP/HTTPS release downloads.")
+        command_parser.add_argument("--download-timeout", type=int, default=300, help="HTTP/HTTPS download timeout in seconds.")
+        command_parser.add_argument(
+            "--allow-insecure-download",
+            action="store_true",
+            help="Development only: allow HTTPS downloads with invalid certificates.",
+        )
+
+    def add_bundle_args(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--bundle-public-key",
+            help="PacketSafari release public key for offline bundle signature verification.",
+        )
+        command_parser.add_argument(
+            "--allow-unsigned-bundle",
+            action="store_true",
+            help="Development only: allow an unsigned offline bundle.",
+        )
+
     install = subparsers.add_parser("install", help="Install PacketSafari on-prem into onboarding mode.")
-    install.add_argument("--license", required=True)
-    install.add_argument("--manifest", required=True)
+    install_source = install.add_mutually_exclusive_group(required=True)
+    install_source.add_argument("--manifest", help="Connected install release manifest path or URL.")
+    install_source.add_argument("--bundle", help="Offline install bundle path or URL.")
+    install.add_argument("--license", help="License token path or URL. Required with --manifest; optional with --bundle if bundled.")
+    install.add_argument("--license-public-key", help="License public key path or URL. Defaults to the PacketSafari key bundled with the ops tool.")
+    install.add_argument(
+        "--allow-bundled-license-public-key",
+        action="store_true",
+        help="Development only: trust license-public.pem from the install bundle.",
+    )
+    add_bundle_args(install)
+    add_download_args(install)
     install.add_argument("--non-interactive", action="store_true")
     install.add_argument("--audit-log-enabled")
     install.add_argument("--audit-log-persist")
@@ -70,14 +107,41 @@ def build_parser() -> argparse.ArgumentParser:
 
     upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest or offline bundle.")
     source = upgrade.add_mutually_exclusive_group(required=True)
-    source.add_argument("--manifest", help="Connected upgrade release manifest.")
-    source.add_argument("--bundle", help="Air-gapped offline bundle (.tar.zst or split .part-* file).")
-    upgrade.add_argument("--bundle-public-key", help="PacketSafari release public key for offline bundle signature verification.")
-    upgrade.add_argument("--allow-unsigned-bundle", action="store_true", help="Development only: allow an unsigned offline bundle.")
+    source.add_argument("--manifest", help="Connected upgrade release manifest path or URL.")
+    source.add_argument("--bundle", help="Air-gapped offline bundle path or URL (.tar.zst, or local split .part-* files).")
+    add_bundle_args(upgrade)
+    add_download_args(upgrade)
+    upgrade.add_argument(
+        "--profile",
+        choices=["onprem", "saas"],
+        default="onprem",
+        help="Deployment profile. onprem verifies entitlement and takes an inline full backup by default; saas skips entitlement and requires a recent external backup proof by default.",
+    )
+    upgrade.add_argument(
+        "--backup-mode",
+        choices=["inline", "require-recent", "skip"],
+        help="Backup policy. Defaults to inline for onprem and require-recent for saas.",
+    )
+    upgrade.add_argument(
+        "--backup-proof",
+        help="Path to the most recent external backup proof JSON/text file. Defaults to state/latest-backup.json in require-recent mode.",
+    )
+    upgrade.add_argument(
+        "--max-backup-age-minutes",
+        type=int,
+        default=180,
+        help="Maximum accepted age for --backup-proof in require-recent mode.",
+    )
     upgrade.add_argument("--health-timeout", type=int, default=180)
     upgrade.add_argument("--skip-health-check", action="store_true")
 
-    subparsers.add_parser("rollback", help="Restore the latest runtime snapshot.")
+    rollback = subparsers.add_parser("rollback", help="Restore the latest runtime snapshot.")
+    rollback.add_argument(
+        "--profile",
+        choices=["onprem", "saas"],
+        default="onprem",
+        help="Deployment profile. saas restores runtime metadata only unless the snapshot contains inline data backups.",
+    )
 
     tune = subparsers.add_parser("tune", help="Generate host-sized runtime and compose settings.")
     tune.add_argument("--profile", choices=["auto", "small", "medium", "large", "none"], default="auto")

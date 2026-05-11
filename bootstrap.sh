@@ -7,6 +7,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+CURL_ARGS=(-fsSL)
+if [ -n "${PACKETSAFARI_ONPREM_BEARER_TOKEN:-}" ]; then
+  CURL_ARGS+=(-H "Authorization: Bearer ${PACKETSAFARI_ONPREM_BEARER_TOKEN}")
+fi
+if [ -n "${PACKETSAFARI_ONPREM_BASIC_AUTH:-}" ]; then
+  CURL_ARGS+=(-u "${PACKETSAFARI_ONPREM_BASIC_AUTH}")
+fi
+if [ -n "${PACKETSAFARI_ONPREM_DOWNLOAD_HEADER:-}" ]; then
+  while IFS= read -r header; do
+    if [ -n "${header}" ]; then
+      CURL_ARGS+=(-H "${header}")
+    fi
+  done <<< "${PACKETSAFARI_ONPREM_DOWNLOAD_HEADER//;;/$'\n'}"
+fi
+if [ "${PACKETSAFARI_ONPREM_INSECURE_TLS:-}" = "true" ]; then
+  CURL_ARGS+=(-k)
+fi
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "Required command not found: $1" >&2
@@ -17,7 +35,7 @@ require_cmd() {
 fetch() {
   local rel="$1"
   local out="$2"
-  curl -fsSL "${REPO_RAW_BASE}/${rel}" -o "$out"
+  curl "${CURL_ARGS[@]}" "${REPO_RAW_BASE}/${rel}" -o "$out"
 }
 
 sha256_file() {
@@ -40,7 +58,7 @@ else
   fetch "VERSION" "${TMP_DIR}/VERSION"
 
   ARCHIVE_PATH="${TMP_DIR}/packetsafari-onprem.tar.gz"
-  curl -fsSL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"
+  curl "${CURL_ARGS[@]}" "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"
   tar -xzf "${ARCHIVE_PATH}" -C "${TMP_DIR}"
 
   BUNDLE_DIR="$(find "${TMP_DIR}" -maxdepth 1 -type d -name 'packetsafari-onprem-*' | head -n1)"
@@ -73,12 +91,12 @@ ACTION="${1:-install}"
 export PYTHONPATH="${BUNDLE_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 case "${ACTION}" in
-  install|status|upgrade|rollback|tui|onboard|config|iam|diagnostics)
+  install|status|upgrade|rollback|tui|tune|onboard|config|iam|diagnostics)
     exec python3 "${ENTRYPOINT}" "$@"
     ;;
   *)
     echo "Unknown action: ${ACTION}" >&2
-    echo "Supported actions: install, status, upgrade, rollback, tui, onboard, config, iam, diagnostics" >&2
+    echo "Supported actions: install, status, upgrade, rollback, tui, tune, onboard, config, iam, diagnostics" >&2
     exit 1
     ;;
 esac
