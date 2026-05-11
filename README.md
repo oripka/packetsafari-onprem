@@ -8,7 +8,9 @@ Customer-facing Python-native installer, operator CLI, and simple interactive me
 - `packetsafari_onprem/` - Python control plane for install, status, onboarding, upgrade, rollback, diagnostics, and the interactive operator menu
 - `scripts/license_*.py` - offline entitlement token tooling
 - `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
+- `docs/upgrade-runbook.md` - connected and air-gapped upgrade/rollback runbook
 - `scripts/render_compose.py` - render pinned on-prem compose files from release manifests
+- `scripts/build_offline_bundle.py` - build signed USB/offline upgrade bundles from a release manifest
 - `scripts/configure_logging.py` - audit logging defaults helper
 - `scripts/render_logging_config.py` - render Vector config for optional audit log forwarding
 - `templates/docker-compose.onprem.yml.tpl` - compose template rendered during install and upgrade
@@ -30,6 +32,10 @@ curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/boo
 ```
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/bootstrap.sh | bash -s -- upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
+```
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/bootstrap.sh | bash -s -- rollback
 ```
 
@@ -38,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/oripka/packetsafari-onprem/main/boo
 ## Host Prerequisites
 
 - Linux host with Docker and the Docker Compose plugin installed
-- `curl`, `python3`, and `tar` available on the host
+- `curl`, `python3`, `tar`, `openssl`, and `zstd`/GNU tar zstd support available on the host
 - write access to the managed runtime root (default: `/opt/packetsafari`)
 - network access to pull the release images referenced by the selected manifest
 - `python3` available on the host for the bootstrap shim and installed operator wrapper
@@ -52,6 +58,7 @@ The installer manages host state under `/opt/packetsafari` by default:
 - `compose/` - rendered compose bundle
 - `secrets/` - reserved for host-managed secret material and future file-backed workflows
 - `backups/` - upgrade and rollback snapshots
+- `tmp/` - temporary offline bundle extraction and split-file reassembly
 - `tooling/onprem/` - installed Python operator bundle
 - `bin/packetsafari-ops` - stable local command that runs the installed operator tool through `python3`
 
@@ -66,6 +73,7 @@ packetsafari-ops install --license /path/to/license-token.json --manifest ./rele
 packetsafari-ops status --json
 packetsafari-ops tui
 packetsafari-ops upgrade --manifest ./release-manifest.json
+packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 packetsafari-ops onboard schema
 packetsafari-ops config show
@@ -83,8 +91,15 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - Native onboarding uses the existing local `/api/v2/onprem/onboarding/*` APIs. The menu can show schema output and validate, save, or finalize pasted draft JSON directly from the terminal.
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
-- `upgrade` snapshots manifest, env, deployment state, and compose files before applying the target release.
-- `rollback` restores the latest snapshot and restarts the stack.
+- `upgrade --manifest` runs a connected upgrade: validate the manifest, verify the license, stop app services, back up PostgreSQL and `/storage`, pull the target images, render Compose, run migrations from the target backend image, start with `--pull never`, run health checks, and promote only after success.
+- `upgrade --bundle` runs the same transaction without network access: verify `checksums.txt.sig`, verify all file checksums, load Docker images from the bundle, retag them as local offline images, render Compose to those local refs, and start with `--pull never`.
+- `rollback` restores the latest full snapshot, including PostgreSQL and `/storage`. Legacy metadata-only snapshots are still supported but are reported as metadata-only restores.
+
+Failure behavior is phase-aware:
+
+- before migrations: restore the previous manifest, env, state, and compose files, then restart the previous release
+- during or after migrations: restore PostgreSQL and `/storage` from the snapshot, then restart the previous release
+- after a successful migration: rollback is treated as a restore operation unless a release has an explicitly tested down-migration path
 
 ## First Admin Creation
 
@@ -130,9 +145,44 @@ The installer expects `images` to be a flat map of digest-pinned image reference
     "frontend": "registry.example.com/packetsafari/frontend@sha256:...",
     "backend": "registry.example.com/packetsafari/backend@sha256:...",
     "worker": "registry.example.com/packetsafari/backend@sha256:...",
+    "redis": "registry.example.com/packetsafari/redis-stack-server@sha256:...",
+    "postgres": "registry.example.com/packetsafari/postgres@sha256:...",
     "sharkd": "registry.example.com/packetsafari/sharkd@sha256:..."
   }
 }
 ```
 
 `scripts/render_compose.py` also accepts the richer `imageDetails.*.image` form emitted by the app release helper, but the rendered compose bundle always uses plain Docker image references.
+
+## Offline Bundle Shape
+
+Air-gapped upgrades use one signed archive copied to the customer host:
+
+```text
+packetsafari-10.0.1-offline.tar.zst
+  release-manifest.json
+  images/
+    frontend.tar.zst
+    backend.tar.zst
+    sharkd.tar.zst
+    redis.tar.zst
+    postgres.tar.zst
+  image-metadata.json
+  checksums.txt
+  checksums.txt.sig
+  sbom/
+  release-notes.md
+```
+
+Large bundles may be split and copied as `packetsafari-10.0.1-offline.tar.zst.part-aa`, `.part-ab`, and so on. Pass any part path to `packetsafari-ops upgrade --bundle`; the tool reassembles all matching parts, verifies the signature and checksums, then proceeds.
+
+Build a bundle on a connected release workstation:
+
+```bash
+python3 scripts/build_offline_bundle.py \
+  --manifest ./release-manifest.json \
+  --release-notes ./release-notes.md \
+  --sbom-dir ./sbom \
+  --sign-key /secure/internal/release-private.pem \
+  --output ./packetsafari-10.0.1-offline.tar.zst
+```

@@ -8,7 +8,8 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_started
 
   backend:
     image: "{{ backend_image }}"
@@ -16,11 +17,26 @@ services:
     restart: always
     env_file:
       - "{{ runtime_env_path }}"
+    environment:
+      PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
+      PACKETSAFARI_RUNTIME_POSTGRES_ENABLED: "true"
+      PACKETSAFARI_RUNTIME_ES_DISABLED: "true"
+      PACKETSAFARI_CAPTURE_SHARKD_HOST: sharkd
+      PACKETSAFARI_CAPTURE_SHARKD_PORT: "4448"
+      PACKETSAFARI_SKIP_LEGACY_INDEX_BOOTSTRAP: "true"
+      PACKETSAFARI_RUNTIME_CHECKPOINT_REDIS_DB: "0"
     ports:
       - "8080:80"
     volumes:
       - packetsafari-storage:/storage
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      sharkd:
+        condition: service_started
 
   worker:
     image: "{{ worker_image }}"
@@ -28,9 +44,38 @@ services:
     restart: always
     env_file:
       - "{{ runtime_env_path }}"
+    environment:
+      PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
+      PACKETSAFARI_RUNTIME_POSTGRES_ENABLED: "true"
+      PACKETSAFARI_RUNTIME_ES_DISABLED: "true"
+      PACKETSAFARI_CAPTURE_SHARKD_HOST: sharkd
+      PACKETSAFARI_CAPTURE_SHARKD_PORT: "4448"
+      PACKETSAFARI_SKIP_LEGACY_INDEX_BOOTSTRAP: "true"
+      PACKETSAFARI_RUNTIME_CHECKPOINT_REDIS_DB: "0"
     volumes:
       - packetsafari-storage:/storage
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      sharkd:
+        condition: service_started
+
+  postgres:
+    image: "{{ postgres_image }}"
+    container_name: packetsafari-postgres
+    restart: always
+    env_file:
+      - "{{ runtime_env_path }}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-packetsafari} -d $${POSTGRES_DB:-packetsafari}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - packetsafari-postgres:/var/lib/postgresql/data
 
   redis:
     image: "{{ redis_image }}"
@@ -38,17 +83,10 @@ services:
     restart: always
     env_file:
       - "{{ runtime_env_path }}"
-
-  es01:
-    image: "{{ es_image }}"
-    container_name: packetsafari-es01
-    restart: always
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    command: >-
+      sh -ec 'REDIS_PASSWORD="$${REDIS_PASSWORD:-$${PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD:-$${PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD:-}}}"; test -n "$$REDIS_PASSWORD"; exec /opt/redis-stack/bin/redis-server --dir /data --save 20 1 --loglevel warning --protected-mode no --requirepass "$$REDIS_PASSWORD" --loadmodule /opt/redis-stack/lib/rediscompat.so --loadmodule /opt/redis-stack/lib/redisearch.so MAXSEARCHRESULTS 10000 MAXAGGREGATERESULTS 10000 --loadmodule /opt/redis-stack/lib/rejson.so'
     volumes:
-      - packetsafari-esdata:/usr/share/elasticsearch/data
+      - packetsafari-redis:/data
 
   sharkd:
     image: "{{ sharkd_image }}"
@@ -76,4 +114,5 @@ services:
 
 volumes:
   packetsafari-storage:
-  packetsafari-esdata:
+  packetsafari-postgres:
+  packetsafari-redis:

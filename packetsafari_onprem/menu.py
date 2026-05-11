@@ -21,6 +21,7 @@ from .operations import (
     show_runtime_env,
     status,
     supports_onprem_host_actions,
+    tune_runtime,
     upgrade_release,
 )
 
@@ -202,13 +203,19 @@ def _upgrade(ctx: MenuContext) -> None:
         print(f"{YELLOW}Upgrade is only supported for real on-prem runtime roots like /opt/packetsafari.{RESET}")
         _pause()
         return
-    manifest = input("Manifest path: ").strip()
+    source = input("Manifest or offline bundle path: ").strip()
+    is_bundle = any(token in source for token in (".tar", ".part-"))
     try:
         payload = upgrade_release(
             Namespace(
                 runtime_root=ctx.runtime_root,
                 container_runtime_root=ctx.container_runtime_root,
-                manifest=manifest,
+                manifest=None if is_bundle else source,
+                bundle=source if is_bundle else None,
+                bundle_public_key=None,
+                allow_unsigned_bundle=False,
+                health_timeout=180,
+                skip_health_check=False,
             )
         )
         print(json.dumps(payload, indent=2))
@@ -230,6 +237,30 @@ def _rollback(ctx: MenuContext) -> None:
             Namespace(
                 runtime_root=ctx.runtime_root,
                 container_runtime_root=ctx.container_runtime_root,
+            )
+        )
+        print(json.dumps(payload, indent=2))
+    except Exception as exc:
+        print(f"{RED}Error:{RESET} {exc}")
+    _pause()
+
+
+def _tune_auto(ctx: MenuContext) -> None:
+    _clear()
+    _header(["Updates & Rollback", "Tune Host Sizing"], ctx)
+    layout = runtime_layout(ctx.runtime_root, ctx.container_runtime_root)
+    if not supports_onprem_host_actions(layout):
+        print(f"{YELLOW}Sizing is only supported for real on-prem runtime roots like /opt/packetsafari.{RESET}")
+        _pause()
+        return
+    apply_now = input("Apply by recreating containers with docker compose up -d? [y/N]: ").strip().lower() in {"y", "yes"}
+    try:
+        payload = tune_runtime(
+            Namespace(
+                runtime_root=ctx.runtime_root,
+                container_runtime_root=ctx.container_runtime_root,
+                profile="auto",
+                apply=apply_now,
             )
         )
         print(json.dumps(payload, indent=2))
@@ -309,6 +340,7 @@ def _update_items(_ctx: MenuContext) -> list[MenuItem]:
     return [
         MenuItem("Upgrade From Manifest", "Apply a target on-prem release manifest.", action=_upgrade),
         MenuItem("Rollback Latest Snapshot", "Restore the most recent on-prem backup snapshot.", action=_rollback),
+        MenuItem("Tune Host Sizing", "Generate an auto sizing profile from host CPU, memory, and storage.", action=_tune_auto),
     ]
 
 

@@ -16,8 +16,8 @@
     "frontend": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/frontend@sha256:frontenddigest",
     "backend": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/backend@sha256:backenddigest",
     "worker": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/backend@sha256:backenddigest",
-    "redis": "redis/redis-stack-server:latest",
-    "es01": "docker.elastic.co/elasticsearch/elasticsearch:7.17.8",
+    "redis": "registry.example.com/packetsafari/redis-stack-server@sha256:redisdigest",
+    "postgres": "registry.example.com/packetsafari/postgres@sha256:postgresdigest",
     "sharkd": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/sharkd@sha256:sharkddigest"
   }
 }

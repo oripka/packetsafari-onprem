@@ -14,6 +14,13 @@ PacketSafari on-prem license tokens are signed offline entitlement tokens. The i
 | `deployment_id` | Stable deployment identifier. |
 | `support_tier` | Support tier, usually `standard`, `priority`, or `enterprise`. |
 
+## Optional upgrade claims
+
+| Claim | Description |
+| --- | --- |
+| `channel` | Release channel allowed by the license. If both the license and release manifest set a channel, they must match. |
+| `allowed_versions` | Optional exact allow-list of release versions. When present, `packetsafari-ops upgrade` refuses any target version not listed here. |
+
 ## Create
 
 ```bash
@@ -28,6 +35,7 @@ python3 scripts/license_create.py \
   --max-agent-runs-per-month 1000 \
   --agent-enabled \
   --channel stable \
+  --allowed-version 10.0.1 \
   --days 365 \
   --output /tmp/packetsafari-license-token.json
 ```

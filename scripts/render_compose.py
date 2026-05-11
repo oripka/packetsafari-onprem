@@ -32,14 +32,14 @@ def main() -> int:
         "backend_image": backend_image,
         "worker_image": image_ref(images, "worker", backend_image),
         "redis_image": image_ref(images, "redis", "redis/redis-stack-server:latest"),
-        "es_image": image_ref(images, "es01", "docker.elastic.co/elasticsearch/elasticsearch:7.17.8"),
+        "postgres_image": image_ref(images, "postgres", "postgres:16"),
         "sharkd_image": image_ref(images, "sharkd"),
         "vector_image": image_ref(images, "vector", "timberio/vector:0.39.0-alpine"),
         "runtime_env_path": args.runtime_env_path,
         "host_runtime_root": args.host_runtime_root,
         "container_runtime_root": args.container_runtime_root,
     }
-    missing = [key for key in ("frontend_image", "backend_image", "worker_image", "sharkd_image") if not values[key]]
+    missing = [key for key in ("frontend_image", "backend_image", "worker_image", "redis_image", "postgres_image", "sharkd_image") if not values[key]]
     if missing:
         raise SystemExit(f"Manifest missing required image entries: {', '.join(missing)}")
     for key, value in values.items():

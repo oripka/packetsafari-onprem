@@ -21,6 +21,7 @@ def main() -> int:
     parser.add_argument("--agent-enabled", dest="agent_enabled", action="store_true", default=True)
     parser.add_argument("--no-agent", dest="agent_enabled", action="store_false")
     parser.add_argument("--channel", default="stable")
+    parser.add_argument("--allowed-version", dest="allowed_versions", action="append", default=[])
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--output", required=True)
     parser.add_argument("--notes", default="")
@@ -45,6 +46,7 @@ def main() -> int:
         "issuedAt": issued_at.isoformat(),
         "expiresAt": expires_at,
         "channel": args.channel,
+        "allowed_versions": [str(item).strip() for item in args.allowed_versions if str(item).strip()],
         "notes": args.notes,
     }
     payload_bytes = canonical_bytes(payload)

@@ -23,6 +23,7 @@ if __package__ in {None, ""}:
         show_initial_admin_command,
         show_runtime_env,
         status,
+        tune_runtime,
         upgrade_release,
     )
 else:
@@ -42,6 +43,7 @@ else:
         show_initial_admin_command,
         show_runtime_env,
         status,
+        tune_runtime,
         upgrade_release,
     )
 
@@ -61,14 +63,25 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--audit-retention-days")
     install.add_argument("--audit-forwarding-mode")
     install.add_argument("--audit-forwarder-type")
+    install.add_argument("--size", choices=["auto", "small", "medium", "large", "none"], default="auto")
 
     status_parser = subparsers.add_parser("status", help="Show installer/runtime status.")
     status_parser.add_argument("--json", action="store_true")
 
-    upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest.")
-    upgrade.add_argument("--manifest", required=True)
+    upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest or offline bundle.")
+    source = upgrade.add_mutually_exclusive_group(required=True)
+    source.add_argument("--manifest", help="Connected upgrade release manifest.")
+    source.add_argument("--bundle", help="Air-gapped offline bundle (.tar.zst or split .part-* file).")
+    upgrade.add_argument("--bundle-public-key", help="PacketSafari release public key for offline bundle signature verification.")
+    upgrade.add_argument("--allow-unsigned-bundle", action="store_true", help="Development only: allow an unsigned offline bundle.")
+    upgrade.add_argument("--health-timeout", type=int, default=180)
+    upgrade.add_argument("--skip-health-check", action="store_true")
 
     subparsers.add_parser("rollback", help="Restore the latest runtime snapshot.")
+
+    tune = subparsers.add_parser("tune", help="Generate host-sized runtime and compose settings.")
+    tune.add_argument("--profile", choices=["auto", "small", "medium", "large", "none"], default="auto")
+    tune.add_argument("--apply", action="store_true", help="Recreate the stack with the generated compose sizing override.")
 
     onboard = subparsers.add_parser("onboard", help="Operate on local onboarding APIs.")
     onboard.add_argument("--api-base-url")
@@ -124,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "rollback":
         print(json.dumps(rollback_release(args), indent=2))
+        return 0
+    if args.command == "tune":
+        print(json.dumps(tune_runtime(args), indent=2))
         return 0
     if args.command == "onboard":
         client = LocalApiClient(args.api_base_url)
