@@ -30,6 +30,23 @@ DEFAULT_CONTAINER_RUNTIME_ROOT = "/storage/onprem"
 DEFAULT_API_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_DATA_ROOT = str(Path.home() / "packetsafari-data")
 DEPLOYMENT_PROFILES = {"onprem", "saas"}
+SAAS_REQUIRED_ENV_KEYS = [
+    "PACKETSAFARI_PUBLIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "PACKETSAFARI_PADDLE_API_KEY",
+    "PACKETSAFARI_PADDLE_WEBHOOK_SECRET",
+]
+INVALID_REQUIRED_ENV_VALUES = {
+    "",
+    "changeme",
+    "change-me",
+    "todo",
+    "replace-me",
+    "example",
+    "example-secret",
+    "ps_proxy_openai_api_key",
+    "ps_proxy_paddle_api_key",
+}
 BACKUP_MODES = {"inline", "require-recent", "skip"}
 MIB = 1024 * 1024
 GIB = 1024 * MIB
@@ -1093,16 +1110,49 @@ def validate_upgrade_path(layout: RuntimeLayout, manifest: dict) -> None:
         raise RuntimeError(f"Current release {current or 'unknown'} is not listed in target upgradeableFrom.")
 
 
-def validate_required_env(layout: RuntimeLayout, manifest: dict) -> None:
+def _profile_required_env_keys(profile: str) -> list[str]:
+    if profile == "saas":
+        return list(SAAS_REQUIRED_ENV_KEYS)
+    return []
+
+
+def _merged_required_env_keys(manifest: dict, *, profile: str) -> list[str]:
+    keys: list[str] = []
+    for item in _profile_required_env_keys(profile) + [str(item).strip() for item in (manifest.get("requiredEnv") or [])]:
+        key = str(item or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _required_env_value_is_valid(key: str, value: str) -> bool:
+    normalized = str(value or "").strip().strip("'\"")
+    if not normalized:
+        return False
+    if normalized.lower() in INVALID_REQUIRED_ENV_VALUES:
+        return False
+    if normalized.startswith("${") and normalized.endswith("}"):
+        return False
+    if key == "PACKETSAFARI_PUBLIC_BASE_URL":
+        return normalized.startswith(("https://", "http://"))
+    return True
+
+
+def validate_required_env(layout: RuntimeLayout, manifest: dict, *, profile: str) -> None:
     runtime_env = parse_env_file(layout.runtime_env_path)
-    required = [str(item).strip() for item in (manifest.get("requiredEnv") or []) if str(item).strip()]
-    missing = [key for key in required if not str(runtime_env.get(key, "")).strip()]
+    required = _merged_required_env_keys(manifest, profile=profile)
+    missing = [key for key in required if not _required_env_value_is_valid(key, str(runtime_env.get(key, "")))]
     if missing:
-        raise RuntimeError(f"Target manifest requires missing runtime env keys: {', '.join(missing)}")
+        profile_note = " for SaaS profile" if profile == "saas" else ""
+        raise RuntimeError(
+            f"Target manifest requires missing or placeholder runtime env keys{profile_note}: {', '.join(missing)}. "
+            "Run `packetsafari-ops config prompt-env --profile "
+            f"{profile} --manifest <release-manifest>` or update the managed runtime env before deploying."
+        )
 
 
-def _required_env_keys(manifest: dict) -> list[str]:
-    return [str(item).strip() for item in (manifest.get("requiredEnv") or []) if str(item).strip()]
+def _required_env_keys(manifest: dict, *, profile: str = "onprem") -> list[str]:
+    return _merged_required_env_keys(manifest, profile=profile)
 
 
 def _secret_env_key(key: str) -> bool:
@@ -1206,15 +1256,16 @@ def configure_required_env(args) -> dict:
         default_name="release-manifest.json",
     )
     manifest = _read_json(manifest_path, {})
-    required = _required_env_keys(manifest)
+    profile = deployment_profile(args)
+    required = _required_env_keys(manifest, profile=profile)
     env_path = Path(str(getattr(args, "output", "") or "")).expanduser() if getattr(args, "output", None) else layout.runtime_env_path
     existing = parse_env_file(env_path)
-    missing = [key for key in required if not str(existing.get(key, "")).strip()]
+    missing = [key for key in required if not _required_env_value_is_valid(key, str(existing.get(key, "")))]
     action = str(getattr(args, "action", "") or "")
 
     if action == "check-env":
         return {
-            "profile": deployment_profile(args),
+            "profile": profile,
             "manifest": str(manifest_path),
             "envPath": str(env_path),
             "required": required,
@@ -1257,13 +1308,13 @@ def configure_required_env(args) -> dict:
         ],
     )
     return {
-        "profile": deployment_profile(args),
+        "profile": profile,
         "manifest": str(manifest_path),
         "envPath": str(env_path),
         "required": required,
         "prompted": prompted,
         "missingBefore": missing,
-        "missingAfter": [key for key in required if not str(values.get(key, "")).strip()],
+        "missingAfter": [key for key in required if not _required_env_value_is_valid(key, str(values.get(key, "")))],
         "ok": True,
     }
 
@@ -1549,6 +1600,9 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         'PACKETSAFARI_CAPTURE_SHARKD_HOST="sharkd"',
         'PACKETSAFARI_CAPTURE_SHARKD_PORT="4448"',
         'PACKETSAFARI_CAPTURE_SHARKD_PROTOCOL="ws"',
+        'PACKETSAFARI_PUBLIC_BASE_URL=""',
+        'CORS_ALLOWED_ORIGINS=""',
+        'PACKETSAFARI_AUTH_COOKIE_SECURE="true"',
         'NUXT_PUBLIC_API_BASE="/api/v2/"',
         'NUXT_PUBLIC_SHARKD_WS_URL=""',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
@@ -2222,7 +2276,7 @@ def upgrade_release(args) -> dict:
                 verify_license_allows_release(layout, manifest)
             else:
                 verify_saas_operator_authorization(layout, args, manifest)
-            validate_required_env(layout, manifest)
+            validate_required_env(layout, manifest, profile=profile)
             external_backup_proof = None
             if backup_mode == "require-recent":
                 external_backup_proof = verify_external_backup_proof(
