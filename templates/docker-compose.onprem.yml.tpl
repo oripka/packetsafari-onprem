@@ -5,10 +5,15 @@ services:
     restart: always
     env_file:
       - "{{ runtime_env_path }}"
+    environment:
+      NUXT_PUBLIC_API_BASE: "${NUXT_PUBLIC_API_BASE:-/api/v2/}"
+      NUXT_PUBLIC_SHARKD_WS_URL: "${NUXT_PUBLIC_SHARKD_WS_URL:-}"
     ports:
       - "3000:3000"
     depends_on:
       backend:
+        condition: service_started
+      sharkd:
         condition: service_started
 
   storage-init:

@@ -1549,6 +1549,8 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         'PACKETSAFARI_CAPTURE_SHARKD_HOST="sharkd"',
         'PACKETSAFARI_CAPTURE_SHARKD_PORT="4448"',
         'PACKETSAFARI_CAPTURE_SHARKD_PROTOCOL="ws"',
+        'NUXT_PUBLIC_API_BASE="/api/v2/"',
+        'NUXT_PUBLIC_SHARKD_WS_URL=""',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
         f"PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET={quote_env_value(sharkd_secret)}",
     ]

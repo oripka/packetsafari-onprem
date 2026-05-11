@@ -89,6 +89,15 @@ sudo usermod -aG docker "$USER"
 Log out and back in after adding the user to the `docker` group, or run
 deployment commands with `sudo`.
 
+Expose only the ports needed for the deployment:
+
+- `22/tcp` for operator SSH
+- `3000/tcp` for the frontend if accessed directly
+- `8080/tcp` for backend health/API if accessed directly
+- `4448/tcp` for direct browser-to-sharkd WebSocket traffic
+
+The frontend intentionally connects directly to sharkd for low-latency packet views. If DNS, NAT, or a load balancer changes the externally reachable sharkd address, set `NUXT_PUBLIC_SHARKD_WS_URL` to that explicit `ws://` or `wss://` URL.
+
 ## Runtime Layout
 
 The installer manages host state under `/opt/packetsafari` by default:
