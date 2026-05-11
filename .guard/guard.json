@@ -1,7 +1,10 @@
 {
   "allowPty": true,
   "network": {
-    "allowedDomains": [],
+    "allowedDomains": [
+      "cdn.jsdelivr.net",
+      "api.iconify.design"
+    ],
     "deniedDomains": [],
     "allowLocalBinding": true,
     "allowLoopbackConnections": false,
