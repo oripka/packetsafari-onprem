@@ -47,9 +47,9 @@ packetsafari-ops rollback
 `bootstrap.sh` first looks for `bootstrap-manifest.json` and
 `packetsafari-onprem.tar.gz` next to the script. If those files are present, it
 uses them without reaching GitHub or another public location. Otherwise it
-downloads the full on-prem bundle, verifies the Python CLI checksum from
-`bootstrap-manifest.json`, and launches the operator CLI directly with
-`python3`.
+downloads the full on-prem bundle, verifies the on-prem tooling archive and
+Python CLI checksums from `bootstrap-manifest.json`, and launches the operator
+CLI directly with `python3`.
 
 Production installers should be pinned to an authenticated release location, not a mutable public branch. The SaaS customer portal mints short-lived download URLs for `bootstrap.sh`, `packetsafari-onprem.tar.gz`, release manifests, verification material, and offline bundles.
 
@@ -372,6 +372,14 @@ packetsafari-10.0.1-offline.tar.zst
 ```
 
 Large bundles may be split and copied as `packetsafari-10.0.1-offline.tar.zst.part-aa`, `.part-ab`, and so on. Pass any local part path to `packetsafari-ops upgrade --bundle`; the tool reassembles all matching parts, verifies the signature and checksums, then proceeds. Remote HTTP/HTTPS bundle URLs must point to the complete reassembled archive.
+
+Offline releases also ship the on-prem operator tooling next to the image
+bundle as `packetsafari-onprem.tar.gz`. For fresh installs, run the packaged
+`bootstrap.sh install --bundle ...`; for upgrades, prefer the packaged
+`bootstrap.sh upgrade --bundle ...` or update the installed tooling before
+running `packetsafari-ops upgrade --bundle ...` directly. Existing hosts with an
+older `packetsafari-ops` cannot understand newer manifest tooling requirements
+until that tooling archive has been applied.
 
 Build a bundle on a connected release workstation:
 

@@ -117,6 +117,19 @@ else
   else
     fetch_url "${ARCHIVE_URL}" "${ARCHIVE_PATH}"
   fi
+
+  EXPECTED_ARCHIVE_SHA="$(python3 - <<'PY' "${TMP_DIR}/bootstrap-manifest.json"
+import json, sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+print(((data.get("files") or {}).get("packetsafari-onprem.tar.gz") or {}).get("sha256", ""))
+PY
+)"
+  ACTUAL_ARCHIVE_SHA="$(sha256_file "$ARCHIVE_PATH")"
+  if [ -n "$EXPECTED_ARCHIVE_SHA" ] && [ "$EXPECTED_ARCHIVE_SHA" != "REPLACE_ARCHIVE_SHA256" ] && [ "$EXPECTED_ARCHIVE_SHA" != "$ACTUAL_ARCHIVE_SHA" ]; then
+    echo "PacketSafari on-prem archive checksum verification failed." >&2
+    exit 1
+  fi
+
   tar -xzf "${ARCHIVE_PATH}" -C "${TMP_DIR}"
 
   BUNDLE_DIR="$(find "${TMP_DIR}" -maxdepth 1 -type d -name 'packetsafari-onprem-*' | head -n1)"

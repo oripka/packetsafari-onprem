@@ -166,6 +166,8 @@ def prepare_infra_images(version: str, *, pull: bool) -> dict[str, str]:
 
 
 def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str, images: dict[str, str], *, platform: str) -> Path:
+    tooling_version_path = REPO_ROOT / "VERSION"
+    tooling_version = tooling_version_path.read_text(encoding="utf-8").strip() if tooling_version_path.exists() else "local"
     manifest = {
         "version": version,
         "channel": channel,
@@ -175,6 +177,9 @@ def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str,
         "configSchemaVersion": 1,
         "platform": platform,
         "requiredEnv": required_onprem_env(app_root),
+        "tooling": {
+            "minOpsVersion": tooling_version,
+        },
         "images": images,
     }
     path = output_dir / "release-manifest.json"
@@ -257,14 +262,21 @@ def create_onprem_archive(output_dir: Path) -> Path:
 def write_bootstrap_files(output_dir: Path) -> None:
     shutil.copy2(REPO_ROOT / "bootstrap.sh", output_dir / "bootstrap.sh")
     version_path = REPO_ROOT / "VERSION"
+    archive_path = output_dir / "packetsafari-onprem.tar.gz"
     if version_path.exists():
         shutil.copy2(version_path, output_dir / "VERSION")
+        version = version_path.read_text(encoding="utf-8").strip()
     else:
         (output_dir / "VERSION").write_text("local\n", encoding="utf-8")
+        version = "local"
     manifest = {
         "schemaVersion": 1,
+        "toolingVersion": version,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "files": {
+            "packetsafari-onprem.tar.gz": {
+                "sha256": sha256(archive_path) if archive_path.exists() else "",
+            },
             "packetsafari_onprem/cli.py": {
                 "sha256": sha256(REPO_ROOT / "packetsafari_onprem" / "cli.py"),
             },

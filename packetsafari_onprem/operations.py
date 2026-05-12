@@ -193,6 +193,53 @@ def version() -> str:
     return __version__
 
 
+def _manifest_tooling_requirements(manifest: dict) -> dict:
+    tooling = manifest.get("tooling")
+    return tooling if isinstance(tooling, dict) else {}
+
+
+def required_ops_version(manifest: dict) -> str:
+    tooling = _manifest_tooling_requirements(manifest)
+    return str(tooling.get("minOpsVersion") or tooling.get("minimumOpsVersion") or "").strip()
+
+
+def tooling_update_status(manifest: dict) -> dict:
+    required = required_ops_version(manifest)
+    current = version()
+    if not required:
+        return {
+            "required": False,
+            "currentVersion": current,
+            "requiredVersion": "",
+            "status": "not_required",
+            "message": "Release manifest does not declare a minimum packetsafari-ops version.",
+        }
+    if _version_key(current) < _version_key(required):
+        return {
+            "required": True,
+            "currentVersion": current,
+            "requiredVersion": required,
+            "status": "upgrade_required",
+            "message": (
+                f"This release requires packetsafari-ops {required} or newer; "
+                f"this host is running {current}. Update the on-prem tooling before applying the release."
+            ),
+        }
+    return {
+        "required": True,
+        "currentVersion": current,
+        "requiredVersion": required,
+        "status": "ok",
+        "message": f"packetsafari-ops {current} satisfies release requirement {required}.",
+    }
+
+
+def validate_tooling_requirement(manifest: dict) -> None:
+    status = tooling_update_status(manifest)
+    if status["status"] == "upgrade_required":
+        raise RuntimeError(str(status["message"]))
+
+
 def runtime_layout(runtime_root: str = DEFAULT_RUNTIME_ROOT, container_runtime_root: str = DEFAULT_CONTAINER_RUNTIME_ROOT) -> RuntimeLayout:
     return RuntimeLayout(Path(runtime_root).expanduser(), Path(container_runtime_root).expanduser())
 
@@ -1878,6 +1925,7 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         "manifest": str(manifest_path),
         "source": _update_manifest_source(args, layout),
         "backupMode": resolve_backup_mode(args, profile=_requested_or_active_profile(args, layout)),
+        "tooling": tooling_update_status(manifest),
     }
 
 
@@ -2720,6 +2768,7 @@ def upgrade_release(args) -> dict:
             maybe_fail_upgrade_simulation(layout, args, "preflight")
 
             manifest = _read_json(target_manifest_path, {})
+            validate_tooling_requirement(manifest)
             validate_upgrade_path(layout, manifest)
             if profile == "onprem":
                 verify_license_allows_release(layout, manifest)
