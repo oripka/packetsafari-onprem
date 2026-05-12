@@ -1,0 +1,21 @@
+{
+  "approved_hosts": [
+    {
+      "approved_at": "2026-04-03T12:57:28.039521+00:00",
+      "approved_by": "codex",
+      "host": "oidc.external.test",
+      "notes": "live identity test fixture",
+      "port": 19090,
+      "scheme": "http"
+    },
+    {
+      "approved_at": "2026-04-03T12:58:08.705243+00:00",
+      "approved_by": "codex",
+      "host": "saml.external.test",
+      "notes": "live identity test fixture",
+      "port": 19100,
+      "scheme": "http"
+    }
+  ],
+  "version": 1
+}

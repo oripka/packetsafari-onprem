@@ -1,0 +1,48 @@
+dns:
+  listen: "off"
+  proxy_ip: "172.20.0.2"
+proxy:
+  http_listen: ":10000"
+  https_listen: "off"
+tls:
+  ca_cert: "/var/lib/packetsafari/egress-proxy/ca.crt"
+  ca_key: "/var/lib/packetsafari/egress-proxy/ca.key"
+  cert_cache_size: 1000
+  leaf_cert_expiry_hours: 168
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "api.openai.com"
+        - "api.paddle.com"
+        - "auth.openai.com"
+        - "email.eu-central-1.amazonaws.com"
+        - "oidc.external.test"
+        - "saml.external.test"
+        - "sandbox-api.paddle.com"
+        - "sslbl.abuse.ch"
+        - "www.openinfosecfoundation.org"
+  - name: secrets
+    config:
+      secrets:
+        - source:
+            type: "env"
+            var: OPENAI_API_KEY
+          proxy_value: "ps_proxy_openai_api_key"
+          match_headers:
+            - "Authorization"
+          match_body: false
+          rules:
+            - host: "api.openai.com"
+        - source:
+            type: "env"
+            var: PACKETSAFARI_PADDLE_API_KEY
+          proxy_value: "ps_proxy_paddle_api_key"
+          match_headers:
+            - "Authorization"
+          match_body: false
+          rules:
+            - host: "api.paddle.com"
+            - host: "sandbox-api.paddle.com"
+log:
+  level: "info"

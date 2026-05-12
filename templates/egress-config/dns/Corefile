@@ -1,0 +1,9 @@
+.:53 {
+    health
+    ready
+    hosts /etc/coredns/internal.hosts {
+        ttl 60
+        reload 5s
+        no_reverse
+    }
+}

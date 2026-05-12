@@ -71,12 +71,28 @@ def main() -> int:
         "redis_image": image_ref(images, "redis", "redis/redis-stack-server:latest"),
         "postgres_image": image_ref(images, "postgres", "postgres:16"),
         "sharkd_image": image_ref(images, "sharkd"),
+        "egress_dns_image": image_ref(
+            images,
+            "egress-dns",
+            "coredns/coredns:1.11.3@sha256:9caabbf6238b189a65d0d6e6ac138de60d6a1c419e5a341fbbb7c78382559c6e",
+        ),
+        "egress_ironproxy_image": image_ref(images, "egress-ironproxy"),
+        "egress_firewall_image": image_ref(images, "egress-firewall"),
         "vector_image": image_ref(images, "vector", "timberio/vector:0.39.0-alpine"),
         "runtime_env_path": args.runtime_env_path,
         "host_runtime_root": args.host_runtime_root,
         "container_runtime_root": args.container_runtime_root,
     }
-    required_image_keys = ["backend_image", "worker_image", "redis_image", "postgres_image", "sharkd_image"]
+    required_image_keys = [
+        "backend_image",
+        "worker_image",
+        "redis_image",
+        "postgres_image",
+        "sharkd_image",
+        "egress_dns_image",
+        "egress_ironproxy_image",
+        "egress_firewall_image",
+    ]
     if not _omit_frontend(manifest, args.profile):
         required_image_keys.insert(0, "frontend_image")
     missing = [key for key in required_image_keys if not values[key]]

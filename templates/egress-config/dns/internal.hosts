@@ -1,0 +1,12 @@
+172.20.0.2 egress-ironproxy egress-ironproxy.svc.packetsafari.internal
+172.20.0.3 egress-dns egress-dns.svc.packetsafari.internal
+172.20.0.10 postgres postgres.svc.packetsafari.internal
+172.20.0.11 redis redis.svc.packetsafari.internal
+172.20.0.20 backend backend.svc.packetsafari.internal
+172.20.0.21 worker worker.svc.packetsafari.internal
+172.20.0.23 sharkd sharkd.svc.packetsafari.internal
+172.20.0.24 init init.svc.packetsafari.internal
+172.20.0.24 storage-init storage-init.svc.packetsafari.internal
+172.20.0.30 frontend frontend.svc.packetsafari.internal
+172.20.0.190 oidc.external.test
+172.20.0.191 saml.external.test

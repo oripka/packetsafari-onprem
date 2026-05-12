@@ -18,6 +18,9 @@
     "worker": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/backend@sha256:backenddigest",
     "redis": "registry.example.com/packetsafari/redis-stack-server@sha256:redisdigest",
     "postgres": "registry.example.com/packetsafari/postgres@sha256:postgresdigest",
-    "sharkd": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/sharkd@sha256:sharkddigest"
+    "sharkd": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/sharkd@sha256:sharkddigest",
+    "egress-dns": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/egress-dns@sha256:egressdnsdigest",
+    "egress-ironproxy": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/egress-ironproxy@sha256:egressproxydigest",
+    "egress-firewall": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/packetsafari/egress-firewall@sha256:egressfirewalldigest"
   }
 }

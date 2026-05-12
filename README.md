@@ -331,7 +331,10 @@ The installer expects `images` to be a flat map of digest-pinned image reference
     "worker": "registry.example.com/packetsafari/backend@sha256:...",
     "redis": "registry.example.com/packetsafari/redis-stack-server@sha256:...",
     "postgres": "registry.example.com/packetsafari/postgres@sha256:...",
-    "sharkd": "registry.example.com/packetsafari/sharkd@sha256:..."
+    "sharkd": "registry.example.com/packetsafari/sharkd@sha256:...",
+    "egress-dns": "registry.example.com/packetsafari/egress-dns@sha256:...",
+    "egress-ironproxy": "registry.example.com/packetsafari/egress-ironproxy@sha256:...",
+    "egress-firewall": "registry.example.com/packetsafari/egress-firewall@sha256:..."
   }
 }
 ```
@@ -349,6 +352,9 @@ packetsafari-10.0.1-offline.tar.zst
     frontend.tar.zst
     backend.tar.zst
     sharkd.tar.zst
+    egress-dns.tar.zst
+    egress-ironproxy.tar.zst
+    egress-firewall.tar.zst
     redis.tar.zst
     postgres.tar.zst
   image-metadata.json

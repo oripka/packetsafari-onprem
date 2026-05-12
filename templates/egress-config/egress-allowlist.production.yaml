@@ -1,0 +1,148 @@
+{
+  "classifications": {
+    "admin-only": "Expected only during operator/admin maintenance flows, not steady-state user traffic.",
+    "feature-optional": "Allowed only when the corresponding feature or integration is enabled.",
+    "required-core": "Must remain allowed when enforcement starts.",
+    "unexpected": "Not seeded in the baseline and should be reviewed before allowlisting."
+  },
+  "destinations": [
+    {
+      "classification": "required-core",
+      "host": "api.openai.com",
+      "notes": "Primary OpenAI API endpoint.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Core AI / auth"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "auth.openai.com",
+      "notes": "Codex device login flow.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Core AI / auth"
+    },
+    {
+      "classification": "feature-optional",
+      "dynamic_config": "admin_ai_settings.provider_base_url when provider_type!=openai",
+      "notes": "Resolve and record the concrete host for any local or on-prem provider before enforcement.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "purpose": "Core AI / auth"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "email.eu-central-1.amazonaws.com",
+      "notes": "AWS SES HTTPS endpoint used by the active mail send path.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Current mail path"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "api.paddle.com",
+      "notes": "Production Paddle API.",
+      "owners": [
+        "backend"
+      ],
+      "port": 443,
+      "purpose": "Billing / account features"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "sandbox-api.paddle.com",
+      "notes": "Sandbox Paddle API.",
+      "owners": [
+        "backend"
+      ],
+      "port": 443,
+      "purpose": "Billing / account features"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "www.openinfosecfoundation.org",
+      "notes": "Suricata source index.",
+      "owners": [
+        "sharkd"
+      ],
+      "port": 443,
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "sslbl.abuse.ch",
+      "notes": "abuse.ch SSL blacklist.",
+      "owners": [
+        "sharkd"
+      ],
+      "port": 443,
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
+      "dynamic_config": "INTELLIGENCE_*_SOURCE_URL hostnames",
+      "notes": "Add concrete hosts from configured feed URLs before enforcement.",
+      "owners": [
+        "sharkd"
+      ],
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "oidc.external.test",
+      "managed_by": "packetsafari-egress-identity",
+      "notes": "Host-approved external identity provider endpoint routed through the egress proxy.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 19090,
+      "purpose": "Approved external identity providers"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "saml.external.test",
+      "managed_by": "packetsafari-egress-identity",
+      "notes": "Host-approved external identity provider endpoint routed through the egress proxy.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 19100,
+      "purpose": "Approved external identity providers"
+    }
+  ],
+  "monitor_mode": false,
+  "services": {
+    "backend": {
+      "egress_mode": "monitored"
+    },
+    "init": {
+      "egress_mode": "no-egress-expected"
+    },
+    "postgres": {
+      "egress_mode": "no-egress-expected"
+    },
+    "redis": {
+      "egress_mode": "no-egress-expected"
+    },
+    "sharkd": {
+      "egress_mode": "no-egress-expected"
+    },
+    "worker": {
+      "egress_mode": "monitored"
+    }
+  },
+  "version": 1
+}

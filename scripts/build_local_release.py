@@ -22,10 +22,15 @@ APP_SERVICES = {
     "backend": "backend-production",
     "sharkd": "sharkd-production",
 }
+APP_DOCKERFILE_SERVICES = {
+    "egress-ironproxy": "configuration/iron-proxy/Dockerfile",
+    "egress-firewall": "configuration/egress-firewall/Dockerfile",
+}
 IMAGE_REPOSITORY_PREFIX = "packetsafari"
 INFRA_IMAGES = {
     "redis": "redis/redis-stack-server:latest",
     "postgres": "postgres:16",
+    "egress-dns": "coredns/coredns:1.11.3@sha256:9caabbf6238b189a65d0d6e6ac138de60d6a1c419e5a341fbbb7c78382559c6e",
 }
 
 
@@ -117,6 +122,25 @@ def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_c
                 "WIRESHARK_BUILD_REV=1",
                 "--build-arg",
                 f"WIRESHARK_CACHE_BUST={wireshark_cache_bust}",
+                "-t",
+                image,
+                ".",
+            ],
+            cwd=app_root,
+            env=docker_env,
+        )
+        images[service] = image
+    for service, dockerfile in APP_DOCKERFILE_SERVICES.items():
+        image = f"{IMAGE_REPOSITORY_PREFIX}/{service}:{version}"
+        print(f"Building {service} image: {image}")
+        run(
+            [
+                "docker",
+                "build",
+                "--platform",
+                platform,
+                "-f",
+                dockerfile,
                 "-t",
                 image,
                 ".",

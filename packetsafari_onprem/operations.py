@@ -111,6 +111,10 @@ class RuntimeLayout:
         return self.runtime_root / "logging" / "vector"
 
     @property
+    def configuration_dir(self) -> Path:
+        return self.runtime_root / "configuration"
+
+    @property
     def tooling_root(self) -> Path:
         return self.runtime_root / "tooling" / "onprem"
 
@@ -253,6 +257,7 @@ def ensure_runtime_dirs(layout: RuntimeLayout) -> None:
         layout.backup_dir,
         layout.tmp_dir,
         layout.logging_dir,
+        layout.configuration_dir,
         layout.tooling_root,
         layout.bin_dir,
     ):
@@ -1107,6 +1112,9 @@ def write_helper_status(layout: RuntimeLayout, *, status: str = "ok", message: s
 
 def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> None:
     root = source_root or layout.tooling_root
+    config_source = root / "templates" / "egress-config"
+    if config_source.exists():
+        shutil.copytree(config_source, layout.configuration_dir, dirs_exist_ok=True)
     _run_script(
         root,
         "render_compose.py",
@@ -2165,7 +2173,7 @@ def restore_snapshot(layout: RuntimeLayout, snapshot_dir: Path, *, restore_data:
     _restore_metadata_snapshot(layout, snapshot_dir)
     render_logging_config(layout)
     if restore_data:
-        docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd"], timeout=120)
+        docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd", "egress-firewall", "egress-ironproxy", "egress-dns"], timeout=120)
         restore_postgres(layout, snapshot_dir)
         restore_storage(layout, snapshot_dir)
     docker_compose_up(layout, pull_policy="never")
@@ -2395,7 +2403,21 @@ def prepare_offline_bundle(
 
         if "worker" not in loaded_services and local_images.get("backend"):
             local_images["worker"] = local_images["backend"]
-        required = [service for service in ("frontend", "backend", "worker", "redis", "postgres", "sharkd") if service in images or service != "worker"]
+        required = [
+            service
+            for service in (
+                "frontend",
+                "backend",
+                "worker",
+                "redis",
+                "postgres",
+                "sharkd",
+                "egress-dns",
+                "egress-ironproxy",
+                "egress-firewall",
+            )
+            if service in images or service != "worker"
+        ]
         missing = [service for service in required if not local_images.get(service)]
         if missing:
             raise RuntimeError(f"Offline bundle missing required local image refs for: {', '.join(missing)}")
@@ -2719,7 +2741,7 @@ def upgrade_release(args) -> dict:
             }[backup_mode]
             if layout.compose_file.exists():
                 write_helper_status(layout, status="upgrading", message=f"Stopping app services and {backup_message}.")
-                docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd"], timeout=120)
+                docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd", "egress-firewall", "egress-ironproxy", "egress-dns"], timeout=120)
             else:
                 write_helper_status(layout, status="upgrading", message=f"No active Compose file found; treating this as a fresh deployment and {backup_message}.")
             snapshot_dir = snapshot_runtime(layout)
