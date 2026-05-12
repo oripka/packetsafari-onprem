@@ -1051,7 +1051,7 @@ def write_helper_status(layout: RuntimeLayout, *, status: str = "ok", message: s
     )
 
 
-def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None) -> None:
+def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> None:
     root = source_root or layout.tooling_root
     _run_script(
         root,
@@ -1067,6 +1067,8 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
             str(layout.runtime_root),
             "--container-runtime-root",
             str(layout.container_runtime_root),
+            "--profile",
+            profile,
             "--output",
             str(layout.compose_file),
         ],
@@ -1757,7 +1759,7 @@ def install_release(args) -> dict:
         logging_values = resolve_logging_values(args)
         write_runtime_env(layout, logging_values, onboarding_mode=True)
         sizing = write_sizing_profile(layout, profile=str(getattr(args, "size", "auto") or "auto"))
-        render_compose(layout, layout.release_manifest_path, source_root=bundle_root())
+        render_compose(layout, layout.release_manifest_path, source_root=bundle_root(), profile="onprem")
         render_logging_config(layout, source_root=bundle_root())
         write_deployment_state(
             layout,
@@ -2538,7 +2540,7 @@ def upgrade_release(args) -> dict:
                 )
 
             phase = "compose"
-            render_compose(layout, target_manifest_path)
+            render_compose(layout, target_manifest_path, profile=profile)
             render_logging_config(layout)
             maybe_fail_upgrade_simulation(layout, args, "compose")
             if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):

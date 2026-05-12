@@ -13,6 +13,42 @@ def image_ref(images: dict, key: str, default: str = "") -> str:
     return str(value or default)
 
 
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _profile_config(manifest: dict, profile: str) -> dict:
+    profiles = manifest.get("deploymentProfiles")
+    if isinstance(profiles, dict):
+        config = profiles.get(profile)
+        if isinstance(config, dict):
+            return config
+    return {}
+
+
+def _omit_frontend(manifest: dict, profile: str) -> bool:
+    if profile != "saas":
+        return False
+    config = _profile_config(manifest, profile)
+    return _truthy(config.get("staticFrontend")) or _truthy(config.get("omitFrontendService"))
+
+
+def _remove_service_block(compose_text: str, service: str) -> str:
+    lines = compose_text.splitlines()
+    output: list[str] = []
+    skipping = False
+    service_header = f"  {service}:"
+    for line in lines:
+        if line == service_header:
+            skipping = True
+            continue
+        if skipping and line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":"):
+            skipping = False
+        if not skipping:
+            output.append(line)
+    return "\n".join(output) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
@@ -21,6 +57,7 @@ def main() -> int:
     parser.add_argument("--runtime-env-path", default="/opt/packetsafari/env/runtime.env")
     parser.add_argument("--host-runtime-root", default="/opt/packetsafari")
     parser.add_argument("--container-runtime-root", default="/storage/onprem")
+    parser.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
     args = parser.parse_args()
 
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
@@ -39,11 +76,16 @@ def main() -> int:
         "host_runtime_root": args.host_runtime_root,
         "container_runtime_root": args.container_runtime_root,
     }
-    missing = [key for key in ("frontend_image", "backend_image", "worker_image", "redis_image", "postgres_image", "sharkd_image") if not values[key]]
+    required_image_keys = ["backend_image", "worker_image", "redis_image", "postgres_image", "sharkd_image"]
+    if not _omit_frontend(manifest, args.profile):
+        required_image_keys.insert(0, "frontend_image")
+    missing = [key for key in required_image_keys if not values[key]]
     if missing:
         raise SystemExit(f"Manifest missing required image entries: {', '.join(missing)}")
     for key, value in values.items():
         template = template.replace(f"{{{{ {key} }}}}", str(value))
+    if _omit_frontend(manifest, args.profile):
+        template = _remove_service_block(template, "frontend")
     Path(args.output).write_text(template, encoding="utf-8")
     return 0
 
