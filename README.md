@@ -44,9 +44,26 @@ packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 ```
 
-`bootstrap.sh` downloads the full on-prem bundle, verifies the Python CLI checksum from `bootstrap-manifest.json`, and then launches the operator menu directly with `python3`.
+`bootstrap.sh` first looks for `bootstrap-manifest.json` and
+`packetsafari-onprem.tar.gz` next to the script. If those files are present, it
+uses them without reaching GitHub or another public location. Otherwise it
+downloads the full on-prem bundle, verifies the Python CLI checksum from
+`bootstrap-manifest.json`, and launches the operator CLI directly with
+`python3`.
 
 Production installers should be pinned to an authenticated release location, not a mutable public branch. The SaaS customer portal mints short-lived download URLs for `bootstrap.sh`, `packetsafari-onprem.tar.gz`, release manifests, verification material, and offline bundles.
+
+A self-contained release directory for local HTTP, private S3, or removable
+media should contain at least:
+
+```text
+bootstrap.sh
+bootstrap-manifest.json
+packetsafari-onprem.tar.gz
+release-manifest.json
+release-public.pem
+packetsafari-<version>-offline.tar.zst
+```
 
 Bootstrap supports private HTTP/HTTPS download sources through environment variables:
 
@@ -148,6 +165,22 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - `upgrade --manifest` runs a connected upgrade: validate the manifest, verify the license, stop app services, back up PostgreSQL and `/storage`, pull the target images, render Compose, run migrations from the target backend image, start with `--pull never`, run health checks, and promote only after success.
 - `upgrade --bundle` runs the same transaction without network access: verify `checksums.txt.sig`, verify all file checksums, load Docker images from the bundle, retag them as local `packetsafari/<service>:<version>` images, render Compose to those local refs, and start with `--pull never`.
 - `rollback` restores the latest full snapshot, including PostgreSQL and `/storage`. Legacy metadata-only snapshots are still supported but are reported as metadata-only restores.
+
+## Current Validation Status
+
+As of May 12, 2026, the on-prem path has been validated on disposable Ubuntu
+ARM64 EC2 hosts:
+
+- fresh `install --bundle` from a local signed `10.0.0-beta.14` offline bundle
+- automatic Ubuntu Docker/Compose host dependency installation through bootstrap
+- onboarding, first admin creation, browser login, UI upload, complete indexing,
+  packet stats, enriched connections, upload insights, and security scan output
+- synthetic `10.0.0-beta.15` `upgrade --bundle` migration-failure simulation
+  with inline backup and automatic restore of PostgreSQL and `/storage`
+
+The `10.0.0-beta.15` bundle was generated only to exercise rollback mechanics.
+It was not a product release. Repeat the failure drill for each real customer
+release candidate.
 
 ## Single-Host SaaS Upgrade Profile
 
@@ -309,13 +342,13 @@ For a Mac-hosted Ubuntu VM validation release from the app repo `main` branch:
 ```bash
 python3 scripts/build_local_release.py \
   --app-root ../packetsafari \
-  --output-dir /Users/otr/packetsafari-data/releases/local/10.0.0-beta.9
+  --output-dir /Users/otr/packetsafari-data/releases/local/10.0.0-beta.14
 ```
 
 Then serve the generated directory:
 
 ```bash
-cd /Users/otr/packetsafari-data/releases/local/10.0.0-beta.9
+cd /Users/otr/packetsafari-data/releases/local/10.0.0-beta.14
 python3 -m http.server 9000 --bind 0.0.0.0
 ```
 
@@ -326,7 +359,7 @@ export PACKETSAFARI_ONPREM_RAW_BASE=http://<mac-ip>:9000
 export PACKETSAFARI_ONPREM_ARCHIVE_URL=http://<mac-ip>:9000/packetsafari-onprem.tar.gz
 export PACKETSAFARI_ONPREM_BOOTSTRAP_MANIFEST_URL=http://<mac-ip>:9000/bootstrap-manifest.json
 curl -fsSL http://<mac-ip>:9000/bootstrap.sh | sudo -E bash -s -- install \
-  --bundle http://<mac-ip>:9000/packetsafari-10.0.0-beta.9-offline.tar.zst \
+  --bundle http://<mac-ip>:9000/packetsafari-10.0.0-beta.14-offline.tar.zst \
   --bundle-public-key http://<mac-ip>:9000/release-public.pem \
   --allow-bundled-license-public-key
 ```

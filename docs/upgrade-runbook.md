@@ -65,6 +65,12 @@ them to the on-prem host, or pass the presigned HTTPS URL directly to
 `packetsafari-ops` when the host has outbound access. Do not use public S3
 objects or a mutable GitHub branch as the production install source.
 
+For self-contained local HTTP, private S3 directory sync, or removable-media
+installs, place `bootstrap.sh`, `bootstrap-manifest.json`, and
+`packetsafari-onprem.tar.gz` next to the release files. `bootstrap.sh` prefers
+those adjacent files before using configured HTTP/HTTPS URLs, so an operator can
+install from a copied release directory without depending on public GitHub.
+
 ## Single-Host SaaS Commands
 
 For the current SaaS deployment model where PacketSafari runs on one EC2 host,
@@ -209,11 +215,16 @@ so it cannot be triggered accidentally in customer environments.
 ```bash
 PACKETSAFARI_ENABLE_UPGRADE_SIMULATION=true \
   packetsafari-ops upgrade \
-    --manifest ./release-manifest.json \
-    --profile onprem \
+    --bundle ./packetsafari-10.0.1-offline.tar.zst \
+    --bundle-public-key ./release-public.pem \
     --backup-mode inline \
     --simulate-failure-phase migration
 ```
+
+The target release must be newer than the active release. If the same manifest
+or bundle is already active, the upgrade correctly exits during preflight with
+`Release is already active`; create a synthetic next-version bundle only on a
+disposable host when testing rollback mechanics.
 
 Supported phases are `preflight`, `compose`, `migration`, `healthcheck`, and
 `promote`. Migration, health-check, and promotion simulations create a temporary
@@ -241,6 +252,16 @@ tar -tf "$latest/storage.tar" | grep -E '(^|/)onprem(/|$)' && echo "invalid back
 If `docker compose stop` hangs on a service, `packetsafari-ops` enforces a
 host-side timeout and falls back to `docker compose kill` for the requested
 services before continuing rollback or upgrade.
+
+## Current Validation Status
+
+On May 12, 2026, a disposable Ubuntu ARM64 EC2 host completed a fresh
+`install --bundle` from a signed `10.0.0-beta.14` offline bundle. The same host
+then ran a synthetic `10.0.0-beta.15` migration-failure drill with
+`--backup-mode inline`. The simulation created both the PostgreSQL marker table
+and `/storage/upgrade-simulated-corruption.txt`, failed during migration,
+restored the prior data snapshot, restarted the previous release, and preserved
+the already indexed PCAP and post-index artifacts.
 
 ## Bundle Build
 

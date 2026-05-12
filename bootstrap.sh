@@ -103,14 +103,20 @@ if [ -f "${SCRIPT_DIR}/packetsafari_onprem/cli.py" ] && [ -f "${SCRIPT_DIR}/pypr
   BUNDLE_DIR="${SCRIPT_DIR}"
   cp "${SCRIPT_DIR}/bootstrap-manifest.json" "${TMP_DIR}/bootstrap-manifest.json"
 else
-  if [ -n "${BOOTSTRAP_MANIFEST_URL}" ]; then
+  if [ -f "${SCRIPT_DIR}/bootstrap-manifest.json" ]; then
+    cp "${SCRIPT_DIR}/bootstrap-manifest.json" "${TMP_DIR}/bootstrap-manifest.json"
+  elif [ -n "${BOOTSTRAP_MANIFEST_URL}" ]; then
     fetch_url "${BOOTSTRAP_MANIFEST_URL}" "${TMP_DIR}/bootstrap-manifest.json"
   else
     fetch "bootstrap-manifest.json" "${TMP_DIR}/bootstrap-manifest.json"
   fi
 
   ARCHIVE_PATH="${TMP_DIR}/packetsafari-onprem.tar.gz"
-  fetch_url "${ARCHIVE_URL}" "${ARCHIVE_PATH}"
+  if [ -f "${SCRIPT_DIR}/packetsafari-onprem.tar.gz" ]; then
+    cp "${SCRIPT_DIR}/packetsafari-onprem.tar.gz" "${ARCHIVE_PATH}"
+  else
+    fetch_url "${ARCHIVE_URL}" "${ARCHIVE_PATH}"
+  fi
   tar -xzf "${ARCHIVE_PATH}" -C "${TMP_DIR}"
 
   BUNDLE_DIR="$(find "${TMP_DIR}" -maxdepth 1 -type d -name 'packetsafari-onprem-*' | head -n1)"

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -32,7 +33,8 @@ def save_image(image: str, output: Path, *, pull: bool) -> Path:
     raw = output.with_suffix("")
     subprocess.run(["docker", "image", "save", image, "-o", str(raw)], check=True)
     if shutil.which("zstd"):
-        subprocess.run(["zstd", "-q", "-T0", "-f", str(raw), "-o", str(output)], check=True)
+        threads = str(os.getenv("ZSTD_THREADS") or "1").strip() or "1"
+        subprocess.run(["zstd", "-q", f"-T{threads}", "-f", str(raw), "-o", str(output)], check=True)
         raw.unlink(missing_ok=True)
         return output
     else:
@@ -60,11 +62,14 @@ def sign_checksums(checksums: Path, private_key: Path) -> None:
 
 def create_archive(bundle_root: Path, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    command = ["tar"]
     if output.name.endswith(".zst"):
-        command.append("--zstd")
-    command.extend(["-cf", str(output), "-C", str(bundle_root.parent), bundle_root.name])
-    subprocess.run(command, check=True)
+        raw = output.with_suffix("")
+        subprocess.run(["tar", "-cf", str(raw), "-C", str(bundle_root.parent), bundle_root.name], check=True)
+        threads = str(os.getenv("ZSTD_THREADS") or "1").strip() or "1"
+        subprocess.run(["zstd", "-q", f"-T{threads}", "-f", str(raw), "-o", str(output)], check=True)
+        raw.unlink(missing_ok=True)
+        return
+    subprocess.run(["tar", "-cf", str(output), "-C", str(bundle_root.parent), bundle_root.name], check=True)
 
 
 def split_file(path: Path, part_size_mb: int) -> list[Path]:
