@@ -2,6 +2,11 @@
 
 PacketSafari on-prem license tokens are signed offline entitlement tokens. The installer and app verify the token locally with `keys/license-public.pem`.
 
+The token envelope must declare `alg: RS256`. The installer and runtime both
+fail closed when required claims are missing, malformed, expired, signed with a
+different algorithm, or signed by a key that does not match the configured
+PacketSafari public key.
+
 ## Required claims
 
 | Claim | Description |
