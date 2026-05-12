@@ -111,11 +111,12 @@ packetsafari-ops install \
 ```
 
 The preferred customer source is the authenticated PacketSafari portal at
-`/app/account/releases`. The portal returns short-lived presigned URLs for
-private S3 release artifacts. Customers can download the files first and copy
-them to the on-prem host, or pass the presigned HTTPS URL directly to
-`packetsafari-ops` when the host has outbound access. Do not use public S3
-objects or a mutable GitHub branch as the production install source.
+`/app/account/releases`. The portal returns short-lived CloudFront signed URLs
+for private release artifacts; the S3 bucket remains private and blocked from
+public access. Customers can download the files first and copy them to the
+on-prem host, or pass the signed HTTPS URL directly to `packetsafari-ops` when
+the host has outbound access. Do not use public S3 objects or a mutable GitHub
+branch as the production install source.
 
 For self-contained local HTTP, private S3 directory sync, or removable-media
 installs, place `bootstrap.sh`, `bootstrap-manifest.json`, and

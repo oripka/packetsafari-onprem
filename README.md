@@ -79,7 +79,11 @@ curl -fsSL "$PACKETSAFARI_ONPREM_RAW_BASE/bootstrap.sh" | sudo -E bash -s -- ins
 
 Use `PACKETSAFARI_ONPREM_BASIC_AUTH=user:pass` or `PACKETSAFARI_ONPREM_DOWNLOAD_HEADER='x-api-key: ...'` when the hosting layer uses basic auth or a custom header. The same request options are available to `packetsafari-ops install` and `upgrade` as `--download-basic`, `--download-bearer-token`, and repeatable `--download-header`.
 
-For S3 presigned URLs, set `PACKETSAFARI_ONPREM_ARCHIVE_URL` and `PACKETSAFARI_ONPREM_BOOTSTRAP_MANIFEST_URL` to the individual presigned object URLs. The bootstrap script does not require a public bucket.
+For signed HTTP(S) URLs, set `PACKETSAFARI_ONPREM_ARCHIVE_URL` and
+`PACKETSAFARI_ONPREM_BOOTSTRAP_MANIFEST_URL` to the individual signed object
+URLs. The bootstrap script does not require a public bucket; production release
+downloads should come from the authenticated PacketSafari portal and
+CloudFront-signed URLs, not raw S3 object access.
 
 ## Host Prerequisites
 
