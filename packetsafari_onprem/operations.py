@@ -60,6 +60,9 @@ DEFAULT_LOGGING_VALUES = {
     "AUDIT_FORWARDING_MODE": "stdout_json",
     "AUDIT_FORWARDER_TYPE": "none",
 }
+GLOBAL_WRAPPER_PATH = Path("/usr/local/bin/packetsafari-ops")
+DEFAULT_UPDATE_PLATFORM = "linux-arm64"
+DEFAULT_UPDATE_BASE_URL = "https://releases.packetsafari.com"
 
 
 @dataclass(slots=True)
@@ -278,10 +281,14 @@ def resolve_backup_mode(args, *, profile: str) -> str:
     mode = raw or ("inline" if profile == "onprem" else "require-recent")
     if mode not in BACKUP_MODES:
         raise RuntimeError(f"Unsupported backup mode: {mode}")
-    if profile == "onprem" and mode == "skip":
-        raise RuntimeError("onprem upgrades do not support --backup-mode skip.")
-    if mode == "skip" and not _truthy(os.getenv("PACKETSAFARI_ALLOW_UNBACKED_UPGRADE")):
-        raise RuntimeError("Unbacked upgrades are disabled. Set PACKETSAFARI_ALLOW_UNBACKED_UPGRADE=true only for disposable development hosts.")
+    if mode == "skip" and not (
+        bool(getattr(args, "allow_unbacked_upgrade", False))
+        or _truthy(os.getenv("PACKETSAFARI_ALLOW_UNBACKED_UPGRADE"))
+    ):
+        raise RuntimeError(
+            "Unbacked upgrades are disabled. Pass --allow-unbacked-upgrade only for container-only releases "
+            "or disposable development hosts."
+        )
     return mode
 
 
@@ -433,6 +440,20 @@ def verify_saas_operator_authorization(layout: RuntimeLayout, args, manifest: di
 
 def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _profile_config(manifest: dict, profile: str) -> dict:
+    profiles = manifest.get("deploymentProfiles")
+    if isinstance(profiles, dict):
+        config = profiles.get(profile)
+        if isinstance(config, dict):
+            return config
+    return {}
+
+
+def _profile_uses_static_frontend(manifest: dict, profile: str) -> bool:
+    config = _profile_config(manifest, profile)
+    return _truthy(config.get("staticFrontend")) or _truthy(config.get("omitFrontendService"))
 
 
 def _is_url(source: str) -> bool:
@@ -1027,6 +1048,7 @@ def sync_bundle(layout: RuntimeLayout) -> None:
 
 
 def install_wrapper(layout: RuntimeLayout) -> None:
+    layout.bin_dir.mkdir(parents=True, exist_ok=True)
     cli_path = layout.tooling_root / "packetsafari_onprem" / "cli.py"
     wrapper = f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -1035,6 +1057,37 @@ exec python3 {str(cli_path)!r} "$@"
 """
     layout.wrapper_path.write_text(wrapper, encoding="utf-8")
     layout.wrapper_path.chmod(0o755)
+    install_global_wrapper(layout)
+
+
+def install_global_wrapper(layout: RuntimeLayout) -> None:
+    if layout.kind != "onprem-runtime-root":
+        return
+    GLOBAL_WRAPPER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if GLOBAL_WRAPPER_PATH.is_symlink() or not GLOBAL_WRAPPER_PATH.exists():
+        tmp_link = GLOBAL_WRAPPER_PATH.with_name(f".{GLOBAL_WRAPPER_PATH.name}.tmp")
+        try:
+            tmp_link.unlink()
+        except FileNotFoundError:
+            pass
+        tmp_link.symlink_to(layout.wrapper_path)
+        os.replace(tmp_link, GLOBAL_WRAPPER_PATH)
+        return
+    if GLOBAL_WRAPPER_PATH.is_file():
+        existing = GLOBAL_WRAPPER_PATH.read_text(encoding="utf-8", errors="ignore")
+        if "packetsafari_onprem" in existing or "packetsafari-ops" in existing:
+            GLOBAL_WRAPPER_PATH.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+exec {str(layout.wrapper_path)!r} "$@"
+""",
+                encoding="utf-8",
+            )
+            GLOBAL_WRAPPER_PATH.chmod(0o755)
+            return
+    raise RuntimeError(
+        f"Cannot install {GLOBAL_WRAPPER_PATH}: path exists and is not a PacketSafari-managed wrapper."
+    )
 
 
 def write_helper_status(layout: RuntimeLayout, *, status: str = "ok", message: str = "ready") -> None:
@@ -1044,6 +1097,7 @@ def write_helper_status(layout: RuntimeLayout, *, status: str = "ok", message: s
             "service": "packetsafari-ops",
             "installed": True,
             "commandPath": str(layout.wrapper_path),
+            "globalCommandPath": str(GLOBAL_WRAPPER_PATH) if layout.kind == "onprem-runtime-root" else "",
             "status": status,
             "message": message,
             "updatedAt": utc_now(),
@@ -1508,7 +1562,38 @@ def docker_compose_pull(layout: RuntimeLayout) -> None:
     subprocess.run([*_compose_base_command(layout), "pull"], check=True)
 
 
+def _rendered_compose_services(layout: RuntimeLayout) -> set[str]:
+    if not layout.compose_file.exists():
+        return set()
+    services: set[str] = set()
+    in_services = False
+    for raw_line in layout.compose_file.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        if raw_line == "services:":
+            in_services = True
+            continue
+        if in_services and raw_line and not raw_line.startswith(" "):
+            break
+        if not in_services:
+            continue
+        match = re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", raw_line)
+        if match:
+            services.add(match.group(1))
+    return services
+
+
+def _present_compose_services(layout: RuntimeLayout, services: list[str] | None) -> list[str] | None:
+    if not services or layout.kind == "local-data-root":
+        return services
+    present = _rendered_compose_services(layout)
+    if not present:
+        return services
+    return [service for service in services if service in present]
+
+
 def docker_compose_stop(layout: RuntimeLayout, *, services: list[str] | None = None, timeout: int = 120) -> None:
+    services = _present_compose_services(layout, services)
     if layout.kind == "local-data-root":
         repo_root = app_repo_root()
         if repo_root is None:
@@ -1704,6 +1789,104 @@ def _release_version(manifest_path: Path) -> str:
     return str((manifest or {}).get("version") or "")
 
 
+def _active_deployment_profile(layout: RuntimeLayout) -> str:
+    state = _read_json(layout.deployment_state_path, {})
+    mode = str(((state.get("deployment") or {}).get("mode") or "")).strip().lower()
+    return "saas" if mode == "saas" else "onprem"
+
+
+def _requested_or_active_profile(args, layout: RuntimeLayout) -> str:
+    raw = str(getattr(args, "profile", "") or "").strip().lower()
+    if raw:
+        if raw not in DEPLOYMENT_PROFILES:
+            raise RuntimeError(f"Unsupported deployment profile: {raw}")
+        return raw
+    return _active_deployment_profile(layout)
+
+
+def _update_manifest_source(args, layout: RuntimeLayout) -> str:
+    explicit = str(getattr(args, "manifest_url", "") or "").strip()
+    if explicit:
+        return explicit
+    for key in ("PACKETSAFARI_UPDATE_MANIFEST_URL", "PACKETSAFARI_RELEASE_MANIFEST_URL"):
+        value = str(os.getenv(key) or "").strip()
+        if value:
+            return value
+    active_manifest = _read_json(layout.release_manifest_path, {})
+    update_value = str((active_manifest.get("update") or {}).get("manifestUrl") or "").strip()
+    if update_value:
+        return update_value
+    base = str(
+        os.getenv("PACKETSAFARI_UPDATE_BASE_URL")
+        or os.getenv("PACKETSAFARI_RELEASE_CHANNEL_BASE_URL")
+        or DEFAULT_UPDATE_BASE_URL
+    ).strip()
+    profile = _requested_or_active_profile(args, layout)
+    channel = str(getattr(args, "channel", "") or active_manifest.get("channel") or "stable").strip()
+    platform = str(getattr(args, "platform", "") or DEFAULT_UPDATE_PLATFORM).strip()
+    return f"{base.rstrip('/')}/channels/{profile}/{channel}/{platform}/release-manifest.json"
+
+
+def _download_update_manifest(args, layout: RuntimeLayout) -> Path:
+    source = _update_manifest_source(args, layout)
+    return materialize_source(
+        source,
+        layout.tmp_dir / "downloads",
+        "update manifest",
+        args,
+        default_name="release-manifest.json",
+    )
+
+
+def check_for_update(args) -> dict:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    ensure_runtime_dirs(layout)
+    manifest_path = _download_update_manifest(args, layout)
+    return _update_check_payload(args, layout, manifest_path)
+
+
+def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> dict:
+    manifest = _read_json(manifest_path, {})
+    current = _current_release_version(layout)
+    target = str(manifest.get("version") or "").strip()
+    if not target:
+        raise RuntimeError("Update manifest is missing version.")
+    if current and current == target:
+        available = False
+        reason = "current"
+    elif current and _version_key(target) <= _version_key(current):
+        available = False
+        reason = "not_newer"
+    else:
+        available = True
+        reason = "newer"
+    return {
+        "available": available,
+        "reason": reason,
+        "currentVersion": current,
+        "targetVersion": target,
+        "channel": str(manifest.get("channel") or ""),
+        "profile": _requested_or_active_profile(args, layout),
+        "manifest": str(manifest_path),
+        "source": _update_manifest_source(args, layout),
+        "backupMode": resolve_backup_mode(args, profile=_requested_or_active_profile(args, layout)),
+    }
+
+
+def apply_update(args) -> dict:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    ensure_runtime_dirs(layout)
+    manifest_path = _download_update_manifest(args, layout)
+    check_payload = _update_check_payload(args, layout, manifest_path)
+    if not check_payload["available"] and not bool(getattr(args, "force", False)):
+        return {"status": "noop", **check_payload}
+    setattr(args, "manifest", str(manifest_path))
+    setattr(args, "bundle", None)
+    if not str(getattr(args, "profile", "") or "").strip():
+        setattr(args, "profile", _active_deployment_profile(layout))
+    return upgrade_release(args)
+
+
 def write_deployment_state(layout: RuntimeLayout, *, mode: str, action_type: str, action_status: str, action_message: str) -> None:
     payload = {
         "schemaVersion": 1,
@@ -1743,8 +1926,11 @@ def install_release(args) -> dict:
             prepare_offline_bundle(layout, args, manifest_destination=layout.release_manifest_path, install_license=True)
         else:
             if not str(getattr(args, "license", "") or "").strip():
-                raise RuntimeError("install --manifest requires --license.")
-            prepare_connected_manifest(layout, str(args.manifest), args, destination=layout.release_manifest_path)
+                raise RuntimeError("connected install requires --license.")
+            manifest_arg = str(getattr(args, "manifest", "") or "").strip()
+            if not manifest_arg:
+                manifest_arg = str(_download_update_manifest(args, layout))
+            prepare_connected_manifest(layout, manifest_arg, args, destination=layout.release_manifest_path)
             download_dir = layout.tmp_dir / "downloads"
             license_path = materialize_source(args.license, download_dir, "license token", args, default_name="license-token.json")
             public_key_path = _materialize_license_public_key(layout, args, download_dir)
@@ -2392,16 +2578,28 @@ def doctor_deployment(args) -> dict:
             message="SaaS should use HTTPS with secure cookies. Use HTTP only on disposable development hosts.",
         )
 
-    local_api_base = str(getattr(args, "api_base_url", "") or DEFAULT_API_BASE_URL).rstrip("/")
+    static_frontend = profile == "saas" and _profile_uses_static_frontend(manifest, profile)
+    default_api_base = "http://127.0.0.1:8080" if static_frontend else DEFAULT_API_BASE_URL
+    local_api_base = str(getattr(args, "api_base_url", "") or default_api_base).rstrip("/")
     health = _http_probe(f"{local_api_base}/api/v2/health")
     add_check("backend_health", bool(health.get("ok")), **health)
 
     config_info = _http_probe(f"{local_api_base}/api/v2/config/info")
     add_check("backend_config_info", bool(config_info.get("ok")), **config_info)
 
-    frontend_base = _frontend_probe_base(local_api_base, public_base_url)
-    runtime_config = _http_probe(f"{frontend_base}/runtime-config.json")
-    add_check("frontend_runtime_config", bool(runtime_config.get("ok")), **runtime_config)
+    if static_frontend:
+        add_check(
+            "frontend_runtime_config",
+            True,
+            skipped=True,
+            reason="static_frontend_profile",
+            publicBaseUrl=public_base_url,
+            message="Static frontend is validated after S3/CloudFront publishing.",
+        )
+    else:
+        frontend_base = _frontend_probe_base(local_api_base, public_base_url)
+        runtime_config = _http_probe(f"{frontend_base}/runtime-config.json")
+        add_check("frontend_runtime_config", bool(runtime_config.get("ok")), **runtime_config)
 
     compose = _compose_service_status(layout)
     add_check("compose_services", bool(compose.get("ok")), **compose)
@@ -2494,7 +2692,7 @@ def upgrade_release(args) -> dict:
             else:
                 manifest_arg = str(getattr(args, "manifest", "") or "").strip()
                 if not manifest_arg:
-                    raise RuntimeError("upgrade requires --manifest or --bundle.")
+                    manifest_arg = str(_download_update_manifest(args, layout))
                 target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
             setattr(args, "_doctor_manifest_path", str(target_manifest_path))
             maybe_fail_upgrade_simulation(layout, args, "preflight")

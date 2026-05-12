@@ -138,11 +138,11 @@ That host runtime root is bind-mounted into the app containers at `/storage/onpr
 Primary commands:
 
 ```bash
-packetsafari-ops install --license /path/to/license-token.json --manifest ./release-manifest.json --non-interactive
+packetsafari-ops install --license /path/to/license-token.json --non-interactive
 packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops status --json
 packetsafari-ops tui
-packetsafari-ops upgrade --manifest ./release-manifest.json
+packetsafari-ops upgrade
 packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 packetsafari-ops onboard schema
@@ -162,6 +162,11 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - Native onboarding uses the existing local `/api/v2/onprem/onboarding/*` APIs. The menu can show schema output and validate, save, or finalize pasted draft JSON directly from the terminal.
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
+- `update check` discovers the configured release-channel manifest and reports whether a newer release is available.
+- `update apply` downloads the configured release-channel manifest and runs the same transaction as `upgrade --manifest`, so normal operators do not need to pass manifest paths manually.
+- `install --license` and bare `upgrade` use the same default release-channel
+  manifest discovery. Pass `--manifest` only for a pinned file/URL, staging
+  channel, or customer-specific manifest.
 - `upgrade --manifest` runs a connected upgrade: validate the manifest, verify the license, stop app services, back up PostgreSQL and `/storage`, pull the target images, render Compose, run migrations from the target backend image, start with `--pull never`, run health checks, and promote only after success.
 - `upgrade --bundle` runs the same transaction without network access: verify `checksums.txt.sig`, verify all file checksums, load Docker images from the bundle, retag them as local `packetsafari/<service>:<version>` images, render Compose to those local refs, and start with `--pull never`.
 - `rollback` restores the latest full snapshot, including PostgreSQL and `/storage`. Legacy metadata-only snapshots are still supported but are reported as metadata-only restores.
@@ -191,6 +196,8 @@ single-EC2 SaaS deployment:
 packetsafari-ops config check-env --profile saas --manifest ./release-manifest.json
 packetsafari-ops config prompt-env --profile saas --manifest ./release-manifest.json
 packetsafari-ops doctor --profile saas --manifest ./release-manifest.json
+packetsafari-ops update check --profile saas --channel stable
+packetsafari-ops update apply --profile saas --channel stable
 packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
 packetsafari-ops rollback --profile saas
 ```
@@ -201,6 +208,38 @@ The SaaS profile is intentionally different from on-prem:
 - it still validates the release manifest, upgrade path, required env, migrations, container health, and product readiness
 - it defaults to `--backup-mode require-recent`, meaning it requires proof of a fresh external backup before migrations
 - it records only metadata snapshots unless `--backup-mode inline` is selected
+
+Connected update discovery uses the PacketSafari release channel by default:
+
+```text
+https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/release-manifest.json
+```
+
+Operators can override that with a direct manifest source:
+
+```bash
+export PACKETSAFARI_UPDATE_MANIFEST_URL='https://<portal-presigned-url>/release-manifest.json'
+```
+
+or with a different channel base:
+
+```bash
+export PACKETSAFARI_UPDATE_BASE_URL='https://downloads.example.com/packetsafari'
+```
+
+Fast unbacked updates are explicitly gated:
+
+```bash
+packetsafari-ops update apply \
+  --profile saas \
+  --backup-mode skip \
+  --allow-unbacked-upgrade
+```
+
+Use that only for container-only releases or disposable development hosts. It
+keeps existing PostgreSQL and `/storage` volumes, replaces containers, runs any
+target migrations, then health-checks and promotes. It does not provide data
+rollback if a migration changes schema or data.
 
 `doctor --profile saas` checks product readiness, not just Docker liveness. It
 verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL`,

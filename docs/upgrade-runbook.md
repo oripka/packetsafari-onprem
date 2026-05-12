@@ -36,13 +36,65 @@ The frontend intentionally connects directly to sharkd for low-latency packet vi
 
 ```bash
 packetsafari-ops status
+packetsafari-ops update check
+packetsafari-ops update apply
+packetsafari-ops install --license ./license-token.json
 packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
+packetsafari-ops upgrade
 packetsafari-ops upgrade --manifest ./release-manifest.json
 packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 ```
 
-Use `--manifest` when the host can reach the image registry. Use `--bundle`
+`update check`, `update apply`, `install --license`, and bare `upgrade` are the
+normal connected operator flow. The tool still uses a release manifest
+internally, but operators do not need to pass one each time. By default, the
+tool resolves the PacketSafari release channel:
+
+```text
+https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/release-manifest.json
+```
+
+Use these environment variables only when testing a private/staged channel or a
+customer-specific manifest:
+
+```bash
+export PACKETSAFARI_UPDATE_MANIFEST_URL='https://<portal-presigned-url>/release-manifest.json'
+# or
+export PACKETSAFARI_UPDATE_BASE_URL='https://downloads.example.com/packetsafari'
+```
+
+With a custom `PACKETSAFARI_UPDATE_BASE_URL`, the tool resolves:
+
+```text
+<base>/channels/<profile>/<channel>/<platform>/release-manifest.json
+```
+
+Examples:
+
+```bash
+packetsafari-ops update check --profile onprem --channel stable
+packetsafari-ops update apply --profile onprem --channel stable
+packetsafari-ops update apply --profile saas --channel stable --backup-mode require-recent
+```
+
+For a deliberate container-only fast path, use `--backup-mode skip` together
+with the explicit safety acknowledgement:
+
+```bash
+packetsafari-ops update apply \
+  --profile saas \
+  --backup-mode skip \
+  --allow-unbacked-upgrade
+```
+
+Only use unbacked updates for releases that are known not to require schema or
+storage migrations, or on disposable development hosts. If migrations run,
+rollback may require restoring PostgreSQL and `/storage` from an external
+backup.
+
+Use `upgrade --manifest` when the host can reach the image registry and you want
+to apply a specific manifest manually. Use `upgrade --bundle`
 when the host is air-gapped. Split bundles are accepted by passing any
 local `.part-*` file. HTTP/HTTPS sources are also accepted for complete
 manifest and bundle archives:

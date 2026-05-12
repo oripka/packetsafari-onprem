@@ -18,6 +18,8 @@ if __package__ in {None, ""}:
         diagnostics_restart,
         doctor_deployment,
         configure_required_env,
+        apply_update,
+        check_for_update,
         install_release,
         rollback_release,
         runtime_layout,
@@ -40,6 +42,8 @@ else:
         diagnostics_restart,
         doctor_deployment,
         configure_required_env,
+        apply_update,
+        check_for_update,
         install_release,
         rollback_release,
         runtime_layout,
@@ -86,10 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     install = subparsers.add_parser("install", help="Install PacketSafari on-prem into onboarding mode.")
-    install_source = install.add_mutually_exclusive_group(required=True)
+    install_source = install.add_mutually_exclusive_group()
     install_source.add_argument("--manifest", help="Connected install release manifest path or URL.")
     install_source.add_argument("--bundle", help="Offline install bundle path or URL.")
     install.add_argument("--license", help="License token path or URL. Required with --manifest; optional with --bundle if bundled.")
+    install.add_argument("--channel", default="stable", help="Release channel for default connected install discovery.")
+    install.add_argument("--platform", default="linux-arm64", help="Release platform for default connected install discovery.")
+    install.add_argument(
+        "--manifest-url",
+        help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
+    )
     install.add_argument("--license-public-key", help="License public key path or URL. Defaults to the PacketSafari key bundled with the ops tool.")
     install.add_argument(
         "--allow-bundled-license-public-key",
@@ -115,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--api-base-url")
 
     upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest or offline bundle.")
-    source = upgrade.add_mutually_exclusive_group(required=True)
+    source = upgrade.add_mutually_exclusive_group()
     source.add_argument("--manifest", help="Connected upgrade release manifest path or URL.")
     source.add_argument("--bundle", help="Air-gapped offline bundle path or URL (.tar.zst, or local split .part-* files).")
     add_bundle_args(upgrade)
@@ -131,6 +141,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["inline", "require-recent", "skip"],
         help="Backup policy. Defaults to inline for onprem and require-recent for saas.",
     )
+    upgrade.add_argument("--channel", default="stable", help="Release channel for default connected upgrade discovery.")
+    upgrade.add_argument("--platform", default="linux-arm64", help="Release platform for default connected upgrade discovery.")
+    upgrade.add_argument(
+        "--manifest-url",
+        help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
+    )
     upgrade.add_argument(
         "--backup-proof",
         help="Path to the most recent external backup proof JSON/text file. Defaults to state/latest-backup.json in require-recent mode.",
@@ -142,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum accepted age for --backup-proof in require-recent mode.",
     )
     upgrade.add_argument("--saas-operator-token", help="Internal SaaS deployment token. May also be read from the host secret file or environment.")
+    upgrade.add_argument(
+        "--allow-unbacked-upgrade",
+        action="store_true",
+        help="Allow --backup-mode skip. Intended only for container-only releases or disposable development hosts.",
+    )
     upgrade.add_argument("--health-timeout", type=int, default=180)
     upgrade.add_argument("--skip-health-check", action="store_true")
     upgrade.add_argument(
@@ -178,6 +199,38 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
     config.add_argument("--output", help="Env file to update for prompt-env. Defaults to the managed runtime env.")
     add_download_args(config)
+
+    update = subparsers.add_parser("update", help="Check or apply the configured release channel update.")
+    update.add_argument("action", choices=["check", "apply"])
+    update.add_argument(
+        "--profile",
+        choices=["onprem", "saas"],
+        help="Deployment profile. Defaults to the active installed profile.",
+    )
+    update.add_argument("--channel", default="stable", help="Release channel for default update discovery.")
+    update.add_argument("--platform", default="linux-arm64", help="Release platform for default update discovery.")
+    update.add_argument(
+        "--manifest-url",
+        help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
+    )
+    update.add_argument(
+        "--backup-mode",
+        choices=["inline", "require-recent", "skip"],
+        help="Backup policy for update apply. Defaults to inline for onprem and require-recent for saas.",
+    )
+    update.add_argument("--backup-proof", help="External backup proof for require-recent mode.")
+    update.add_argument("--max-backup-age-minutes", type=int, default=180)
+    update.add_argument("--saas-operator-token", help="Internal SaaS deployment token.")
+    update.add_argument("--health-timeout", type=int, default=180)
+    update.add_argument("--skip-health-check", action="store_true")
+    update.add_argument("--skip-image-pull", action="store_true")
+    update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
+    update.add_argument(
+        "--allow-unbacked-upgrade",
+        action="store_true",
+        help="Allow --backup-mode skip. Intended only for container-only releases or disposable development hosts.",
+    )
+    add_download_args(update)
 
     iam = subparsers.add_parser("iam", help="Host-side IAM helpers.")
     iam.add_argument("action", choices=["show-initial-admin-command", "set-password"])
@@ -225,6 +278,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "upgrade":
         print(json.dumps(upgrade_release(args), indent=2))
+        return 0
+    if args.command == "update":
+        if args.action == "check":
+            print(json.dumps(check_for_update(args), indent=2))
+        else:
+            print(json.dumps(apply_update(args), indent=2))
         return 0
     if args.command == "rollback":
         print(json.dumps(rollback_release(args), indent=2))

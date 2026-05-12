@@ -23,6 +23,14 @@
       "com.apple.FSEvents",
       "com.apple.fseventsd",
       "com.apple.FileCoordination"
+    ],
+    "httpRules": [
+      {
+        "host": "releases.packetsafari.com",
+        "paths": [
+          "/channels/onprem/stable/linux-arm64/release-manifest.json"
+        ]
+      }
     ]
   },
   "filesystem": {
