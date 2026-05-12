@@ -303,6 +303,8 @@ services:
     restart: always
     env_file:
       - "{{ runtime_env_path }}"
+    environment:
+      SHARKD_JWT_SECRET: "${SHARKD_JWT_SECRET:?required}"
     ports:
       - "4448:4448"
     volumes:
