@@ -36,6 +36,14 @@ SAAS_REQUIRED_ENV_KEYS = [
     "PACKETSAFARI_PADDLE_API_KEY",
     "PACKETSAFARI_PADDLE_WEBHOOK_SECRET",
 ]
+IRONPROXY_UPSTREAM_SECRET_KEYS = {
+    "OPENAI_API_KEY",
+    "PACKETSAFARI_PADDLE_API_KEY",
+}
+IRONPROXY_PLACEHOLDER_VALUES = {
+    "OPENAI_API_KEY": "ps_proxy_openai_api_key",
+    "PACKETSAFARI_PADDLE_API_KEY": "ps_proxy_paddle_api_key",
+}
 INVALID_REQUIRED_ENV_VALUES = {
     "",
     "changeme",
@@ -127,6 +135,10 @@ class RuntimeLayout:
         if self.kind == "local-data-root":
             return self.env_dir / ".env.production"
         return self.env_dir / "runtime.env"
+
+    @property
+    def ironproxy_env_path(self) -> Path:
+        return self.env_dir / "ironproxy.env"
 
     @property
     def deployment_state_path(self) -> Path:
@@ -1172,6 +1184,8 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
             str(root / "templates" / "docker-compose.onprem.yml.tpl"),
             "--runtime-env-path",
             str(layout.runtime_env_path),
+            "--ironproxy-env-path",
+            str(layout.ironproxy_env_path),
             "--host-runtime-root",
             str(layout.runtime_root),
             "--container-runtime-root",
@@ -1312,8 +1326,18 @@ def _required_env_value_is_valid(key: str, value: str) -> bool:
     return True
 
 
-def validate_required_env(layout: RuntimeLayout, manifest: dict, *, profile: str) -> None:
+def _effective_required_env_values(layout: RuntimeLayout) -> dict[str, str]:
     runtime_env = parse_env_file(layout.runtime_env_path)
+    ironproxy_env = parse_env_file(layout.ironproxy_env_path)
+    values = dict(runtime_env)
+    for key in IRONPROXY_UPSTREAM_SECRET_KEYS:
+        if key in ironproxy_env:
+            values[key] = ironproxy_env[key]
+    return values
+
+
+def validate_required_env(layout: RuntimeLayout, manifest: dict, *, profile: str) -> None:
+    runtime_env = _effective_required_env_values(layout)
     required = _merged_required_env_keys(manifest, profile=profile)
     missing = [key for key in required if not _required_env_value_is_valid(key, str(runtime_env.get(key, "")))]
     if missing:
@@ -1433,7 +1457,14 @@ def configure_required_env(args) -> dict:
     profile = deployment_profile(args)
     required = _required_env_keys(manifest, profile=profile)
     env_path = Path(str(getattr(args, "output", "") or "")).expanduser() if getattr(args, "output", None) else layout.runtime_env_path
-    existing = parse_env_file(env_path)
+    split_proxy_env = profile == "saas" and not getattr(args, "output", None)
+    runtime_existing = parse_env_file(env_path)
+    proxy_existing = parse_env_file(layout.ironproxy_env_path) if split_proxy_env else {}
+    existing = dict(runtime_existing)
+    if split_proxy_env:
+        for key in IRONPROXY_UPSTREAM_SECRET_KEYS:
+            if key in proxy_existing:
+                existing[key] = proxy_existing[key]
     missing = [key for key in required if not _required_env_value_is_valid(key, str(existing.get(key, "")))]
     action = str(getattr(args, "action", "") or "")
 
@@ -1473,14 +1504,41 @@ def configure_required_env(args) -> dict:
                 break
             print(f"{key} is required.")
 
-    write_env_file(
-        env_path,
-        values,
-        header_lines=[
-            "# Managed by PacketSafari ops.",
-            "# Generated/updated by packetsafari-ops config prompt-env.",
-        ],
-    )
+    if split_proxy_env:
+        runtime_values = dict(runtime_existing)
+        proxy_values = dict(proxy_existing)
+        for key, value in values.items():
+            if key in IRONPROXY_UPSTREAM_SECRET_KEYS:
+                proxy_values[key] = value
+                runtime_values[key] = IRONPROXY_PLACEHOLDER_VALUES[key]
+            else:
+                runtime_values[key] = value
+        write_env_file(
+            env_path,
+            runtime_values,
+            header_lines=[
+                "# Managed by PacketSafari ops.",
+                "# Generated/updated by packetsafari-ops config prompt-env.",
+                "# Upstream OpenAI/Paddle API secrets are stored in ironproxy.env.",
+            ],
+        )
+        write_env_file(
+            layout.ironproxy_env_path,
+            proxy_values,
+            header_lines=[
+                "# Managed by PacketSafari ops.",
+                "# Upstream egress proxy secrets. Mount only into egress-ironproxy.",
+            ],
+        )
+    else:
+        write_env_file(
+            env_path,
+            values,
+            header_lines=[
+                "# Managed by PacketSafari ops.",
+                "# Generated/updated by packetsafari-ops config prompt-env.",
+            ],
+        )
     return {
         "profile": profile,
         "manifest": str(manifest_path),
@@ -2623,7 +2681,7 @@ def doctor_deployment(args) -> dict:
     profile = deployment_profile(args)
     manifest_arg = str(getattr(args, "manifest", "") or "").strip()
     manifest = _read_json(Path(manifest_arg), {}) if manifest_arg else _read_json(layout.release_manifest_path, {})
-    runtime_env = parse_env_file(layout.runtime_env_path) if layout.runtime_env_path.exists() else {}
+    runtime_env = _effective_required_env_values(layout) if layout.runtime_env_path.exists() else {}
     checks: list[dict[str, object]] = []
 
     def add_check(name: str, check_ok: bool, **details: object) -> None:

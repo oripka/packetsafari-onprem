@@ -143,10 +143,13 @@ operator token at `/opt/packetsafari/secrets/saas-operator-token`, then put its
 SHA-256 digest in either the release manifest or the host environment:
 
 Before promotion, SaaS upgrades run `doctor --profile saas`. The doctor check
-rejects missing or placeholder `PACKETSAFARI_PUBLIC_BASE_URL`,
-`OPENAI_API_KEY`, `PACKETSAFARI_PADDLE_API_KEY`, and
-`PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, then probes backend health/config,
-frontend `runtime-config.json`, and Compose service state.
+rejects missing `PACKETSAFARI_PUBLIC_BASE_URL`,
+`PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, and missing upstream OpenAI/Paddle API
+keys. Upstream `OPENAI_API_KEY` and `PACKETSAFARI_PADDLE_API_KEY` belong in
+`env/ironproxy.env`, which is mounted only into `egress-ironproxy`; the
+backend/worker runtime env should contain the proxy placeholders instead. The
+doctor then probes backend health/config, frontend `runtime-config.json`, and
+Compose service state.
 
 ```json
 {

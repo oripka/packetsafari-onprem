@@ -55,6 +55,7 @@ def main() -> int:
     parser.add_argument("--template", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--runtime-env-path", default="/opt/packetsafari/env/runtime.env")
+    parser.add_argument("--ironproxy-env-path", default="/opt/packetsafari/env/ironproxy.env")
     parser.add_argument("--host-runtime-root", default="/opt/packetsafari")
     parser.add_argument("--container-runtime-root", default="/storage/onprem")
     parser.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
@@ -80,6 +81,7 @@ def main() -> int:
         "egress_firewall_image": image_ref(images, "egress-firewall"),
         "vector_image": image_ref(images, "vector", "timberio/vector:0.39.0-alpine"),
         "runtime_env_path": args.runtime_env_path,
+        "ironproxy_env_path": args.ironproxy_env_path,
         "host_runtime_root": args.host_runtime_root,
         "container_runtime_root": args.container_runtime_root,
     }

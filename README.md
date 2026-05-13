@@ -246,11 +246,14 @@ target migrations, then health-checks and promotes. It does not provide data
 rollback if a migration changes schema or data.
 
 `doctor --profile saas` checks product readiness, not just Docker liveness. It
-verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL`,
-`OPENAI_API_KEY`, `PACKETSAFARI_PADDLE_API_KEY`, and
-`PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, probes backend health/config, checks
-frontend `runtime-config.json`, and inspects Compose service state. SaaS
-upgrades run this readiness check after startup and before release promotion.
+verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL` and
+`PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, plus upstream OpenAI/Paddle keys from
+`env/ironproxy.env`. `OPENAI_API_KEY` and `PACKETSAFARI_PADDLE_API_KEY` should
+be real only in that ironproxy env file; backend/worker should receive proxy
+placeholders from `env/runtime.env`. The doctor also probes backend
+health/config, checks frontend `runtime-config.json`, and inspects Compose
+service state. SaaS upgrades run this readiness check after startup and before
+release promotion.
 
 Install the operator token at `/opt/packetsafari/secrets/saas-operator-token`
 and set the expected SHA-256 digest in the manifest at

@@ -18,7 +18,7 @@ services:
     container_name: packetsafari-egress-ironproxy
     restart: always
     env_file:
-      - "{{ runtime_env_path }}"
+      - "{{ ironproxy_env_path }}"
     environment:
       PACKETSAFARI_EGRESS_PROFILE: production
       IRON_PROXY_CONFIG: /etc/iron-proxy/proxy.yaml
