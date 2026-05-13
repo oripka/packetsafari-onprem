@@ -6,6 +6,7 @@ ESNET_SUBNET="172.20.0.0/24"
 PROXY_IP="172.20.0.2"
 PROXY_PORT="10000"
 DNS_POLICY_IP="172.20.0.3"
+SHUTTING_DOWN=0
 
 MONITORED=(
   "backend:172.20.0.20"
@@ -65,7 +66,14 @@ install_chain() {
 }
 install_chain
 
-while true; do
+shutdown() {
+  SHUTTING_DOWN=1
+}
+
+trap shutdown TERM INT
+
+while [ "${SHUTTING_DOWN}" -eq 0 ]; do
   install_chain
-  sleep 30
+  sleep 30 &
+  wait "$!" || true
 done

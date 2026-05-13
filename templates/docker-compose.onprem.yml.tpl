@@ -52,6 +52,7 @@ services:
     security_opt:
       - no-new-privileges:true
     network_mode: host
+    stop_grace_period: 3s
     depends_on:
       egress-ironproxy:
         condition: service_healthy
@@ -301,6 +302,7 @@ services:
     image: "{{ sharkd_image }}"
     container_name: packetsafari-sharkd
     restart: always
+    stop_grace_period: 5s
     env_file:
       - "{{ runtime_env_path }}"
     environment:
