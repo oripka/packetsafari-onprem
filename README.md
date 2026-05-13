@@ -206,6 +206,22 @@ packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
 packetsafari-ops rollback --profile saas
 ```
 
+On a PacketSafari-operated SaaS host with
+`/opt/packetsafari/secrets/saas-operator-token` installed, the normal update
+UX is intentionally shorter:
+
+```bash
+sudo env HOME=/root packetsafari-ops update
+```
+
+The command infers the `saas` profile from the host token or installed SaaS
+manifest, downloads the private channel manifest from
+`s3://packetsafari-release-channels-166826692770/channels/saas/stable/linux-arm64/release-manifest.json`
+using the EC2 instance role, pulls images from ECR through root Docker's ECR
+credential helper, applies the update, restarts services, health-checks, and
+promotes. Do not make the SaaS release channel public or copy long-lived AWS
+keys to the host.
+
 The SaaS profile is intentionally different from on-prem:
 
 - it skips customer entitlement checks only after an internal SaaS operator token is verified
@@ -217,6 +233,13 @@ Connected update discovery uses the PacketSafari release channel by default:
 
 ```text
 https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/release-manifest.json
+```
+
+For `profile=saas`, managed PacketSafari hosts use the private S3 release
+channel by default instead:
+
+```text
+s3://packetsafari-release-channels-166826692770/channels/saas/<channel>/<platform>/release-manifest.json
 ```
 
 Operators can override that with a direct manifest source:

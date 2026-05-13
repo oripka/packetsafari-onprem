@@ -55,6 +55,25 @@ tool resolves the PacketSafari release channel:
 https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/release-manifest.json
 ```
 
+For PacketSafari-operated SaaS hosts, `packetsafari-ops update` is designed to
+be a one-command host update:
+
+```bash
+sudo env HOME=/root packetsafari-ops update
+```
+
+The host infers the `saas` profile from the installed SaaS operator token or
+release manifest and reads the private release manifest from S3 with the EC2
+instance role:
+
+```text
+s3://packetsafari-release-channels-166826692770/channels/saas/stable/linux-arm64/release-manifest.json
+```
+
+This requires AWS CLI on the host and the root Docker ECR credential helper.
+Do not use workstation AWS keys, public SaaS manifests, or copied CloudFront
+signing material to simplify this path.
+
 Use these environment variables only when testing a private/staged channel or a
 customer-specific manifest:
 

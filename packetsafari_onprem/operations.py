@@ -4,6 +4,7 @@ import fcntl
 import base64
 import getpass
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -71,6 +72,8 @@ DEFAULT_LOGGING_VALUES = {
 GLOBAL_WRAPPER_PATH = Path("/usr/local/bin/packetsafari-ops")
 DEFAULT_UPDATE_PLATFORM = "linux-arm64"
 DEFAULT_UPDATE_BASE_URL = "https://releases.packetsafari.com"
+DEFAULT_SAAS_UPDATE_BUCKET = "packetsafari-release-channels-166826692770"
+DEFAULT_SAAS_UPDATE_REGION = "eu-central-1"
 
 
 @dataclass(slots=True)
@@ -536,6 +539,11 @@ def _is_url(source: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _is_s3_uri(source: str) -> bool:
+    parsed = urllib.parse.urlparse(str(source or ""))
+    return parsed.scheme == "s3" and bool(parsed.netloc) and bool(parsed.path.strip("/"))
+
+
 def _split_env_headers(value: str) -> list[str]:
     headers: list[str] = []
     for raw_line in value.replace(";;", "\n").splitlines():
@@ -585,10 +593,157 @@ def _safe_download_name(source: str, default_name: str) -> str:
     return re.sub(r"[^0-9A-Za-z_.-]+", "-", name)
 
 
+def _aws_quote(value: str, *, safe: str = "") -> str:
+    return urllib.parse.quote(value, safe=safe)
+
+
+def _http_json(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, timeout: int = 3) -> dict:
+    request = urllib.request.Request(url, method=method, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _aws_credentials_from_env() -> dict[str, str]:
+    access_key = str(os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+    secret_key = str(os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+    session_token = str(os.getenv("AWS_SESSION_TOKEN") or "").strip()
+    if access_key and secret_key:
+        return {
+            "AccessKeyId": access_key,
+            "SecretAccessKey": secret_key,
+            "Token": session_token,
+        }
+    return {}
+
+
+def _aws_credentials_from_imds() -> dict[str, str]:
+    endpoint = "http://169.254.169.254/latest"
+    token = ""
+    try:
+        request = urllib.request.Request(
+            f"{endpoint}/api/token",
+            method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            token = response.read().decode("utf-8")
+    except Exception:
+        token = ""
+    headers = {"X-aws-ec2-metadata-token": token} if token else {}
+    try:
+        role_request = urllib.request.Request(f"{endpoint}/meta-data/iam/security-credentials/", headers=headers)
+        with urllib.request.urlopen(role_request, timeout=2) as response:
+            role_name = response.read().decode("utf-8").splitlines()[0].strip()
+        if not role_name:
+            return {}
+        return _http_json(
+            f"{endpoint}/meta-data/iam/security-credentials/{_aws_quote(role_name)}",
+            headers=headers,
+            timeout=2,
+        )
+    except Exception:
+        return {}
+
+
+def _aws_credentials() -> dict[str, str]:
+    credentials = _aws_credentials_from_env() or _aws_credentials_from_imds()
+    if not credentials.get("AccessKeyId") or not credentials.get("SecretAccessKey"):
+        raise RuntimeError("No AWS credentials available from env or EC2 instance metadata.")
+    return credentials
+
+
+def _aws_signing_key(secret_key: str, datestamp: str, region: str, service: str) -> bytes:
+    def sign(key: bytes, message: str) -> bytes:
+        return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
+
+    k_date = sign(("AWS4" + secret_key).encode("utf-8"), datestamp)
+    k_region = sign(k_date, region)
+    k_service = sign(k_region, service)
+    return sign(k_service, "aws4_request")
+
+
+def _copy_s3_source_sigv4(source: str, destination: Path, partial: Path) -> None:
+    parsed = urllib.parse.urlparse(source)
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+    region = str(os.getenv("PACKETSAFARI_UPDATE_S3_REGION") or DEFAULT_SAAS_UPDATE_REGION).strip()
+    credentials = _aws_credentials()
+    now = datetime.now(timezone.utc)
+    amzdate = now.strftime("%Y%m%dT%H%M%SZ")
+    datestamp = now.strftime("%Y%m%d")
+    host = f"{bucket}.s3.{region}.amazonaws.com"
+    canonical_uri = "/" + _aws_quote(key, safe="/")
+    canonical_querystring = ""
+    headers = {
+        "host": host,
+        "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
+        "x-amz-date": amzdate,
+    }
+    token = str(credentials.get("Token") or "").strip()
+    if token:
+        headers["x-amz-security-token"] = token
+    signed_headers = ";".join(sorted(headers))
+    canonical_headers = "".join(f"{name}:{headers[name]}\n" for name in sorted(headers))
+    canonical_request = "\n".join([
+        "GET",
+        canonical_uri,
+        canonical_querystring,
+        canonical_headers,
+        signed_headers,
+        "UNSIGNED-PAYLOAD",
+    ])
+    credential_scope = f"{datestamp}/{region}/s3/aws4_request"
+    string_to_sign = "\n".join([
+        "AWS4-HMAC-SHA256",
+        amzdate,
+        credential_scope,
+        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+    ])
+    signing_key = _aws_signing_key(str(credentials["SecretAccessKey"]), datestamp, region, "s3")
+    signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    headers["authorization"] = (
+        "AWS4-HMAC-SHA256 "
+        f"Credential={credentials['AccessKeyId']}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, "
+        f"Signature={signature}"
+    )
+    request = urllib.request.Request(f"https://{host}{canonical_uri}", headers=headers)
+    with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as output:
+        shutil.copyfileobj(response, output, length=1024 * 1024)
+    partial.replace(destination)
+
+
+def _copy_s3_source(source: str, destination: Path, partial: Path, label: str) -> None:
+    aws_bin = shutil.which("aws")
+    if aws_bin:
+        region = str(os.getenv("PACKETSAFARI_UPDATE_S3_REGION") or DEFAULT_SAAS_UPDATE_REGION).strip()
+        cmd = [aws_bin, "s3", "cp", source, str(partial), "--only-show-errors"]
+        if region:
+            cmd.extend(["--region", region])
+        subprocess.run(cmd, check=True)
+        partial.replace(destination)
+        return
+    try:
+        _copy_s3_source_sigv4(source, destination, partial)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot fetch {label} from {source} with AWS CLI or instance-role SigV4: {exc}"
+        ) from exc
+
+
 def materialize_source(source: str | os.PathLike[str], destination_dir: Path, label: str, args=None, *, default_name: str) -> Path:
     raw = str(source or "").strip()
     if not raw:
         raise RuntimeError(f"Missing {label} source.")
+    if _is_s3_uri(raw):
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / _safe_download_name(raw, default_name)
+        partial = destination.with_name(f"{destination.name}.download")
+        try:
+            _copy_s3_source(raw, destination, partial, label)
+        finally:
+            partial.unlink(missing_ok=True)
+        return destination
     if not _is_url(raw):
         path = Path(raw).expanduser()
         if not path.exists():
@@ -1994,7 +2149,15 @@ def _release_version(manifest_path: Path) -> str:
 def _active_deployment_profile(layout: RuntimeLayout) -> str:
     state = _read_json(layout.deployment_state_path, {})
     mode = str(((state.get("deployment") or {}).get("mode") or "")).strip().lower()
-    return "saas" if mode == "saas" else "onprem"
+    if mode == "saas":
+        return "saas"
+    if (layout.secrets_dir / "saas-operator-token").exists():
+        return "saas"
+    active_manifest = _read_json(layout.release_manifest_path, {})
+    profiles = active_manifest.get("deploymentProfiles")
+    if isinstance(profiles, dict) and isinstance(profiles.get("saas"), dict):
+        return "saas"
+    return "onprem"
 
 
 def _requested_or_active_profile(args, layout: RuntimeLayout) -> str:
@@ -2018,14 +2181,17 @@ def _update_manifest_source(args, layout: RuntimeLayout) -> str:
     update_value = str((active_manifest.get("update") or {}).get("manifestUrl") or "").strip()
     if update_value:
         return update_value
+    profile = _requested_or_active_profile(args, layout)
+    channel = str(getattr(args, "channel", "") or active_manifest.get("channel") or "stable").strip()
+    platform = str(getattr(args, "platform", "") or DEFAULT_UPDATE_PLATFORM).strip()
+    if profile == "saas":
+        bucket = str(os.getenv("PACKETSAFARI_SAAS_UPDATE_BUCKET") or DEFAULT_SAAS_UPDATE_BUCKET).strip()
+        return f"s3://{bucket}/channels/{profile}/{channel}/{platform}/release-manifest.json"
     base = str(
         os.getenv("PACKETSAFARI_UPDATE_BASE_URL")
         or os.getenv("PACKETSAFARI_RELEASE_CHANNEL_BASE_URL")
         or DEFAULT_UPDATE_BASE_URL
     ).strip()
-    profile = _requested_or_active_profile(args, layout)
-    channel = str(getattr(args, "channel", "") or active_manifest.get("channel") or "stable").strip()
-    platform = str(getattr(args, "platform", "") or DEFAULT_UPDATE_PLATFORM).strip()
     return f"{base.rstrip('/')}/channels/{profile}/{channel}/{platform}/release-manifest.json"
 
 
