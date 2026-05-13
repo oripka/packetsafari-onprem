@@ -1,0 +1,18 @@
+# PacketSafari On-Prem — Working Notes
+
+## Scope
+
+- This repo owns the customer-facing on-prem bootstrap, signed entitlement tooling, release manifest handling, compose rendering, and host install / upgrade / rollback operations.
+- The main app repo lives at `../packetsafari` and owns backend/frontend behavior, Docker image builds, and `docker-compose-production.yml` for SaaS/self-hosted app repo deployments.
+
+## Compose Templates
+
+- On-prem compose is rendered from `templates/docker-compose.onprem.yml.tpl`. Do not assume changes to `../packetsafari/docker-compose-production.yml` automatically apply to on-prem installs.
+- When changing service definitions that affect on-prem behavior, update `templates/docker-compose.onprem.yml.tpl` in the same pass.
+- Host-mounted egress config templates live under `templates/egress-config/`. Keep these aligned with the main app repo's `configuration/egress-*` files when firewall, proxy, DNS, or allowlist behavior changes.
+- Validate compose template changes by rendering with `scripts/render_compose.py` and then running `docker compose config` against the rendered file. Provide dummy env files/secrets as needed for local validation.
+
+## Release Boundary
+
+- Keep ECR for images and release manifests, not for hosting raw installer scripts.
+- The release manifest pins image references. This repo renders those pinned images into on-prem compose rather than building app images itself.
