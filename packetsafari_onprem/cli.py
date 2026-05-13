@@ -201,7 +201,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_download_args(config)
 
     update = subparsers.add_parser("update", help="Check or apply the configured release channel update.")
-    update.add_argument("action", choices=["check", "apply"])
+    update.add_argument(
+        "action",
+        nargs="?",
+        choices=["check", "apply"],
+        default="apply",
+        help="Update action. Defaults to apply so managed hosts can run `packetsafari-ops update`.",
+    )
     update.add_argument(
         "--profile",
         choices=["onprem", "saas"],

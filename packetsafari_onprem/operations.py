@@ -486,12 +486,23 @@ def _manifest_saas_token_hash(manifest: dict) -> str:
     return str(os.getenv("PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256") or "").strip().lower()
 
 
+def _local_saas_operator_token_hash(layout: RuntimeLayout) -> str:
+    token_path = layout.secrets_dir / "saas-operator-token"
+    if not token_path.exists():
+        return ""
+    token = token_path.read_text(encoding="utf-8").strip()
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest().lower()
+
+
 def verify_saas_operator_authorization(layout: RuntimeLayout, args, manifest: dict) -> None:
-    expected_hash = _manifest_saas_token_hash(manifest)
+    expected_hash = _manifest_saas_token_hash(manifest) or _local_saas_operator_token_hash(layout)
     if not expected_hash:
         raise RuntimeError(
             "SaaS profile requires an internal operator token hash. Set deploymentProfiles.saas.operatorTokenSha256 "
-            "in the manifest or PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256 on the host."
+            "in the manifest, PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256 on the host, or install "
+            "/opt/packetsafari/secrets/saas-operator-token."
         )
     for token in _saas_operator_token_candidates(layout, getattr(args, "saas_operator_token", None)):
         if hashlib.sha256(token.encode("utf-8")).hexdigest().lower() == expected_hash:
@@ -1636,6 +1647,83 @@ def _compose_base_command(layout: RuntimeLayout) -> list[str]:
         *_compose_file_args(layout),
         *_compose_logging_args(layout.runtime_env_path),
     ]
+
+
+ECR_REGISTRY_RE = re.compile(r"^\d+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$")
+
+
+def _image_registry(image: str) -> str:
+    first = str(image or "").split("/", 1)[0].strip()
+    if "." in first or ":" in first or first == "localhost":
+        return first
+    return ""
+
+
+def _rendered_compose_images(layout: RuntimeLayout) -> set[str]:
+    if layout.kind == "local-data-root" or not layout.compose_file.exists():
+        return set()
+    try:
+        result = subprocess.run(
+            [*_compose_base_command(layout), "config", "--images"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    images: set[str] = set()
+    for path in (layout.compose_file, layout.compose_sizing_file):
+        if not path.exists():
+            continue
+        for match in re.finditer(r"^\s*image:\s*['\"]?([^'\"\s#]+)", path.read_text(encoding="utf-8"), re.MULTILINE):
+            images.add(match.group(1).strip())
+    return images
+
+
+def ensure_ecr_credential_helper_ready(layout: RuntimeLayout) -> None:
+    ecr_registries = sorted(
+        registry
+        for registry in {_image_registry(image) for image in _rendered_compose_images(layout)}
+        if ECR_REGISTRY_RE.match(registry)
+    )
+    if not ecr_registries:
+        return
+
+    docker_config_path = Path(os.getenv("DOCKER_CONFIG") or "/root/.docker") / "config.json"
+    if shutil.which("docker-credential-ecr-login") is None:
+        raise RuntimeError(
+            "SaaS image pull requires Docker ECR authentication, but docker-credential-ecr-login is not installed. "
+            "Install the amazon-ecr-credential-helper package and configure /root/.docker/config.json before retrying."
+        )
+    if not docker_config_path.exists():
+        raise RuntimeError(
+            f"SaaS image pull requires Docker ECR authentication for {', '.join(ecr_registries)}, but "
+            f"{docker_config_path} is missing. Install amazon-ecr-credential-helper and configure "
+            '/root/.docker/config.json with {"credsStore":"ecr-login"} or per-registry credHelpers.'
+        )
+    try:
+        docker_config = json.loads(docker_config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"SaaS image pull requires Docker ECR authentication, but {docker_config_path} is not valid JSON. "
+            "Install amazon-ecr-credential-helper and fix /root/.docker/config.json before retrying."
+        ) from exc
+
+    cred_helpers = docker_config.get("credHelpers")
+    if str(docker_config.get("credsStore") or "").strip() == "ecr-login":
+        return
+    if isinstance(cred_helpers, dict):
+        missing = [registry for registry in ecr_registries if str(cred_helpers.get(registry) or "").strip() != "ecr-login"]
+    else:
+        missing = ecr_registries
+    if missing:
+        raise RuntimeError(
+            "SaaS image pull requires Docker ECR authentication via amazon-ecr-credential-helper. "
+            f"Configure /root/.docker/config.json with credsStore=ecr-login or credHelpers for: {', '.join(missing)}."
+        )
 
 
 def docker_compose_up(layout: RuntimeLayout, *, services: list[str] | None = None, pull_policy: str | None = None) -> None:
@@ -2873,6 +2961,8 @@ def upgrade_release(args) -> dict:
             maybe_fail_upgrade_simulation(layout, args, "compose")
             if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):
                 write_helper_status(layout, status="upgrading", message="Pulling target release images.")
+                if profile == "saas":
+                    ensure_ecr_credential_helper_ready(layout)
                 docker_compose_pull(layout)
             elif source == "manifest":
                 write_helper_status(layout, status="upgrading", message="Skipping image pull; using images already present on this host.")
