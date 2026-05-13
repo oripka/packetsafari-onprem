@@ -193,80 +193,44 @@ release candidate.
 
 ## Single-Host SaaS Upgrade Profile
 
-`packetsafari-ops` can also run the same transaction engine for the current
-single-EC2 SaaS deployment:
-
-```bash
-packetsafari-ops config check-env --profile saas --manifest ./release-manifest.json
-packetsafari-ops config prompt-env --profile saas --manifest ./release-manifest.json
-packetsafari-ops doctor --profile saas --manifest ./release-manifest.json
-packetsafari-ops update check --profile saas --channel stable
-packetsafari-ops update apply --profile saas --channel stable
-packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
-packetsafari-ops rollback --profile saas
-```
-
-On a PacketSafari-operated SaaS host with
-`/opt/packetsafari/secrets/saas-operator-token` installed, the normal update
-UX is intentionally shorter:
+`packetsafari-ops` also runs the transaction engine for PacketSafari-operated
+single-EC2 SaaS hosts. The normal SaaS host update is one command:
 
 ```bash
 sudo env HOME=/root packetsafari-ops update
 ```
 
-The command infers the `saas` profile from the host token or installed SaaS
-manifest, downloads the private channel manifest from
+On a SaaS host, the command infers `profile=saas`, downloads the private release
+manifest from
 `s3://packetsafari-release-channels-166826692770/channels/saas/stable/linux-arm64/release-manifest.json`
-using the EC2 instance role, pulls images from ECR through root Docker's ECR
-credential helper, applies the update, restarts services, health-checks, and
-promotes. Do not make the SaaS release channel public or copy long-lived AWS
-keys to the host.
+with the EC2 instance role, pulls ECR images through root Docker's ECR
+credential helper, applies migrations, restarts services, health-checks, and
+promotes.
 
-The SaaS profile is intentionally different from on-prem:
+SaaS-specific safety rules:
 
-- it skips customer entitlement checks only after an internal SaaS operator token is verified
-- it still validates the release manifest, upgrade path, required env, migrations, container health, and product readiness
-- it defaults to `--backup-mode require-recent`, meaning it requires proof of a fresh external backup before migrations
-- it records only metadata snapshots unless `--backup-mode inline` is selected
+- `/opt/packetsafari/secrets/saas-operator-token` must be installed.
+- The EC2 role must have private release-channel `s3:GetObject` access.
+- No long-lived AWS keys, signing keys, or upstream API secrets should be copied to the host.
+- `--backup-mode require-recent` is the default for SaaS.
+- `--backup-mode skip --allow-unbacked-upgrade` is only for disposable hosts or known container-only updates.
 
-Connected update discovery uses the PacketSafari release channel by default:
+Useful SaaS commands:
+
+```bash
+sudo env HOME=/root packetsafari-ops update check
+sudo env HOME=/root packetsafari-ops update
+sudo env HOME=/root packetsafari-ops rollback --profile saas
+```
+
+For on-prem connected updates, the public release channel remains:
 
 ```text
 https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/release-manifest.json
 ```
 
-For `profile=saas`, managed PacketSafari hosts use the private S3 release
-channel by default instead:
-
-```text
-s3://packetsafari-release-channels-166826692770/channels/saas/<channel>/<platform>/release-manifest.json
-```
-
-Operators can override that with a direct manifest source:
-
-```bash
-export PACKETSAFARI_UPDATE_MANIFEST_URL='https://<portal-presigned-url>/release-manifest.json'
-```
-
-or with a different channel base:
-
-```bash
-export PACKETSAFARI_UPDATE_BASE_URL='https://downloads.example.com/packetsafari'
-```
-
-Fast unbacked updates are explicitly gated:
-
-```bash
-packetsafari-ops update apply \
-  --profile saas \
-  --backup-mode skip \
-  --allow-unbacked-upgrade
-```
-
-Use that only for container-only releases or disposable development hosts. It
-keeps existing PostgreSQL and `/storage` volumes, replaces containers, runs any
-target migrations, then health-checks and promotes. It does not provide data
-rollback if a migration changes schema or data.
+Override `PACKETSAFARI_UPDATE_MANIFEST_URL` or `PACKETSAFARI_UPDATE_BASE_URL`
+only for staged/private/customer-specific manifests.
 
 `doctor --profile saas` checks product readiness, not just Docker liveness. It
 verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL` and

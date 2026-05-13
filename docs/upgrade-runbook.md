@@ -37,7 +37,7 @@ The frontend intentionally connects directly to sharkd for low-latency packet vi
 ```bash
 packetsafari-ops status
 packetsafari-ops update check
-packetsafari-ops update apply
+packetsafari-ops update
 packetsafari-ops install --license ./license-token.json
 packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops upgrade
@@ -46,17 +46,19 @@ packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 ```
 
-`update check`, `update apply`, `install --license`, and bare `upgrade` are the
-normal connected operator flow. The tool still uses a release manifest
-internally, but operators do not need to pass one each time. By default, the
-tool resolves the PacketSafari release channel:
+`update check`, `update`, `install --license`, and bare `upgrade` are the
+normal connected operator flow. `update apply` remains accepted for older
+runbooks, but new docs and operator habits should use `update`. The tool still
+uses a release manifest internally, but operators do not need to pass one each
+time.
+
+For on-prem connected updates, the default release channel is:
 
 ```text
 https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/release-manifest.json
 ```
 
-For PacketSafari-operated SaaS hosts, `packetsafari-ops update` is designed to
-be a one-command host update:
+For PacketSafari-operated SaaS hosts, the host update is:
 
 ```bash
 sudo env HOME=/root packetsafari-ops update
@@ -70,9 +72,11 @@ instance role:
 s3://packetsafari-release-channels-166826692770/channels/saas/stable/linux-arm64/release-manifest.json
 ```
 
-This requires AWS CLI on the host and the root Docker ECR credential helper.
-Do not use workstation AWS keys, public SaaS manifests, or copied CloudFront
-signing material to simplify this path.
+This uses the EC2 instance role directly; AWS CLI is optional because
+`packetsafari-ops` has built-in SigV4 S3 fetching for the private manifest. Root
+Docker still needs the ECR credential helper for image pulls. Do not use
+workstation AWS keys, public SaaS manifests, or copied CloudFront signing
+material to simplify this path.
 
 Use these environment variables only when testing a private/staged channel or a
 customer-specific manifest:
@@ -93,15 +97,16 @@ Examples:
 
 ```bash
 packetsafari-ops update check --profile onprem --channel stable
-packetsafari-ops update apply --profile onprem --channel stable
-packetsafari-ops update apply --profile saas --channel stable --backup-mode require-recent
+packetsafari-ops update --profile onprem --channel stable
+sudo env HOME=/root packetsafari-ops update check
+sudo env HOME=/root packetsafari-ops update
 ```
 
 For a deliberate container-only fast path, use `--backup-mode skip` together
 with the explicit safety acknowledgement:
 
 ```bash
-packetsafari-ops update apply \
+packetsafari-ops update \
   --profile saas \
   --backup-mode skip \
   --allow-unbacked-upgrade
@@ -146,15 +151,15 @@ install from a copied release directory without depending on public GitHub.
 ## Single-Host SaaS Commands
 
 For the current SaaS deployment model where PacketSafari runs on one EC2 host,
-use the same release artifacts but select the SaaS profile:
+the normal path is still one command:
 
 ```bash
-packetsafari-ops config check-env --profile saas --manifest ./release-manifest.json
-packetsafari-ops config prompt-env --profile saas --manifest ./release-manifest.json
-packetsafari-ops doctor --profile saas --manifest ./release-manifest.json
-packetsafari-ops upgrade --profile saas --manifest ./release-manifest.json
-packetsafari-ops rollback --profile saas
+sudo env HOME=/root packetsafari-ops update
 ```
+
+Use explicit `config`, `doctor`, `upgrade --manifest`, or `rollback --profile
+saas` commands only for manual recovery, staged manifests, or lower-level
+debugging.
 
 The SaaS profile skips customer license entitlement checks only after the host
 proves it is a PacketSafari-operated SaaS deployment. Install a high-entropy
