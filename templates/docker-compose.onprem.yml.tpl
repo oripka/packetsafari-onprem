@@ -313,6 +313,11 @@ services:
       SHARKD_JWT_SECRET: "${SHARKD_JWT_SECRET:?required}"
     ports:
       - "4448:4448"
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/bash -lc 'exec 3<>/dev/tcp/127.0.0.1/4448'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     volumes:
       - packetsafari-storage:/storage
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"

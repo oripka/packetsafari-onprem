@@ -3131,6 +3131,52 @@ def _compose_service_status(layout: RuntimeLayout) -> dict[str, object]:
     return {"ok": not unhealthy and bool(rows), "services": rows, "unhealthy": unhealthy}
 
 
+def _backend_sharkd_probe(layout: RuntimeLayout) -> dict[str, object]:
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+    probe = """
+import json
+import sys
+
+try:
+    from packetsafari.common.connect import get_sharkcdm
+
+    raw = get_sharkcdm().dispatch("info")
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    print(json.dumps({
+        "ok": True,
+        "responseKeys": sorted(payload.keys()) if isinstance(payload, dict) else [],
+    }))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    sys.exit(1)
+""".strip()
+    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-c", probe]
+    try:
+        result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    payload: dict[str, object] = {}
+    raw_output = result.stdout.strip()
+    if raw_output:
+        try:
+            parsed = json.loads(raw_output.splitlines()[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {"stdout": raw_output}
+    if result.returncode != 0:
+        return {
+            **payload,
+            "ok": False,
+            "error": str(payload.get("error") or result.stderr.strip() or raw_output or f"probe exited {result.returncode}"),
+        }
+    return {**payload, "ok": bool(payload.get("ok", True))}
+
+
 def doctor_deployment(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
@@ -3187,6 +3233,9 @@ def doctor_deployment(args) -> dict:
 
     compose = _compose_service_status(layout)
     add_check("compose_services", bool(compose.get("ok")), **compose)
+
+    sharkd = _backend_sharkd_probe(layout)
+    add_check("backend_sharkd", bool(sharkd.get("ok")), **sharkd)
 
     ok = all(bool(check.get("ok")) for check in checks)
     return {
