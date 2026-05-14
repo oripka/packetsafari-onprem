@@ -1108,7 +1108,7 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "PACKETSAFARI_SIZING_HOST_MEMORY_BYTES": str(memory_bytes),
         "CELERY_AICHAT_CONCURRENCY": str(aichat_concurrency),
         "CELERY_INDEX_CONCURRENCY": "auto",
-        "PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX": str({"small": 4, "medium": 8, "large": 12}[effective_profile]),
+        "PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX": str({"small": 4, "medium": 12, "large": 24}[effective_profile]),
         "CELERY_AICHAT_LOGLEVEL": "info",
         "CELERY_INDEX_LOGLEVEL": "info",
         "PACKETSAFARI_UWSGI_PROCESSES": str(uwsgi_processes),

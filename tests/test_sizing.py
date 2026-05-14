@@ -20,7 +20,7 @@ def test_sizing_plan_leaves_index_concurrency_runtime_sized(monkeypatch, tmp_pat
     env = plan["env"]
 
     assert env["CELERY_INDEX_CONCURRENCY"] == "auto"
-    assert env["PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX"] == "12"
+    assert env["PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX"] == "24"
 
 
 def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path):
