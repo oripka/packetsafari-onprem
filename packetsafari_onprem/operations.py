@@ -220,12 +220,16 @@ def required_ops_version(manifest: dict) -> str:
 
 def tooling_update_status(manifest: dict) -> dict:
     required = required_ops_version(manifest)
+    tooling = _manifest_tooling_requirements(manifest)
+    target = str(tooling.get("version") or required or "").strip()
     current = version()
     if not required:
         return {
             "required": False,
             "currentVersion": current,
             "requiredVersion": "",
+            "targetVersion": target,
+            "available": bool(target and _version_key(current) < _version_key(target)),
             "status": "not_required",
             "message": "Release manifest does not declare a minimum packetsafari-ops version.",
         }
@@ -234,6 +238,8 @@ def tooling_update_status(manifest: dict) -> dict:
             "required": True,
             "currentVersion": current,
             "requiredVersion": required,
+            "targetVersion": target or required,
+            "available": True,
             "status": "upgrade_required",
             "message": (
                 f"This release requires packetsafari-ops {required} or newer; "
@@ -244,6 +250,8 @@ def tooling_update_status(manifest: dict) -> dict:
         "required": True,
         "currentVersion": current,
         "requiredVersion": required,
+        "targetVersion": target or required,
+        "available": bool(target and _version_key(current) < _version_key(target)),
         "status": "ok",
         "message": f"packetsafari-ops {current} satisfies release requirement {required}.",
     }
@@ -253,6 +261,115 @@ def validate_tooling_requirement(manifest: dict) -> None:
     status = tooling_update_status(manifest)
     if status["status"] == "upgrade_required":
         raise RuntimeError(str(status["message"]))
+
+
+def _tooling_archive_source(manifest: dict, bundle_dir: Path | None = None) -> str:
+    tooling = _manifest_tooling_requirements(manifest)
+    archive_path = str(tooling.get("archivePath") or tooling.get("archive") or "").strip()
+    if archive_path:
+        path = Path(archive_path)
+        if not path.is_absolute() and bundle_dir is not None:
+            path = bundle_dir / path
+        return str(path)
+    return str(tooling.get("archiveUrl") or tooling.get("url") or "").strip()
+
+
+def _verify_sha256(path: Path, expected: str, label: str) -> None:
+    expected = str(expected or "").strip().lower()
+    if not expected:
+        return
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise RuntimeError(f"{label} checksum mismatch: expected {expected}, got {actual}.")
+
+
+def _find_tooling_root(extract_dir: Path) -> Path:
+    candidates = [extract_dir, *[path for path in extract_dir.iterdir() if path.is_dir()]]
+    for candidate in candidates:
+        if (candidate / "packetsafari_onprem" / "cli.py").exists():
+            return candidate
+    raise RuntimeError("Downloaded packetsafari-ops archive does not contain packetsafari_onprem/cli.py.")
+
+
+def _copy_tooling_tree(source: Path, destination: Path) -> None:
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".guard",
+            ".pytest_cache",
+            ".venv",
+            "__pycache__",
+            "*.pyc",
+            "*.egg-info",
+            "build",
+            "dist",
+        ),
+    )
+
+
+def _install_tooling_archive(layout: RuntimeLayout, archive: Path) -> None:
+    parent = layout.tooling_root.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="packetsafari-ops-tooling-") as tmp:
+        extract_dir = Path(tmp) / "extract"
+        extract_dir.mkdir(parents=True)
+        shutil.unpack_archive(str(archive), str(extract_dir))
+        source_root = _find_tooling_root(extract_dir)
+        new_root = parent / f".onprem-new-{os.getpid()}"
+        backup_root = parent / f".onprem-previous-{utc_now().replace(':', '').replace('+', '-')}"
+        shutil.rmtree(new_root, ignore_errors=True)
+        _copy_tooling_tree(source_root, new_root)
+        try:
+            if layout.tooling_root.exists():
+                os.replace(layout.tooling_root, backup_root)
+            os.replace(new_root, layout.tooling_root)
+            install_wrapper(layout)
+            shutil.rmtree(backup_root, ignore_errors=True)
+        except Exception:
+            if layout.tooling_root.exists():
+                shutil.rmtree(layout.tooling_root, ignore_errors=True)
+            if backup_root.exists():
+                os.replace(backup_root, layout.tooling_root)
+            raise
+        finally:
+            shutil.rmtree(new_root, ignore_errors=True)
+
+
+def maybe_self_update_tooling(args, layout: RuntimeLayout, manifest: dict, *, bundle_dir: Path | None = None) -> dict:
+    status = tooling_update_status(manifest)
+    if not bool(status.get("available")):
+        return {"updated": False, **status}
+    if layout.kind != "onprem-runtime-root":
+        return {"updated": False, "skipped": True, "reason": "local_data_root", **status}
+    source = _tooling_archive_source(manifest, bundle_dir=bundle_dir)
+    if not source:
+        if status.get("status") == "upgrade_required":
+            raise RuntimeError(f"{status['message']} The release manifest does not provide a tooling archive.")
+        return {"updated": False, "skipped": True, "reason": "missing_archive", **status}
+
+    archive = materialize_source(
+        source,
+        layout.tmp_dir / "downloads",
+        "packetsafari-ops archive",
+        args,
+        default_name="packetsafari-onprem.tar.gz",
+    )
+    tooling = _manifest_tooling_requirements(manifest)
+    _verify_sha256(archive, str(tooling.get("sha256") or ""), "packetsafari-ops archive")
+    write_helper_status(layout, status="upgrading", message=f"Updating packetsafari-ops {version()} -> {status.get('targetVersion')}.")
+    _install_tooling_archive(layout, archive)
+    write_helper_status(layout, status="ok", message=f"packetsafari-ops updated to {status.get('targetVersion')}.")
+    if _truthy(os.getenv("PACKETSAFARI_OPS_SELF_UPDATE_NO_REEXEC")):
+        return {"updated": True, "reexec": False, **status}
+    cli_path = layout.tooling_root / "packetsafari_onprem" / "cli.py"
+    os.execv(sys.executable, [sys.executable, str(cli_path), *sys.argv[1:]])
+    raise RuntimeError("Failed to re-exec updated packetsafari-ops.")
 
 
 def runtime_layout(runtime_root: str = DEFAULT_RUNTIME_ROOT, container_runtime_root: str = DEFAULT_CONTAINER_RUNTIME_ROOT) -> RuntimeLayout:
@@ -2228,17 +2345,23 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
     else:
         available = True
         reason = "newer"
-    return {
+    app = {
         "available": available,
         "reason": reason,
         "currentVersion": current,
         "targetVersion": target,
+    }
+    ops = tooling_update_status(manifest)
+    return {
+        **app,
         "channel": str(manifest.get("channel") or ""),
         "profile": _requested_or_active_profile(args, layout),
         "manifest": str(manifest_path),
         "source": _update_manifest_source(args, layout),
         "backupMode": resolve_backup_mode(args, profile=_requested_or_active_profile(args, layout)),
-        "tooling": tooling_update_status(manifest),
+        "app": app,
+        "ops": ops,
+        "tooling": ops,
     }
 
 
@@ -2247,6 +2370,8 @@ def apply_update(args) -> dict:
     ensure_runtime_dirs(layout)
     manifest_path = _download_update_manifest(args, layout)
     check_payload = _update_check_payload(args, layout, manifest_path)
+    manifest = _read_json(manifest_path, {})
+    maybe_self_update_tooling(args, layout, manifest)
     if not check_payload["available"] and not bool(getattr(args, "force", False)):
         return {"status": "noop", **check_payload}
     setattr(args, "manifest", str(manifest_path))
@@ -2780,6 +2905,7 @@ def prepare_offline_bundle(
         verify_bundle_checksums(bundle_dir)
 
         manifest = _read_json(bundle_dir / "release-manifest.json", {})
+        maybe_self_update_tooling(args, layout, manifest, bundle_dir=bundle_dir)
         images = _manifest_images(manifest)
         version_value = str(manifest.get("version") or "release")
         image_dir = bundle_dir / "images"
@@ -3122,6 +3248,7 @@ def upgrade_release(args) -> dict:
             maybe_fail_upgrade_simulation(layout, args, "preflight")
 
             manifest = _read_json(target_manifest_path, {})
+            maybe_self_update_tooling(args, layout, manifest)
             validate_tooling_requirement(manifest)
             validate_upgrade_path(layout, manifest)
             if profile == "onprem":

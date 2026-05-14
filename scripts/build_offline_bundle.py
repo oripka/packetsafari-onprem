@@ -7,8 +7,12 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def sha256(path: Path) -> str:
@@ -72,6 +76,61 @@ def create_archive(bundle_root: Path, output: Path) -> None:
     subprocess.run(["tar", "-cf", str(output), "-C", str(bundle_root.parent), bundle_root.name], check=True)
 
 
+def create_onprem_tooling_archive(output_dir: Path, version: str) -> Path:
+    archive_path = output_dir / f"packetsafari-onprem-{version}.tar.gz"
+    ignored = {
+        ".git",
+        ".guard",
+        ".pytest_cache",
+        ".venv",
+        "build",
+        "dist",
+    }
+
+    def include(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        parts = set(Path(tarinfo.name).parts)
+        if parts & ignored:
+            return None
+        if tarinfo.name.endswith(".pyc") or "__pycache__" in parts or tarinfo.name.endswith(".egg-info"):
+            return None
+        return tarinfo
+
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(REPO_ROOT, arcname=REPO_ROOT.name, filter=include)
+    return archive_path
+
+
+def tooling_version(manifest: dict) -> str:
+    tooling = manifest.get("tooling") if isinstance(manifest.get("tooling"), dict) else {}
+    version = str(tooling.get("version") or tooling.get("minOpsVersion") or "").strip()
+    if version:
+        return version
+    version_path = REPO_ROOT / "VERSION"
+    return version_path.read_text(encoding="utf-8").strip() if version_path.exists() else "local"
+
+
+def add_tooling_archive(root: Path, manifest: dict, archive_source: Path | None = None) -> dict:
+    version = tooling_version(manifest)
+    tooling_dir = root / "tooling"
+    tooling_dir.mkdir(parents=True, exist_ok=True)
+    archive = archive_source.expanduser() if archive_source else create_onprem_tooling_archive(tooling_dir, version)
+    target = tooling_dir / f"packetsafari-onprem-{version}.tar.gz"
+    if archive.resolve() != target.resolve():
+        shutil.copy2(archive, target)
+    tooling = dict(manifest.get("tooling") if isinstance(manifest.get("tooling"), dict) else {})
+    tooling.update(
+        {
+            "version": version,
+            "minOpsVersion": str(tooling.get("minOpsVersion") or version),
+            "archivePath": str(target.relative_to(root)),
+            "sha256": sha256(target),
+        }
+    )
+    manifest = dict(manifest)
+    manifest["tooling"] = tooling
+    return manifest
+
+
 def split_file(path: Path, part_size_mb: int) -> list[Path]:
     part_size = part_size_mb * 1024 * 1024
     parts: list[Path] = []
@@ -98,6 +157,7 @@ def main() -> int:
     parser.add_argument("--license", help="Optional license-token.json to include for fresh air-gapped installs.")
     parser.add_argument("--license-public-key", help="Optional license-public.pem to include for local/dev install bundles.")
     parser.add_argument("--release-public-key", help="Optional release-public.pem to include next to signed checksums.")
+    parser.add_argument("--tooling-archive", help="Optional prebuilt packetsafari-onprem tooling archive to include.")
     parser.add_argument("--sign-key", help="Private key used to sign checksums.txt.")
     parser.add_argument("--no-pull", action="store_true", help="Use local Docker image tags without pulling them first.")
     parser.add_argument("--split-size-mb", type=int, default=0)
@@ -112,7 +172,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix=f"packetsafari-{version}-offline-") as tmp:
         root = Path(tmp) / f"packetsafari-{version}-offline"
         (root / "images").mkdir(parents=True)
-        shutil.copy2(manifest_path, root / "release-manifest.json")
+        manifest = add_tooling_archive(
+            root,
+            manifest,
+            archive_source=Path(args.tooling_archive) if args.tooling_archive else None,
+        )
+        (root / "release-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if args.release_notes:
             shutil.copy2(Path(args.release_notes).expanduser(), root / "release-notes.md")
         if args.license:

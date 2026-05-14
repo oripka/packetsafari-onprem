@@ -162,12 +162,12 @@ ACTION="${1:-install}"
 export PYTHONPATH="${BUNDLE_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 case "${ACTION}" in
-  install|status|upgrade|rollback|tui|tune|onboard|config|iam|diagnostics)
+  install|status|doctor|update|upgrade|rollback|tui|tune|onboard|config|iam|diagnostics)
     exec python3 "${ENTRYPOINT}" "$@"
     ;;
   *)
     echo "Unknown action: ${ACTION}" >&2
-    echo "Supported actions: install, status, upgrade, rollback, tui, tune, onboard, config, iam, diagnostics" >&2
+    echo "Supported actions: install, status, doctor, update, upgrade, rollback, tui, tune, onboard, config, iam, diagnostics" >&2
     exit 1
     ;;
 esac

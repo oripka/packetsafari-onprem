@@ -52,6 +52,13 @@ runbooks, but new docs and operator habits should use `update`. The tool still
 uses a release manifest internally, but operators do not need to pass one each
 time.
 
+`bootstrap.sh` is for first install and recovery. It can launch `update`, but
+the normal post-install command is the installed wrapper:
+
+```bash
+sudo env HOME=/root packetsafari-ops update
+```
+
 For on-prem connected updates, the default release channel is:
 
 ```text
@@ -77,6 +84,11 @@ This uses the EC2 instance role directly; AWS CLI is optional because
 Docker still needs the ECR credential helper for image pulls. Do not use
 workstation AWS keys, public SaaS manifests, or copied CloudFront signing
 material to simplify this path.
+
+The manifest also advertises the matching ops tooling archive. When the host is
+running an older `packetsafari-ops`, `update` downloads that archive, verifies
+its checksum, swaps `/opt/packetsafari/tooling/onprem`, re-execs the updated
+CLI, and then continues the app release.
 
 Use these environment variables only when testing a private/staged channel or a
 customer-specific manifest:
@@ -147,6 +159,9 @@ installs, place `bootstrap.sh`, `bootstrap-manifest.json`, and
 `packetsafari-onprem.tar.gz` next to the release files. `bootstrap.sh` prefers
 those adjacent files before using configured HTTP/HTTPS URLs, so an operator can
 install from a copied release directory without depending on public GitHub.
+Installed hosts should still use `packetsafari-ops update` or
+`packetsafari-ops upgrade --bundle`; the bundle itself carries the matching ops
+tooling.
 
 ## Single-Host SaaS Commands
 
@@ -244,9 +259,15 @@ packetsafari-10.0.1-offline.tar.zst
   license-token.json       # optional, for fresh install bundles
   license-public.pem       # development/local bundles only
   release-public.pem       # optional public verification material
+  tooling/
+    packetsafari-onprem-<ops-version>.tar.gz
   sbom/
   release-notes.md
 ```
+
+The release manifest inside the bundle includes `tooling.archivePath` and
+`tooling.sha256`, so `packetsafari-ops upgrade --bundle ...` can self-update
+before applying the app release.
 
 The host must already have the PacketSafari release public key at
 `/opt/packetsafari/state/release-public.pem`, `/opt/packetsafari/secrets/release-public.pem`,

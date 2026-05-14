@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import tarfile
 from types import SimpleNamespace
 
 from packetsafari_onprem import operations
@@ -66,6 +68,73 @@ def test_materialize_source_copies_s3_with_aws_cli(monkeypatch, tmp_path):
         "--region",
         "eu-central-1",
     ]]
+
+
+def test_update_check_payload_reports_app_and_ops_layers(tmp_path):
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(
+        """
+{
+  "version": "10.0.1",
+  "channel": "stable",
+  "tooling": {
+    "version": "99.0.0",
+    "minOpsVersion": "99.0.0",
+    "archiveUrl": "s3://bucket/tooling/packetsafari-onprem-99.0.0.tar.gz",
+    "sha256": "abc"
+  }
+}
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+
+    payload = operations._update_check_payload(
+        SimpleNamespace(profile="saas", channel="stable", platform="linux-arm64", backup_mode=None),
+        layout,
+        manifest_path,
+    )
+
+    assert payload["app"]["available"] is True
+    assert payload["app"]["targetVersion"] == "10.0.1"
+    assert payload["ops"]["available"] is True
+    assert payload["ops"]["targetVersion"] == "99.0.0"
+    assert payload["tooling"] == payload["ops"]
+
+
+def test_maybe_self_update_tooling_installs_archive_without_reexec(monkeypatch, tmp_path):
+    source_root = tmp_path / "source" / "packetsafari-onprem"
+    package_dir = source_root / "packetsafari_onprem"
+    package_dir.mkdir(parents=True)
+    (package_dir / "cli.py").write_text("print('new cli')\n", encoding="utf-8")
+    (package_dir / "__init__.py").write_text("__version__ = '99.0.0'\n", encoding="utf-8")
+
+    archive = tmp_path / "packetsafari-onprem-99.0.0.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(source_root, arcname=source_root.name)
+
+    manifest = {
+        "tooling": {
+            "version": "99.0.0",
+            "minOpsVersion": "99.0.0",
+            "archiveUrl": str(archive),
+            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        }
+    }
+    layout = operations.runtime_layout(str(tmp_path / "runtime"), str(tmp_path / "runtime"))
+    monkeypatch.setenv("PACKETSAFARI_OPS_SELF_UPDATE_NO_REEXEC", "true")
+    monkeypatch.setattr(operations, "install_global_wrapper", lambda layout: None)
+
+    result = operations.maybe_self_update_tooling(
+        SimpleNamespace(download_header=[], download_basic="", download_bearer_token="", allow_insecure_download=False),
+        layout,
+        manifest,
+    )
+
+    assert result["updated"] is True
+    assert (layout.tooling_root / "packetsafari_onprem" / "cli.py").read_text(encoding="utf-8") == "print('new cli')\n"
+    assert layout.wrapper_path.exists()
 
 
 def test_services_with_changed_images_only_returns_changed_service_images():

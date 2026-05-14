@@ -16,9 +16,14 @@ Customer-facing Python-native installer, operator CLI, and simple interactive me
 - `scripts/render_logging_config.py` - render Vector config for optional audit log forwarding
 - `templates/docker-compose.onprem.yml.tpl` - compose template rendered during install and upgrade
 
-## Bootstrap
+## Bootstrap And Updates
 
-Supported customer entrypoints:
+Bootstrap is for first install and recovery. Once `/usr/local/bin/packetsafari-ops`
+exists, normal connected and SaaS updates should use `packetsafari-ops update`;
+that command can now update the ops tooling first and then continue the app
+release update.
+
+Supported customer install entrypoints:
 
 ```bash
 curl -fsSL "https://<portal-presigned-url>/bootstrap.sh" | bash -s -- install --license /path/to/license-token.json --manifest ./release-manifest.json
@@ -33,7 +38,7 @@ packetsafari-ops tui
 ```
 
 ```bash
-packetsafari-ops upgrade --manifest ./release-manifest.json
+packetsafari-ops update
 ```
 
 ```bash
@@ -44,6 +49,17 @@ packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 ```
 
+For recovery, or before the installed wrapper exists, the same actions can be
+launched through bootstrap:
+
+```bash
+curl -fsSL "https://<portal-presigned-url>/bootstrap.sh" | sudo -E bash -s -- update
+```
+
+```bash
+curl -fsSL "https://<portal-presigned-url>/bootstrap.sh" | sudo -E bash -s -- upgrade --bundle ./packetsafari-10.0.1-offline.tar.zst
+```
+
 `bootstrap.sh` first looks for `bootstrap-manifest.json` and
 `packetsafari-onprem.tar.gz` next to the script. If those files are present, it
 uses them without reaching GitHub or another public location. Otherwise it
@@ -51,7 +67,11 @@ downloads the full on-prem bundle, verifies the on-prem tooling archive and
 Python CLI checksums from `bootstrap-manifest.json`, and launches the operator
 CLI directly with `python3`.
 
-Production installers should be pinned to an authenticated release location, not a mutable public branch. The SaaS customer portal mints short-lived download URLs for `bootstrap.sh`, `packetsafari-onprem.tar.gz`, release manifests, verification material, and offline bundles.
+The repository defaults point at the public GitHub repo for development and
+emergency recovery. Production installers should be pinned to an authenticated
+release location, not a mutable public branch. The SaaS customer portal mints
+short-lived download URLs for `bootstrap.sh`, `packetsafari-onprem.tar.gz`,
+release manifests, verification material, and offline bundles.
 
 A self-contained release directory for local HTTP, private S3, or removable
 media should contain at least:
@@ -166,8 +186,8 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - Native onboarding uses the existing local `/api/v2/onprem/onboarding/*` APIs. The menu can show schema output and validate, save, or finalize pasted draft JSON directly from the terminal.
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
-- `update check` discovers the configured release-channel manifest and reports whether a newer release is available.
-- `update apply` downloads the configured release-channel manifest and runs the same transaction as `upgrade --manifest`, so normal operators do not need to pass manifest paths manually.
+- `update check` discovers the configured release-channel manifest and reports app and ops tooling availability.
+- `update` downloads the configured release-channel manifest, self-updates `packetsafari-ops` when the manifest advertises newer tooling, re-execs the updated CLI, and then runs the same transaction as `upgrade --manifest`.
 - `install --license` and bare `upgrade` use the same default release-channel
   manifest discovery. Pass `--manifest` only for a pinned file/URL, staging
   channel, or customer-specific manifest.
@@ -203,7 +223,8 @@ sudo env HOME=/root packetsafari-ops update
 On a SaaS host, the command infers `profile=saas`, downloads the private release
 manifest from
 `s3://packetsafari-release-channels-166826692770/channels/saas/stable/linux-arm64/release-manifest.json`
-with the EC2 instance role, pulls ECR images through root Docker's ECR
+with the EC2 instance role, updates `packetsafari-ops` from the manifest's
+`tooling.archiveUrl` when needed, pulls ECR images through root Docker's ECR
 credential helper, applies migrations, restarts services, health-checks, and
 promotes.
 
@@ -357,19 +378,20 @@ packetsafari-10.0.1-offline.tar.zst
   license-token.json       # optional, for fresh install bundles
   license-public.pem       # development/local bundles only, never the production trust root
   release-public.pem       # optional copy of the verification public key
+  tooling/
+    packetsafari-onprem-<ops-version>.tar.gz
   sbom/
   release-notes.md
 ```
 
 Large bundles may be split and copied as `packetsafari-10.0.1-offline.tar.zst.part-aa`, `.part-ab`, and so on. Pass any local part path to `packetsafari-ops upgrade --bundle`; the tool reassembles all matching parts, verifies the signature and checksums, then proceeds. Remote HTTP/HTTPS bundle URLs must point to the complete reassembled archive.
 
-Offline releases also ship the on-prem operator tooling next to the image
-bundle as `packetsafari-onprem.tar.gz`. For fresh installs, run the packaged
-`bootstrap.sh install --bundle ...`; for upgrades, prefer the packaged
-`bootstrap.sh upgrade --bundle ...` or update the installed tooling before
-running `packetsafari-ops upgrade --bundle ...` directly. Existing hosts with an
-older `packetsafari-ops` cannot understand newer manifest tooling requirements
-until that tooling archive has been applied.
+Offline bundles embed the on-prem operator tooling under `tooling/` and record
+its path and checksum in `release-manifest.json`. Existing hosts can run
+`packetsafari-ops upgrade --bundle ...` directly; the installed CLI updates
+itself from the signed bundle before interpreting newer bundle semantics. Keep
+the adjacent `bootstrap.sh` and `packetsafari-onprem.tar.gz` files for fresh
+installs and recovery when the installed wrapper is missing or broken.
 
 Build a bundle on a connected release workstation:
 

@@ -178,6 +178,7 @@ def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str,
         "platform": platform,
         "requiredEnv": required_onprem_env(app_root),
         "tooling": {
+            "version": tooling_version,
             "minOpsVersion": tooling_version,
         },
         "images": images,
@@ -362,6 +363,7 @@ def main() -> int:
     release_private_key = key_dir / "release-private.pem"
     release_public_key = output_dir / "release-public.pem"
     ensure_rsa_key(release_private_key, release_public_key)
+    tooling_archive = create_onprem_archive(output_dir)
 
     bundle_args = [
         sys.executable,
@@ -374,6 +376,8 @@ def main() -> int:
         str(notes),
         "--release-public-key",
         str(release_public_key),
+        "--tooling-archive",
+        str(tooling_archive),
         "--sign-key",
         str(release_private_key),
         "--no-pull",
@@ -386,7 +390,6 @@ def main() -> int:
         bundle_args.extend(["--split-size-mb", str(args.split_size_mb)])
     run(bundle_args)
 
-    create_onprem_archive(output_dir)
     write_bootstrap_files(output_dir)
     install_notes = write_install_notes(output_dir, f"packetsafari-{version}-offline.tar.zst", version=version, platform=args.platform, dev_license=dev_license)
 
