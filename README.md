@@ -171,7 +171,7 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - `install --license` and bare `upgrade` use the same default release-channel
   manifest discovery. Pass `--manifest` only for a pinned file/URL, staging
   channel, or customer-specific manifest.
-- `upgrade --manifest` runs a connected upgrade: validate the manifest, verify the license, stop app services, back up PostgreSQL and `/storage`, pull the target images, render Compose, run migrations from the target backend image, start with `--pull never`, run health checks, and promote only after success.
+- `upgrade --manifest` runs a connected upgrade: validate the manifest, verify the license, stop only services whose manifest image changed, back up PostgreSQL and `/storage`, pull the target images, render Compose, run migrations from the target backend image, start with `--pull never`, run health checks, and promote only after success.
 - `upgrade --bundle` runs the same transaction without network access: verify `checksums.txt.sig`, verify all file checksums, load Docker images from the bundle, retag them as local `packetsafari/<service>:<version>` images, render Compose to those local refs, and start with `--pull never`.
 - `rollback` restores the latest full snapshot, including PostgreSQL and `/storage`. Legacy metadata-only snapshots are still supported but are reported as metadata-only restores.
 

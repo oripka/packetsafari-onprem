@@ -66,3 +66,55 @@ def test_materialize_source_copies_s3_with_aws_cli(monkeypatch, tmp_path):
         "--region",
         "eu-central-1",
     ]]
+
+
+def test_services_with_changed_images_only_returns_changed_service_images():
+    active = {
+        "images": {
+            "frontend": "repo/frontend:1",
+            "backend": "repo/backend:1",
+            "sharkd": "repo/sharkd:1",
+            "egress-firewall": "repo/firewall:1",
+            "egress-ironproxy": "repo/ironproxy:1",
+            "egress-dns": "repo/dns:1",
+        }
+    }
+    target = {
+        "images": {
+            "frontend": "repo/frontend:1",
+            "backend": "repo/backend:2",
+            "sharkd": "repo/sharkd:1",
+            "egress-firewall": "repo/firewall:1",
+            "egress-ironproxy": "repo/ironproxy:1",
+            "egress-dns": "repo/dns:1",
+        }
+    }
+
+    assert operations._services_with_changed_images(active, target) == ["backend", "worker"]
+
+
+def test_services_with_changed_images_keeps_unchanged_sharkd_and_firewall_out():
+    active = {
+        "images": {
+            "frontend": "repo/frontend:1",
+            "backend": "repo/backend:1",
+            "worker": "repo/worker:1",
+            "sharkd": "repo/sharkd:1",
+            "egress-firewall": "repo/firewall:1",
+            "egress-ironproxy": "repo/ironproxy:1",
+            "egress-dns": "repo/dns:1",
+        }
+    }
+    target = {
+        "images": {
+            "frontend": "repo/frontend:2",
+            "backend": "repo/backend:1",
+            "worker": "repo/worker:1",
+            "sharkd": "repo/sharkd:1",
+            "egress-firewall": "repo/firewall:1",
+            "egress-ironproxy": "repo/ironproxy:2",
+            "egress-dns": "repo/dns:1",
+        }
+    }
+
+    assert operations._services_with_changed_images(active, target) == ["frontend", "egress-ironproxy"]

@@ -2372,6 +2372,47 @@ def image_ref(images: dict, key: str, default: str = "") -> str:
     return str(value or default)
 
 
+UPGRADE_RECREATED_IMAGE_SERVICES = [
+    "frontend",
+    "backend",
+    "worker",
+    "sharkd",
+    "egress-firewall",
+    "egress-ironproxy",
+    "egress-dns",
+]
+
+
+def _manifest_service_image_refs(manifest: dict) -> dict[str, str]:
+    images = _manifest_images(manifest)
+    backend_image = image_ref(images, "backend")
+    return {
+        "frontend": image_ref(images, "frontend"),
+        "backend": backend_image,
+        "worker": image_ref(images, "worker", backend_image),
+        "sharkd": image_ref(images, "sharkd"),
+        "egress-firewall": image_ref(images, "egress-firewall"),
+        "egress-ironproxy": image_ref(images, "egress-ironproxy"),
+        "egress-dns": image_ref(
+            images,
+            "egress-dns",
+            "coredns/coredns:1.11.3@sha256:9caabbf6238b189a65d0d6e6ac138de60d6a1c419e5a341fbbb7c78382559c6e",
+        ),
+    }
+
+
+def _services_with_changed_images(active_manifest: dict, target_manifest: dict) -> list[str]:
+    active_images = _manifest_service_image_refs(active_manifest)
+    target_images = _manifest_service_image_refs(target_manifest)
+    changed: list[str] = []
+    for service in UPGRADE_RECREATED_IMAGE_SERVICES:
+        target_ref = str(target_images.get(service) or "").strip()
+        active_ref = str(active_images.get(service) or "").strip()
+        if target_ref and target_ref != active_ref:
+            changed.append(service)
+    return changed
+
+
 def snapshot_runtime(layout: RuntimeLayout) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     snapshot_dir = layout.backup_dir / stamp
@@ -3102,8 +3143,23 @@ def upgrade_release(args) -> dict:
                 "skip": "continuing without a data backup",
             }[backup_mode]
             if layout.compose_file.exists():
-                write_helper_status(layout, status="upgrading", message=f"Stopping app services and {backup_message}.")
-                docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd", "egress-firewall", "egress-ironproxy", "egress-dns"], timeout=120)
+                services_to_recreate = _services_with_changed_images(_read_json(layout.release_manifest_path, {}), manifest)
+                if services_to_recreate:
+                    write_helper_status(
+                        layout,
+                        status="upgrading",
+                        message=(
+                            f"Stopping services with changed images ({', '.join(services_to_recreate)}) and "
+                            f"{backup_message}."
+                        ),
+                    )
+                    docker_compose_stop(layout, services=services_to_recreate, timeout=120)
+                else:
+                    write_helper_status(
+                        layout,
+                        status="upgrading",
+                        message=f"No running service images changed; leaving app services up and {backup_message}.",
+                    )
             else:
                 write_helper_status(layout, status="upgrading", message=f"No active Compose file found; treating this as a fresh deployment and {backup_message}.")
             snapshot_dir = snapshot_runtime(layout)

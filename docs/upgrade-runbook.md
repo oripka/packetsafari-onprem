@@ -262,7 +262,7 @@ in onboarding mode.
 2. Verify the bundle signature and checksums, or copy the connected manifest.
 3. Verify license expiry and release channel/version eligibility.
 4. Check `minUpgradeableFrom`, `upgradeableFrom`, and required env keys.
-5. Stop frontend, backend, worker, and sharkd.
+5. Stop only running services whose target manifest image changed.
 6. Back up metadata, PostgreSQL, and `/storage`.
 7. Pull connected images, or load offline image archives and retag them as local `packetsafari/<service>:<version>` refs.
 8. Render the target Compose file.
