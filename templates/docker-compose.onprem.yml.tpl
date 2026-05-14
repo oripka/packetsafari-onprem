@@ -189,7 +189,7 @@ services:
       PACKETSAFARI_RUNTIME_CACHE_REDIS_DB: "0"
       PACKETSAFARI_RUNTIME_CHECKPOINT_REDIS_DB: "0"
       CELERY_AICHAT_CONCURRENCY: "${CELERY_AICHAT_CONCURRENCY:-2}"
-      CELERY_INDEX_CONCURRENCY: "${CELERY_INDEX_CONCURRENCY:-1}"
+      CELERY_INDEX_CONCURRENCY: "${CELERY_INDEX_CONCURRENCY:-auto}"
       CELERY_AICHAT_LOGLEVEL: "${CELERY_AICHAT_LOGLEVEL:-info}"
       CELERY_INDEX_LOGLEVEL: "${CELERY_INDEX_LOGLEVEL:-info}"
       PACKETSAFARI_EGRESS_PROFILE: production
@@ -209,6 +209,10 @@ services:
           kill -TERM "$${AICHAT_PID:-}" "$${INDEX_PID:-}" 2>/dev/null || true
         }
         trap shutdown TERM INT
+        CELERY_AICHAT_CONCURRENCY="$$(python3 /app/scripts/resolve_worker_concurrency.py aichat)"
+        CELERY_INDEX_CONCURRENCY="$$(python3 /app/scripts/resolve_worker_concurrency.py index)"
+        export CELERY_AICHAT_CONCURRENCY CELERY_INDEX_CONCURRENCY
+        echo "Resolved Celery worker concurrency: aichat=$$CELERY_AICHAT_CONCURRENCY index=$$CELERY_INDEX_CONCURRENCY"
 
         celery -A packetsafari.celery_app worker \
           --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
@@ -222,7 +226,7 @@ services:
           --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" \
           --pool=threads \
           --without-gossip --without-mingle \
-          --concurrency="$${CELERY_INDEX_CONCURRENCY:-1}" \
+          --concurrency="$${CELERY_INDEX_CONCURRENCY:-auto}" \
           --queues=index \
           --hostname=index@%h &
         INDEX_PID=$$!

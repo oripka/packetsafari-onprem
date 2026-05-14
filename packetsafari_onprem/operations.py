@@ -1084,15 +1084,6 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         for service in ("frontend", "backend", "worker", "postgres", "redis", "sharkd", "audit-forwarder")
     }
 
-    worker_cpu_count = max(1, int(float(services["worker"]["cpus"])))
-    index_concurrency = min(
-        {
-            "small": 1,
-            "medium": 6,
-            "large": 10,
-        }[effective_profile],
-        worker_cpu_count,
-    )
     aichat_concurrency = {"small": 2, "medium": 2, "large": 3}[effective_profile]
     uwsgi_processes = {
         "small": max(2, min(4, vcpus // 2 or 1)),
@@ -1116,7 +1107,8 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "PACKETSAFARI_SIZING_HOST_VCPUS": str(vcpus),
         "PACKETSAFARI_SIZING_HOST_MEMORY_BYTES": str(memory_bytes),
         "CELERY_AICHAT_CONCURRENCY": str(aichat_concurrency),
-        "CELERY_INDEX_CONCURRENCY": str(index_concurrency),
+        "CELERY_INDEX_CONCURRENCY": "auto",
+        "PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX": str({"small": 4, "medium": 8, "large": 12}[effective_profile]),
         "CELERY_AICHAT_LOGLEVEL": "info",
         "CELERY_INDEX_LOGLEVEL": "info",
         "PACKETSAFARI_UWSGI_PROCESSES": str(uwsgi_processes),
@@ -1188,6 +1180,11 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "        }",
         "        trap shutdown TERM INT",
         "",
+        "        CELERY_AICHAT_CONCURRENCY=\"$$(python3 /app/scripts/resolve_worker_concurrency.py aichat)\"",
+        "        CELERY_INDEX_CONCURRENCY=\"$$(python3 /app/scripts/resolve_worker_concurrency.py index)\"",
+        "        export CELERY_AICHAT_CONCURRENCY CELERY_INDEX_CONCURRENCY",
+        "        echo \"Resolved Celery worker concurrency: aichat=$$CELERY_AICHAT_CONCURRENCY index=$$CELERY_INDEX_CONCURRENCY\"",
+        "",
         "        celery -A packetsafari.celery_app worker \\",
         "          --loglevel=\"$${CELERY_AICHAT_LOGLEVEL:-info}\" \\",
         "          --without-gossip --without-mingle \\",
@@ -1200,7 +1197,7 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "          --loglevel=\"$${CELERY_INDEX_LOGLEVEL:-info}\" \\",
         "          --pool=threads \\",
         "          --without-gossip --without-mingle \\",
-        "          --concurrency=\"$${CELERY_INDEX_CONCURRENCY:-1}\" \\",
+        "          --concurrency=\"$${CELERY_INDEX_CONCURRENCY:-auto}\" \\",
         "          --queues=index \\",
         "          --hostname=index@%h &",
         "        INDEX_PID=$$!",
