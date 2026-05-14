@@ -30,6 +30,7 @@ def test_sizing_plan_leaves_index_concurrency_runtime_sized(monkeypatch, tmp_pat
 
 def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.compose_file.write_text("services:\n  frontend:\n    image: frontend:test\n", encoding="utf-8")
     plan = {
         "services": {
             name: {"cpus": 1, "memLimit": "1g"}
@@ -42,3 +43,21 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
 
     assert "python3 /app/scripts/resolve_worker_concurrency.py index" in rendered
     assert 'CELERY_INDEX_CONCURRENCY:-auto' in rendered
+    assert "  frontend:" in rendered
+
+
+def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.compose_file.write_text("services:\n  backend:\n    image: backend:test\n", encoding="utf-8")
+    plan = {
+        "services": {
+            name: {"cpus": 1, "memLimit": "1g"}
+            for name in ("frontend", "backend", "worker", "postgres", "redis", "sharkd", "audit-forwarder")
+        },
+        "env": {},
+    }
+
+    rendered = operations._render_sizing_compose(layout, plan)
+
+    assert "  frontend:" not in rendered
+    assert "  backend:" in rendered
