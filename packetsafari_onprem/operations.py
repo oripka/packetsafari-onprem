@@ -973,17 +973,17 @@ def _service_cpu_plan(vcpus: int, profile: str) -> dict[str, float]:
     if profile == "large":
         frontend = 0.75
         redis = 1.0
-        postgres = 2.0
-        backend = min(3.0, max(1.5, vcpus * 0.15))
-        sharkd = min(4.0, max(2.0, vcpus * 0.20))
-        worker = min(12.0, max(2.0, vcpus * 0.45))
+        postgres = min(4.0, max(2.0, vcpus * 0.10))
+        backend = min(6.0, max(1.5, vcpus * 0.15))
+        sharkd = min(24.0, max(4.0, vcpus * 0.55))
+        worker = min(24.0, max(4.0, vcpus * 0.75))
     elif profile == "medium":
         frontend = 0.5
         redis = 0.75
         postgres = 1.5
         backend = min(2.0, max(1.0, vcpus * 0.15))
-        sharkd = min(2.0, max(1.25, vcpus * 0.18))
-        worker = min(6.0, max(1.5, vcpus * 0.40))
+        sharkd = min(6.0, max(1.25, vcpus * 0.35))
+        worker = min(10.0, max(1.5, vcpus * 0.55))
     else:
         frontend = 0.5
         redis = 0.5
@@ -1049,21 +1049,54 @@ def _service_memory_plan(memory_bytes: int, profile: str) -> dict[str, int]:
         "large": {
             "frontend": 2 * GIB,
             "backend": 8 * GIB,
-            "worker": 32 * GIB,
+            "worker": 56 * GIB,
             "redis": 6 * GIB,
             "postgres": 10 * GIB,
             "sharkd": 20 * GIB,
             "audit-forwarder": 1 * GIB,
         },
     }[profile]
+    if profile == "large":
+        weights = {
+            "frontend": 0.03,
+            "backend": 0.08,
+            "worker": 0.60,
+            "redis": 0.04,
+            "postgres": 0.08,
+            "sharkd": 0.18,
+            "audit-forwarder": 0.02,
+        }
+    elif profile == "medium":
+        weights = {
+            "frontend": 0.03,
+            "backend": 0.10,
+            "worker": 0.42,
+            "redis": 0.05,
+            "postgres": 0.10,
+            "sharkd": 0.18,
+            "audit-forwarder": 0.02,
+        }
+    else:
+        weights = {
+            "frontend": 0.03,
+            "backend": 0.12,
+            "worker": 0.30,
+            "redis": 0.06,
+            "postgres": 0.12,
+            "sharkd": 0.20,
+            "audit-forwarder": 0.02,
+        }
     raw = {
-        "frontend": min(max_by_profile["frontend"], max(512 * MIB, int(memory_bytes * 0.03))),
-        "backend": min(max_by_profile["backend"], max(1 * GIB, int(memory_bytes * 0.12))),
-        "worker": min(max_by_profile["worker"], max(3 * GIB, int(memory_bytes * 0.30))),
-        "redis": min(max_by_profile["redis"], max(512 * MIB, int(memory_bytes * 0.06))),
-        "postgres": min(max_by_profile["postgres"], max(2 * GIB, int(memory_bytes * 0.12))),
-        "sharkd": min(max_by_profile["sharkd"], max(2 * GIB, int(memory_bytes * 0.20))),
-        "audit-forwarder": min(max_by_profile["audit-forwarder"], max(256 * MIB, int(memory_bytes * 0.02))),
+        "frontend": min(max_by_profile["frontend"], max(512 * MIB, int(memory_bytes * weights["frontend"]))),
+        "backend": min(max_by_profile["backend"], max(1 * GIB, int(memory_bytes * weights["backend"]))),
+        "worker": min(max_by_profile["worker"], max(3 * GIB, int(memory_bytes * weights["worker"]))),
+        "redis": min(max_by_profile["redis"], max(512 * MIB, int(memory_bytes * weights["redis"]))),
+        "postgres": min(max_by_profile["postgres"], max(2 * GIB, int(memory_bytes * weights["postgres"]))),
+        "sharkd": min(max_by_profile["sharkd"], max(2 * GIB, int(memory_bytes * weights["sharkd"]))),
+        "audit-forwarder": min(
+            max_by_profile["audit-forwarder"],
+            max(256 * MIB, int(memory_bytes * weights["audit-forwarder"])),
+        ),
     }
     return _scale_memory_plan(memory_bytes, raw)
 
@@ -1092,6 +1125,8 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
     }[effective_profile]
     sharkd_lru_size = {"small": 4, "medium": 10, "large": 16}[effective_profile]
     rule_shard_workers = {"small": 1, "medium": 2, "large": 4}[effective_profile]
+    index_cpu_fraction = {"small": "0.60", "medium": "0.70", "large": "0.85"}[effective_profile]
+    index_memory_per_task_mib = {"small": "3072", "medium": "2048", "large": "1536"}[effective_profile]
     backend_mem_mib = max(768, int(int(services["backend"]["memoryBytes"]) / MIB))
     reload_on_rss = max(512, min(2048, int((backend_mem_mib * 0.70) / max(1, uwsgi_processes))))
     redis_max_bytes = max(128 * MIB, int(int(services["redis"]["memoryBytes"]) * 0.75))
@@ -1109,6 +1144,8 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "CELERY_AICHAT_CONCURRENCY": str(aichat_concurrency),
         "CELERY_INDEX_CONCURRENCY": "auto",
         "PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX": str({"small": 4, "medium": 12, "large": 24}[effective_profile]),
+        "PACKETSAFARI_CELERY_INDEX_CPU_FRACTION": index_cpu_fraction,
+        "PACKETSAFARI_CELERY_INDEX_MEMORY_PER_TASK_MIB": index_memory_per_task_mib,
         "CELERY_AICHAT_LOGLEVEL": "info",
         "CELERY_INDEX_LOGLEVEL": "info",
         "PACKETSAFARI_UWSGI_PROCESSES": str(uwsgi_processes),
