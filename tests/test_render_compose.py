@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import json
+
+from scripts import render_compose
+
+
+def _write_template(path):
+    path.write_text(
+        """services:
+  frontend:
+    image: "{{ frontend_image }}"
+  backend:
+    image: "{{ backend_image }}"
+  worker:
+    image: "{{ worker_image }}"
+  postgres:
+    image: "{{ postgres_image }}"
+  redis:
+    image: "{{ redis_image }}"
+  sharkd:
+    image: "{{ sharkd_image }}"
+  egress-dns:
+    image: "{{ egress_dns_image }}"
+  egress-ironproxy:
+    image: "{{ egress_ironproxy_image }}"
+  egress-firewall:
+    image: "{{ egress_firewall_image }}"
+""",
+        encoding="utf-8",
+    )
+
+
+def test_saas_static_frontend_manifest_omits_frontend_service(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    template_path = tmp_path / "compose.yml.tpl"
+    output_path = tmp_path / "compose.yml"
+    _write_template(template_path)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "deploymentProfiles": {"saas": {"staticFrontend": True}},
+                "images": {
+                    "backend": "repo/backend:1",
+                    "worker": "repo/worker:1",
+                    "sharkd": "repo/sharkd:1",
+                    "egress-ironproxy": "repo/ironproxy:1",
+                    "egress-firewall": "repo/firewall:1",
+                    "egress-dns": "repo/dns:1",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = render_compose.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--template",
+            str(template_path),
+            "--output",
+            str(output_path),
+            "--profile",
+            "saas",
+        ]
+    )
+
+    assert rc == 0
+    rendered = output_path.read_text(encoding="utf-8")
+    assert "  frontend:" not in rendered
+    assert "repo/backend:1" in rendered
+
+
+def test_onprem_manifest_still_requires_frontend_image(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    template_path = tmp_path / "compose.yml.tpl"
+    output_path = tmp_path / "compose.yml"
+    _write_template(template_path)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "images": {
+                    "backend": "repo/backend:1",
+                    "worker": "repo/worker:1",
+                    "sharkd": "repo/sharkd:1",
+                    "egress-ironproxy": "repo/ironproxy:1",
+                    "egress-firewall": "repo/firewall:1",
+                    "egress-dns": "repo/dns:1",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        render_compose.main(
+            [
+                "--manifest",
+                str(manifest_path),
+                "--template",
+                str(template_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+    except SystemExit as exc:
+        assert "frontend_image" in str(exc)
+    else:
+        raise AssertionError("missing frontend image should fail on on-prem compose renders")

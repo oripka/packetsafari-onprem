@@ -49,7 +49,7 @@ def _remove_service_block(compose_text: str, service: str) -> str:
     return "\n".join(output) + "\n"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--template", required=True)
@@ -59,7 +59,7 @@ def main() -> int:
     parser.add_argument("--host-runtime-root", default="/opt/packetsafari")
     parser.add_argument("--container-runtime-root", default="/storage/onprem")
     parser.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
     template = Path(args.template).read_text(encoding="utf-8")

@@ -1182,8 +1182,7 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
 def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> str:
     services = plan.get("services") if isinstance(plan.get("services"), dict) else {}
     env = plan.get("env") if isinstance(plan.get("env"), dict) else {}
-    base_compose = layout.compose_file.read_text(encoding="utf-8") if layout.compose_file.exists() else ""
-    include_frontend = bool(re.search(r"(?m)^  frontend:\s*$", base_compose))
+    include_frontend = "frontend" in _rendered_compose_services(layout)
 
     def service_value(name: str, key: str) -> str:
         service = services.get(name) if isinstance(services.get(name), dict) else {}

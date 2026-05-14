@@ -30,6 +30,7 @@ def test_sizing_plan_leaves_index_concurrency_runtime_sized(monkeypatch, tmp_pat
 
 def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.compose_file.parent.mkdir(parents=True, exist_ok=True)
     layout.compose_file.write_text("services:\n  frontend:\n    image: frontend:test\n", encoding="utf-8")
     plan = {
         "services": {
@@ -48,6 +49,7 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
 
 def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.compose_file.parent.mkdir(parents=True, exist_ok=True)
     layout.compose_file.write_text("services:\n  backend:\n    image: backend:test\n", encoding="utf-8")
     plan = {
         "services": {
