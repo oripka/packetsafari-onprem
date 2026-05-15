@@ -1101,6 +1101,22 @@ def _service_memory_plan(memory_bytes: int, profile: str) -> dict[str, int]:
     return _scale_memory_plan(memory_bytes, raw)
 
 
+def _index_worker_memory_reserve_mib(worker_memory_mib: int) -> int:
+    if worker_memory_mib <= 4096:
+        return 1024
+    if worker_memory_mib <= 12288:
+        return 2048
+    return 4096
+
+
+def _index_memory_per_task_mib(*, worker_memory_bytes: int, profile: str) -> int:
+    profile_default = {"small": 3072, "medium": 2048, "large": 1536}[profile]
+    worker_memory_mib = max(1, int(int(worker_memory_bytes) / MIB))
+    reserve_mib = _index_worker_memory_reserve_mib(worker_memory_mib)
+    usable_mib = max(512, worker_memory_mib - reserve_mib)
+    return max(512, min(int(profile_default), int(usable_mib)))
+
+
 def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[str, object]:
     host = _host_resource_snapshot(layout)
     effective_profile = _auto_sizing_profile(host) if requested_profile == "auto" else requested_profile
@@ -1112,7 +1128,8 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         service: {
             "cpus": _round_cpu(cpu_plan[service]),
             "memoryBytes": int(memory_plan[service]),
-            "memLimit": _compose_memory(memory_plan[service]),
+            "memoryLimited": service != "sharkd",
+            **({} if service == "sharkd" else {"memLimit": _compose_memory(memory_plan[service])}),
         }
         for service in ("frontend", "backend", "worker", "postgres", "redis", "sharkd", "audit-forwarder")
     }
@@ -1126,7 +1143,12 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
     sharkd_lru_size = {"small": 4, "medium": 10, "large": 16}[effective_profile]
     rule_shard_workers = {"small": 1, "medium": 2, "large": 4}[effective_profile]
     index_cpu_fraction = {"small": "0.60", "medium": "0.70", "large": "0.85"}[effective_profile]
-    index_memory_per_task_mib = {"small": "3072", "medium": "2048", "large": "1536"}[effective_profile]
+    worker_memory_mib = max(1, int(int(services["worker"]["memoryBytes"]) / MIB))
+    index_memory_reserve_mib = _index_worker_memory_reserve_mib(worker_memory_mib)
+    index_memory_per_task_mib = _index_memory_per_task_mib(
+        worker_memory_bytes=int(services["worker"]["memoryBytes"]),
+        profile=effective_profile,
+    )
     backend_mem_mib = max(768, int(int(services["backend"]["memoryBytes"]) / MIB))
     reload_on_rss = max(512, min(2048, int((backend_mem_mib * 0.70) / max(1, uwsgi_processes))))
     redis_max_bytes = max(128 * MIB, int(int(services["redis"]["memoryBytes"]) * 0.75))
@@ -1145,7 +1167,8 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "CELERY_INDEX_CONCURRENCY": "auto",
         "PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX": str({"small": 4, "medium": 12, "large": 24}[effective_profile]),
         "PACKETSAFARI_CELERY_INDEX_CPU_FRACTION": index_cpu_fraction,
-        "PACKETSAFARI_CELERY_INDEX_MEMORY_PER_TASK_MIB": index_memory_per_task_mib,
+        "PACKETSAFARI_CELERY_INDEX_MEMORY_PER_TASK_MIB": str(index_memory_per_task_mib),
+        "PACKETSAFARI_CELERY_INDEX_MEMORY_RESERVE_MIB": str(index_memory_reserve_mib),
         "CELERY_AICHAT_LOGLEVEL": "info",
         "CELERY_INDEX_LOGLEVEL": "info",
         "PACKETSAFARI_UWSGI_PROCESSES": str(uwsgi_processes),
@@ -1188,12 +1211,19 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         service = services.get(name) if isinstance(services.get(name), dict) else {}
         return str(service.get(key) or "")
 
-    def service_block(name: str, *, env_file: bool = False, extra: list[str] | None = None) -> list[str]:
+    def service_block(
+        name: str,
+        *,
+        env_file: bool = False,
+        memory_limit: bool = True,
+        extra: list[str] | None = None,
+    ) -> list[str]:
         lines = [
             f"  {name}:",
             f"    cpus: {service_value(name, 'cpus')}",
-            f"    mem_limit: {service_value(name, 'memLimit')}",
         ]
+        if memory_limit:
+            lines.append(f"    mem_limit: {service_value(name, 'memLimit')}")
         if env_file:
             lines.extend(
                 [
@@ -1285,7 +1315,7 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         *service_block("worker", env_file=True, extra=worker_command),
         *service_block("postgres", env_file=True, extra=postgres_command),
         *service_block("redis", env_file=True, extra=redis_command),
-        *service_block("sharkd", env_file=True),
+        *service_block("sharkd", env_file=True, memory_limit=False),
         *service_block("audit-forwarder"),
     ]
     return "\n".join(lines) + "\n"

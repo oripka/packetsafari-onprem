@@ -23,9 +23,36 @@ def test_sizing_plan_leaves_index_concurrency_runtime_sized(monkeypatch, tmp_pat
     assert env["PACKETSAFARI_CELERY_INDEX_CONCURRENCY_MAX"] == "24"
     assert env["PACKETSAFARI_CELERY_INDEX_CPU_FRACTION"] == "0.85"
     assert env["PACKETSAFARI_CELERY_INDEX_MEMORY_PER_TASK_MIB"] == "1536"
+    assert env["PACKETSAFARI_CELERY_INDEX_MEMORY_RESERVE_MIB"] == "4096"
     assert plan["services"]["worker"]["cpus"] == 24.0
     assert plan["services"]["sharkd"]["cpus"] == 17.5
+    assert plan["services"]["sharkd"]["memoryLimited"] is False
+    assert "memLimit" not in plan["services"]["sharkd"]
     assert plan["services"]["worker"]["memoryBytes"] >= 34 * operations.GIB
+
+
+def test_sizing_plan_keeps_index_task_memory_within_worker_limit(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+
+    monkeypatch.setattr(
+        operations,
+        "_host_resource_snapshot",
+        lambda _layout: {
+            "vcpus": 1,
+            "memoryBytes": 8 * operations.GIB,
+            "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+        },
+    )
+
+    plan = operations._build_sizing_plan(layout, "auto")
+    env = plan["env"]
+    worker_mib = int(plan["services"]["worker"]["memoryBytes"] / operations.MIB)
+    reserve_mib = int(env["PACKETSAFARI_CELERY_INDEX_MEMORY_RESERVE_MIB"])
+    per_task_mib = int(env["PACKETSAFARI_CELERY_INDEX_MEMORY_PER_TASK_MIB"])
+
+    assert plan["effectiveProfile"] == "small"
+    assert per_task_mib <= worker_mib - reserve_mib
+    assert per_task_mib < 3072
 
 
 def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path):
@@ -45,6 +72,10 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
     assert "python3 /app/scripts/resolve_worker_concurrency.py index" in rendered
     assert 'CELERY_INDEX_CONCURRENCY:-auto' in rendered
     assert "  frontend:" in rendered
+    backend_block = rendered.split("\n  backend:", 1)[1].split("\n  worker:", 1)[0]
+    sharkd_block = rendered.split("\n  sharkd:", 1)[1].split("\n  audit-forwarder:", 1)[0]
+    assert "mem_limit:" in backend_block
+    assert "mem_limit:" not in sharkd_block
 
 
 def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_path):
