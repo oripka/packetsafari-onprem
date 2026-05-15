@@ -1128,8 +1128,7 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         service: {
             "cpus": _round_cpu(cpu_plan[service]),
             "memoryBytes": int(memory_plan[service]),
-            "memoryLimited": service != "sharkd",
-            **({} if service == "sharkd" else {"memLimit": _compose_memory(memory_plan[service])}),
+            "memoryLimited": False,
         }
         for service in ("frontend", "backend", "worker", "postgres", "redis", "sharkd", "audit-forwarder")
     }
@@ -1215,15 +1214,12 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         name: str,
         *,
         env_file: bool = False,
-        memory_limit: bool = True,
         extra: list[str] | None = None,
     ) -> list[str]:
         lines = [
             f"  {name}:",
             f"    cpus: {service_value(name, 'cpus')}",
         ]
-        if memory_limit:
-            lines.append(f"    mem_limit: {service_value(name, 'memLimit')}")
         if env_file:
             lines.extend(
                 [
@@ -1315,7 +1311,7 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         *service_block("worker", env_file=True, extra=worker_command),
         *service_block("postgres", env_file=True, extra=postgres_command),
         *service_block("redis", env_file=True, extra=redis_command),
-        *service_block("sharkd", env_file=True, memory_limit=False),
+        *service_block("sharkd", env_file=True),
         *service_block("audit-forwarder"),
     ]
     return "\n".join(lines) + "\n"

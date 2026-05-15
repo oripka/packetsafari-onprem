@@ -26,8 +26,9 @@ def test_sizing_plan_leaves_index_concurrency_runtime_sized(monkeypatch, tmp_pat
     assert env["PACKETSAFARI_CELERY_INDEX_MEMORY_RESERVE_MIB"] == "4096"
     assert plan["services"]["worker"]["cpus"] == 24.0
     assert plan["services"]["sharkd"]["cpus"] == 17.5
-    assert plan["services"]["sharkd"]["memoryLimited"] is False
-    assert "memLimit" not in plan["services"]["sharkd"]
+    for service in plan["services"].values():
+        assert service["memoryLimited"] is False
+        assert "memLimit" not in service
     assert plan["services"]["worker"]["memoryBytes"] >= 34 * operations.GIB
 
 
@@ -61,7 +62,7 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
     layout.compose_file.write_text("services:\n  frontend:\n    image: frontend:test\n", encoding="utf-8")
     plan = {
         "services": {
-            name: {"cpus": 1, "memLimit": "1g"}
+            name: {"cpus": 1, "memoryLimited": False}
             for name in ("frontend", "backend", "worker", "postgres", "redis", "sharkd", "audit-forwarder")
         },
         "env": {},
@@ -72,10 +73,7 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
     assert "python3 /app/scripts/resolve_worker_concurrency.py index" in rendered
     assert 'CELERY_INDEX_CONCURRENCY:-auto' in rendered
     assert "  frontend:" in rendered
-    backend_block = rendered.split("\n  backend:", 1)[1].split("\n  worker:", 1)[0]
-    sharkd_block = rendered.split("\n  sharkd:", 1)[1].split("\n  audit-forwarder:", 1)[0]
-    assert "mem_limit:" in backend_block
-    assert "mem_limit:" not in sharkd_block
+    assert "mem_limit:" not in rendered
 
 
 def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_path):
@@ -84,7 +82,7 @@ def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_pat
     layout.compose_file.write_text("services:\n  backend:\n    image: backend:test\n", encoding="utf-8")
     plan = {
         "services": {
-            name: {"cpus": 1, "memLimit": "1g"}
+            name: {"cpus": 1, "memoryLimited": False}
             for name in ("frontend", "backend", "worker", "postgres", "redis", "sharkd", "audit-forwarder")
         },
         "env": {},
@@ -94,3 +92,4 @@ def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_pat
 
     assert "  frontend:" not in rendered
     assert "  backend:" in rendered
+    assert "mem_limit:" not in rendered
