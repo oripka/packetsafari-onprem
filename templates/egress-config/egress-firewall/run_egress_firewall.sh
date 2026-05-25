@@ -4,6 +4,7 @@ set -euo pipefail
 CHAIN_NAME="PACKETSAFARI_EGRESS_ENFORCE"
 ESNET_SUBNET="172.20.0.0/24"
 PROXY_IP="172.20.0.2"
+PROXY_EGRESS_IP="172.21.0.2"
 PROXY_PORT="10000"
 DNS_POLICY_IP="172.20.0.3"
 SHUTTING_DOWN=0
@@ -34,6 +35,7 @@ install_chain() {
 
   iptables -A "${CHAIN_NAME}" -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
   iptables -A "${CHAIN_NAME}" -s "${PROXY_IP}/32" -j ACCEPT
+  iptables -A "${CHAIN_NAME}" -s "${PROXY_EGRESS_IP}/32" -j ACCEPT
 
   for entry in "${MONITORED[@]}"; do
     ip="${entry##*:}"
