@@ -4,6 +4,7 @@ dns:
 proxy:
   http_listen: ":10000"
   https_listen: "off"
+  max_request_body_bytes: 10485760
 tls:
   ca_cert: "/var/lib/packetsafari/egress-proxy/ca.crt"
   ca_key: "/var/lib/packetsafari/egress-proxy/ca.key"
@@ -44,5 +45,15 @@ transforms:
           rules:
             - host: "api.paddle.com"
             - host: "sandbox-api.paddle.com"
+  - name: aws_sigv4
+    config:
+      signers:
+        - service: ses
+          region: eu-central-1
+          access_key_id_env: PACKETSAFARI_SES_AWS_ACCESS_KEY_ID
+          secret_access_key_env: PACKETSAFARI_SES_AWS_SECRET_ACCESS_KEY
+          session_token_env: PACKETSAFARI_SES_AWS_SESSION_TOKEN
+          rules:
+            - host: "email.eu-central-1.amazonaws.com"
 log:
   level: "info"
