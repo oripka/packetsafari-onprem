@@ -187,3 +187,71 @@ def test_services_with_changed_images_keeps_unchanged_sharkd_and_firewall_out():
     }
 
     assert operations._services_with_changed_images(active, target) == ["frontend", "egress-ironproxy"]
+
+
+def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.release_manifest_path.write_text(
+        '{"version":"10.0.0-beta.1","images":{"backend":"repo/backend:1","worker":"repo/worker:1"}}\n',
+        encoding="utf-8",
+    )
+    layout.compose_file.write_text("services:\n  backend:\n  worker:\n", encoding="utf-8")
+    layout.runtime_env_path.write_text("PACKETSAFARI_PUBLIC_BASE_URL=https://next.packetsafari.com\n", encoding="utf-8")
+    layout.deployment_state_path.write_text('{"deployment":{"installedVersion":"10.0.0-beta.1"}}\n', encoding="utf-8")
+    target_manifest = tmp_path / "target-manifest.json"
+    target_manifest.write_text(
+        '{"version":"10.0.0-beta.2","images":{"backend":"repo/backend:2","worker":"repo/worker:2"}}\n',
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(operations, "sync_bundle", lambda layout: None)
+    monkeypatch.setattr(operations, "prepare_connected_manifest", lambda layout, manifest_arg, args=None, destination=None: target_manifest)
+    monkeypatch.setattr(operations, "maybe_self_update_tooling", lambda args, layout, manifest: None)
+    monkeypatch.setattr(operations, "validate_tooling_requirement", lambda manifest: None)
+    monkeypatch.setattr(operations, "validate_upgrade_path", lambda layout, manifest: None)
+    monkeypatch.setattr(operations, "verify_saas_operator_authorization", lambda layout, args, manifest: None)
+    monkeypatch.setattr(operations, "validate_required_env", lambda layout, manifest, profile: None)
+    monkeypatch.setattr(operations, "ensure_ecr_credential_helper_ready", lambda layout: calls.append("ensure_ecr"))
+    monkeypatch.setattr(operations, "render_logging_config", lambda layout: calls.append("render_logging"))
+    monkeypatch.setattr(operations, "docker_compose_pull", lambda layout: calls.append("pull"))
+    monkeypatch.setattr(operations, "docker_compose_stop", lambda layout, services=None, timeout=120: calls.append(f"stop:{','.join(services or [])}"))
+    monkeypatch.setattr(operations, "run_target_migrations", lambda layout: calls.append("migrate"))
+    monkeypatch.setattr(operations, "docker_compose_up", lambda layout, services=None, pull_policy=None: calls.append("up"))
+    monkeypatch.setattr(operations, "wait_for_health", lambda timeout_seconds=180: calls.append("health"))
+    monkeypatch.setattr(operations, "assert_doctor_ok", lambda args: calls.append("doctor"))
+
+    def fake_render_compose(layout, manifest_path, source_root=None, profile="onprem"):
+        calls.append("render")
+        layout.compose_file.write_text("services:\n  backend:\n  worker:\n", encoding="utf-8")
+
+    monkeypatch.setattr(operations, "render_compose", fake_render_compose)
+
+    def fake_promote(layout, manifest, snapshot_dir, *, source, profile, backup_mode):
+        calls.append("promote")
+        return {"message": "ok"}
+
+    monkeypatch.setattr(operations, "_promote_release", fake_promote)
+
+    result = operations.upgrade_release(
+        SimpleNamespace(
+            runtime_root=str(tmp_path),
+            container_runtime_root=str(tmp_path),
+            profile="saas",
+            backup_mode="skip",
+            allow_unbacked_upgrade=True,
+            bundle=None,
+            manifest=str(target_manifest),
+            skip_image_pull=False,
+            skip_health_check=False,
+            health_timeout=1,
+            simulate_failure_phase="",
+            max_backup_age_minutes=180,
+        )
+    )
+
+    assert result == {"message": "ok"}
+    assert calls.index("pull") < calls.index("stop:backend,worker")
+    assert calls.index("render") < calls.index("pull")
+    assert calls.index("stop:backend,worker") < calls.index("migrate")

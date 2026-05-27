@@ -3379,8 +3379,25 @@ def upgrade_release(args) -> dict:
                 "require-recent": "recording verified external backup proof",
                 "skip": "continuing without a data backup",
             }[backup_mode]
-            if layout.compose_file.exists():
+            services_to_recreate: list[str] = []
+            had_active_compose = layout.compose_file.exists()
+            if had_active_compose:
                 services_to_recreate = _services_with_changed_images(_read_json(layout.release_manifest_path, {}), manifest)
+            snapshot_dir = snapshot_runtime(layout)
+
+            phase = "compose"
+            render_compose(layout, target_manifest_path, profile=profile)
+            render_logging_config(layout)
+            maybe_fail_upgrade_simulation(layout, args, "compose")
+            if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):
+                write_helper_status(layout, status="upgrading", message="Pulling target release images before stopping running services.")
+                if profile == "saas":
+                    ensure_ecr_credential_helper_ready(layout)
+                docker_compose_pull(layout)
+            elif source == "manifest":
+                write_helper_status(layout, status="upgrading", message="Skipping image pull; using images already present on this host.")
+
+            if had_active_compose:
                 if services_to_recreate:
                     write_helper_status(
                         layout,
@@ -3399,7 +3416,6 @@ def upgrade_release(args) -> dict:
                     )
             else:
                 write_helper_status(layout, status="upgrading", message=f"No active Compose file found; treating this as a fresh deployment and {backup_message}.")
-            snapshot_dir = snapshot_runtime(layout)
             if backup_mode == "inline":
                 complete_full_backup(layout, snapshot_dir)
             elif backup_mode == "require-recent" and external_backup_proof is not None:
@@ -3413,18 +3429,6 @@ def upgrade_release(args) -> dict:
                         "warning": "No data backup was captured by packetsafari-ops for this upgrade.",
                     },
                 )
-
-            phase = "compose"
-            render_compose(layout, target_manifest_path, profile=profile)
-            render_logging_config(layout)
-            maybe_fail_upgrade_simulation(layout, args, "compose")
-            if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):
-                write_helper_status(layout, status="upgrading", message="Pulling target release images.")
-                if profile == "saas":
-                    ensure_ecr_credential_helper_ready(layout)
-                docker_compose_pull(layout)
-            elif source == "manifest":
-                write_helper_status(layout, status="upgrading", message="Skipping image pull; using images already present on this host.")
 
             phase = "migration"
             write_helper_status(layout, status="upgrading", message="Running target database migrations.")
