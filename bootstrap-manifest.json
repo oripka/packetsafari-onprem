@@ -1,5 +1,5 @@
 {
-  "version": "0.2.2",
+  "version": "0.2.3",
   "files": {
     "packetsafari_onprem/cli.py": {
       "sha256": "1a8c6692b25728e64d9a0be4d7503887ece9a6cdbe28f6b360e336f743f2deba"
