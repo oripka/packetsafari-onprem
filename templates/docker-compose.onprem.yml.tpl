@@ -154,6 +154,16 @@ services:
       CURL_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
     ports:
       - "8080:80"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 - <<'PY'\nimport http.client, sys\nconn = http.client.HTTPConnection('127.0.0.1', 80, timeout=3)\nconn.request('GET', '/api/v2/system/live', headers={'Connection': 'close'})\nresp = conn.getresponse()\nresp.read(1024)\nsys.exit(0 if 200 <= resp.status < 300 else 1)\nPY"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     volumes:
       - packetsafari-storage:/storage
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"
