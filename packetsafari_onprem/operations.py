@@ -74,6 +74,16 @@ DEFAULT_UPDATE_PLATFORM = "linux-arm64"
 DEFAULT_UPDATE_BASE_URL = "https://releases.packetsafari.com"
 DEFAULT_SAAS_UPDATE_BUCKET = "packetsafari-release-channels-166826692770"
 DEFAULT_SAAS_UPDATE_REGION = "eu-central-1"
+JOURNALD_RETENTION_CONFIG_PATH = Path("/etc/systemd/journald.conf.d/packetsafari.conf")
+JOURNALD_RETENTION_CONFIG = """# Managed by packetsafari-ops. Keeps container logs after Docker recreates containers.
+[Journal]
+Storage=persistent
+SystemMaxUse=2G
+SystemKeepFree=5G
+MaxRetentionSec=7day
+MaxFileSec=1day
+Compress=yes
+"""
 
 
 @dataclass(slots=True)
@@ -445,6 +455,21 @@ def ensure_runtime_dirs(layout: RuntimeLayout) -> None:
 
 def supports_onprem_host_actions(layout: RuntimeLayout) -> bool:
     return layout.kind == "onprem-runtime-root"
+
+
+def ensure_journald_retention_config() -> dict[str, object]:
+    path = JOURNALD_RETENTION_CONFIG_PATH
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    if current == JOURNALD_RETENTION_CONFIG:
+        return {"path": str(path), "changed": False, "restarted": False}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(JOURNALD_RETENTION_CONFIG, encoding="utf-8")
+    restarted = False
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "restart", "systemd-journald"], check=True)
+        restarted = True
+    return {"path": str(path), "changed": True, "restarted": restarted}
 
 
 def deployment_profile(args) -> str:
@@ -2087,6 +2112,7 @@ def docker_compose_up(layout: RuntimeLayout, *, services: list[str] | None = Non
         command.extend(["--pull", pull_policy])
     if services:
         command.extend(services)
+    ensure_journald_retention_config()
     subprocess.run(command, check=True)
 
 

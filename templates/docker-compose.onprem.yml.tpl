@@ -1,8 +1,14 @@
+x-packetsafari-journald-logging: &packetsafari-journald-logging
+  driver: journald
+  options:
+    tag: "packetsafari/{{.Name}}/{{.ID}}"
+
 services:
   egress-dns:
     image: "{{ egress_dns_image }}"
     container_name: packetsafari-egress-dns
     restart: always
+    logging: *packetsafari-journald-logging
     command:
       - -conf
       - /etc/coredns/Corefile
@@ -17,6 +23,7 @@ services:
     image: "{{ egress_ironproxy_image }}"
     container_name: packetsafari-egress-ironproxy
     restart: always
+    logging: *packetsafari-journald-logging
     env_file:
       - "{{ ironproxy_env_path }}"
     environment:
@@ -42,6 +49,7 @@ services:
     image: "{{ egress_firewall_image }}"
     container_name: packetsafari-egress-firewall
     restart: always
+    logging: *packetsafari-journald-logging
     command:
       - /bin/bash
       - /usr/local/bin/run_egress_firewall.sh
@@ -63,6 +71,7 @@ services:
     image: "{{ frontend_image }}"
     container_name: packetsafari-frontend
     restart: always
+    logging: *packetsafari-journald-logging
     env_file:
       - "{{ runtime_env_path }}"
     environment:
@@ -83,6 +92,7 @@ services:
     image: "{{ backend_image }}"
     container_name: packetsafari-storage-init
     restart: "no"
+    logging: *packetsafari-journald-logging
     env_file:
       - "{{ runtime_env_path }}"
     environment:
@@ -110,6 +120,7 @@ services:
     image: "{{ backend_image }}"
     container_name: packetsafari-backend
     restart: always
+    logging: *packetsafari-journald-logging
     env_file:
       - "{{ runtime_env_path }}"
     environment:
@@ -176,6 +187,7 @@ services:
     image: "{{ worker_image }}"
     container_name: packetsafari-worker
     restart: always
+    logging: *packetsafari-journald-logging
     env_file:
       - "{{ runtime_env_path }}"
     environment:
@@ -279,6 +291,7 @@ services:
     image: "{{ postgres_image }}"
     container_name: packetsafari-postgres
     restart: always
+    logging: *packetsafari-journald-logging
     env_file:
       - "{{ runtime_env_path }}"
     environment:
@@ -300,6 +313,7 @@ services:
     image: "{{ redis_image }}"
     container_name: packetsafari-redis
     restart: always
+    logging: *packetsafari-journald-logging
     env_file:
       - "{{ runtime_env_path }}"
     command: >-
@@ -316,6 +330,7 @@ services:
     image: "{{ sharkd_image }}"
     container_name: packetsafari-sharkd
     restart: always
+    logging: *packetsafari-journald-logging
     stop_grace_period: 5s
     env_file:
       - "{{ runtime_env_path }}"
@@ -346,6 +361,7 @@ services:
     image: "{{ vector_image }}"
     container_name: packetsafari-audit-forwarder
     restart: always
+    logging: *packetsafari-journald-logging
     profiles: ["logging"]
     env_file:
       - "{{ runtime_env_path }}"

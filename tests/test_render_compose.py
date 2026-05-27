@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from scripts import render_compose
 
@@ -108,3 +109,43 @@ def test_onprem_manifest_still_requires_frontend_image(tmp_path):
         assert "frontend_image" in str(exc)
     else:
         raise AssertionError("missing frontend image should fail on on-prem compose renders")
+
+
+def test_rendered_onprem_compose_uses_journald_logging(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    output_path = tmp_path / "compose.yml"
+    template_path = Path(__file__).resolve().parents[1] / "templates" / "docker-compose.onprem.yml.tpl"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "images": {
+                    "frontend": "repo/frontend:1",
+                    "backend": "repo/backend:1",
+                    "worker": "repo/worker:1",
+                    "sharkd": "repo/sharkd:1",
+                    "egress-ironproxy": "repo/ironproxy:1",
+                    "egress-firewall": "repo/firewall:1",
+                    "egress-dns": "repo/dns:1",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = render_compose.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--template",
+            str(template_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert rc == 0
+    rendered = output_path.read_text(encoding="utf-8")
+    assert "x-packetsafari-journald-logging:" in rendered
+    assert "driver: journald" in rendered
+    assert 'tag: "packetsafari/{{.Name}}/{{.ID}}"' in rendered
+    assert rendered.count("logging: *packetsafari-journald-logging") >= 10

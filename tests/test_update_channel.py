@@ -37,6 +37,29 @@ def test_onprem_update_keeps_public_https_channel(tmp_path):
     assert source == "https://releases.packetsafari.com/channels/onprem/stable/linux-arm64/release-manifest.json"
 
 
+def test_ensure_journald_retention_config_writes_bounded_policy(tmp_path, monkeypatch):
+    config_path = tmp_path / "journald.conf.d" / "packetsafari.conf"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(operations, "JOURNALD_RETENTION_CONFIG_PATH", config_path)
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(operations.subprocess, "run", lambda command, check=False, **_: calls.append(list(command)))
+
+    result = operations.ensure_journald_retention_config()
+
+    assert result == {"path": str(config_path), "changed": True, "restarted": True}
+    content = config_path.read_text(encoding="utf-8")
+    assert "SystemMaxUse=2G" in content
+    assert "MaxRetentionSec=7day" in content
+    assert calls == [["systemctl", "restart", "systemd-journald"]]
+
+    calls.clear()
+    result = operations.ensure_journald_retention_config()
+
+    assert result == {"path": str(config_path), "changed": False, "restarted": False}
+    assert calls == []
+
+
 def test_materialize_source_copies_s3_with_aws_cli(monkeypatch, tmp_path):
     calls: list[list[str]] = []
 
