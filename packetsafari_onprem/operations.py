@@ -1160,7 +1160,7 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
 
     aichat_concurrency = {"small": 2, "medium": 2, "large": 3}[effective_profile]
     uwsgi_processes = {
-        "small": max(2, min(4, vcpus // 2 or 1)),
+        "small": max(4, min(6, vcpus * 2 or 4)),
         "medium": max(4, min(8, vcpus // 2)),
         "large": max(6, min(12, vcpus // 2)),
     }[effective_profile]
@@ -1198,6 +1198,13 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "PACKETSAFARI_UWSGI_PROCESSES": str(uwsgi_processes),
         "PACKETSAFARI_UWSGI_THREADS": "2",
         "PACKETSAFARI_UWSGI_RELOAD_ON_RSS_MB": str(reload_on_rss),
+        "PACKETSAFARI_BACKEND_LIVENESS_TIMEOUT_SECONDS": "10",
+        "PACKETSAFARI_BACKEND_LIVENESS_FAILURE_THRESHOLD": "6",
+        "PACKETSAFARI_BACKEND_LIVENESS_RESTART_COOLDOWN_SECONDS": "60",
+        "PACKETSAFARI_ROW_WINDOW_MAX_LIMIT_ROWS": "512",
+        "PACKETSAFARI_ROW_WINDOW_INFLIGHT_WAIT_SECONDS": "12",
+        "PACKETSAFARI_ROW_WINDOW_LOCK_TTL_SECONDS": "30",
+        "MAINTENANCE_STORAGE_CLEANUP_RESCHEDULE_ENABLED": "false",
         "PACKETSAFARI_CAPTURE_SHARKD_LRU_SIZE": str(sharkd_lru_size),
         "PACKETSAFARI_SHARKD_PACKETSTATS_RULE_SHARD_WORKERS": str(rule_shard_workers),
         "HEAVY_STAGE_MIN_AVAILABLE_MIB": str({"small": 768, "medium": 1024, "large": 1536}[effective_profile]),
