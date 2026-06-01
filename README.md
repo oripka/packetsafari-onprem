@@ -188,6 +188,7 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
 - `update check` discovers the configured release-channel manifest and reports app and ops tooling availability.
 - `update` downloads the configured release-channel manifest, self-updates `packetsafari-ops` when the manifest advertises newer tooling, re-execs the updated CLI, and then runs the same transaction as `upgrade --manifest`.
+- `healthcheck` runs deployment readiness checks and Docker image-retention guidance without applying a release.
 - `install --license` and bare `upgrade` use the same default release-channel
   manifest discovery. Pass `--manifest` only for a pinned file/URL, staging
   channel, or customer-specific manifest.
@@ -241,6 +242,7 @@ Useful SaaS commands:
 ```bash
 sudo env HOME=/root packetsafari-ops update check
 sudo env HOME=/root packetsafari-ops update
+sudo env HOME=/root packetsafari-ops healthcheck --profile saas
 sudo env HOME=/root packetsafari-ops rollback --profile saas
 ```
 
@@ -262,6 +264,13 @@ placeholders from `env/runtime.env`. The doctor also probes backend
 health/config, checks frontend `runtime-config.json`, and inspects Compose
 service state. SaaS upgrades run this readiness check after startup and before
 release promotion.
+
+Successful updates also record the deployed image ids. When old dangling Docker
+images are detected and enough deployment history exists, `update` explains the
+space impact and asks whether to remove images outside the current plus last two
+recorded deployment image sets. Pressing Enter keeps them. Non-interactive runs
+only report the condition unless `--prune-old-images` is passed. Use
+`packetsafari-ops healthcheck --json` for automation-friendly reporting.
 
 Install the operator token at `/opt/packetsafari/secrets/saas-operator-token`
 and set the expected SHA-256 digest in the manifest at

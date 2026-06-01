@@ -112,6 +112,7 @@ packetsafari-ops update check --profile onprem --channel stable
 packetsafari-ops update --profile onprem --channel stable
 sudo env HOME=/root packetsafari-ops update check
 sudo env HOME=/root packetsafari-ops update
+sudo env HOME=/root packetsafari-ops healthcheck --profile saas
 ```
 
 For a deliberate container-only fast path, use `--backup-mode skip` together
@@ -128,6 +129,32 @@ Only use unbacked updates for releases that are known not to require schema or
 storage migrations, or on disposable development hosts. If migrations run,
 rollback may require restoring PostgreSQL and `/storage` from an external
 backup.
+
+## Host Hygiene Checks
+
+`packetsafari-ops healthcheck` runs deployment readiness checks and adds Docker
+image retention guidance. Successful upgrades record the image ids for each
+deployed release. Cleanup then protects the current deployment plus the last two
+recorded deployment image sets by default.
+
+After `packetsafari-ops update` succeeds, the tool reports old dangling Docker
+images when enough deployment image history exists. In an interactive shell it
+asks whether to remove them; pressing Enter keeps them. Scheduled or
+non-interactive updates never remove images unless `--prune-old-images` is
+passed explicitly.
+
+Useful commands:
+
+```bash
+packetsafari-ops healthcheck
+packetsafari-ops healthcheck --json
+packetsafari-ops healthcheck --prune-old-images
+packetsafari-ops update --prune-old-images
+```
+
+Avoid blind `docker image prune -a` on managed hosts. Digest-based Compose
+deployments can leave rollback images untagged, so cleanup should use the
+recorded PacketSafari deployment keep set instead of Docker tags alone.
 
 Use `upgrade --manifest` when the host can reach the image registry and you want
 to apply a specific manifest manually. Use `upgrade --bundle`

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tarfile
 from types import SimpleNamespace
 
@@ -210,6 +211,96 @@ def test_services_with_changed_images_keeps_unchanged_sharkd_and_firewall_out():
     }
 
     assert operations._services_with_changed_images(active, target) == ["frontend", "egress-ironproxy"]
+
+
+def test_image_retention_blocks_prune_until_history_has_keep_set(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.state_dir.mkdir(parents=True)
+    layout.compose_dir.mkdir(parents=True)
+    layout.env_dir.mkdir(parents=True)
+    layout.release_manifest_path.write_text(
+        json.dumps({"version": "10.0.0-beta.3", "images": {"backend": "repo/backend:3"}}),
+        encoding="utf-8",
+    )
+    layout.deployment_state_path.write_text(
+        json.dumps(
+            {
+                "imageRetention": {
+                    "history": [
+                        {"version": "10.0.0-beta.3", "images": {"backend": {"id": "sha256:current"}}},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(operations, "_docker_container_image_ids", lambda: {"sha256:current"})
+    monkeypatch.setattr(operations, "_docker_image_id", lambda ref: "sha256:current" if ref == "repo/backend:3" else "")
+    monkeypatch.setattr(
+        operations,
+        "_dangling_docker_images",
+        lambda: [
+            {"id": "sha256:old", "sizeBytes": 1_500_000_000, "size": "1.5GB", "createdSince": "2 weeks ago"},
+        ],
+    )
+
+    health = operations.docker_image_retention_health(layout, keep_deployments=2)
+
+    assert health["candidateCount"] == 1
+    assert health["safeToPrune"] is False
+    assert health["recordedDeployments"] == 1
+
+
+def test_image_retention_prunes_only_unprotected_dangling_images(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.state_dir.mkdir(parents=True)
+    layout.compose_dir.mkdir(parents=True)
+    layout.env_dir.mkdir(parents=True)
+    layout.release_manifest_path.write_text(
+        json.dumps({"version": "10.0.0-beta.3", "images": {"backend": "repo/backend:3"}}),
+        encoding="utf-8",
+    )
+    layout.deployment_state_path.write_text(
+        json.dumps(
+            {
+                "imageRetention": {
+                    "history": [
+                        {"version": "10.0.0-beta.1", "images": {"backend": {"id": "sha256:old-protected"}}},
+                        {"version": "10.0.0-beta.2", "images": {"backend": {"id": "sha256:previous"}}},
+                        {"version": "10.0.0-beta.3", "images": {"backend": {"id": "sha256:current"}}},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    removed: list[list[str]] = []
+
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(operations, "_docker_container_image_ids", lambda: {"sha256:current"})
+    monkeypatch.setattr(operations, "_docker_image_id", lambda ref: "sha256:current" if ref == "repo/backend:3" else "")
+    monkeypatch.setattr(
+        operations,
+        "_dangling_docker_images",
+        lambda: [
+            {"id": "sha256:previous", "sizeBytes": 500_000_000, "size": "500MB"},
+            {"id": "sha256:old-unused", "sizeBytes": 700_000_000, "size": "700MB"},
+        ],
+    )
+
+    def fake_run(command, *, check=False):
+        removed.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="removed\n", stderr="")
+
+    monkeypatch.setattr(operations, "_run_text", fake_run)
+
+    result = operations.prune_old_docker_images(layout, keep_deployments=2)
+
+    assert result["status"] == "ok"
+    assert result["removedIds"] == ["sha256:old-unused"]
+    assert removed == [["docker", "image", "rm", "sha256:old-unused"]]
 
 
 def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatch, tmp_path):

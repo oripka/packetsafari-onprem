@@ -61,6 +61,7 @@ UPGRADE_SIMULATION_PHASES = {"preflight", "compose", "migration", "healthcheck",
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
+DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS = 2
 
 DEFAULT_LOGGING_VALUES = {
     "AUDIT_LOG_ENABLED": "true",
@@ -2048,6 +2049,296 @@ def _rendered_compose_images(layout: RuntimeLayout) -> set[str]:
     return images
 
 
+def _run_text(command: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, check=check, capture_output=True, text=True)
+
+
+def _format_bytes(value: object) -> str:
+    try:
+        size = float(value or 0)
+    except Exception:
+        size = 0.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    unit = units[0]
+    for unit in units:
+        if size < 1000 or unit == units[-1]:
+            break
+        size /= 1000
+    if unit == "B":
+        return f"{int(size)} {unit}"
+    return f"{size:.1f} {unit}"
+
+
+def _docker_image_id(ref: str) -> str:
+    raw = str(ref or "").strip()
+    if not raw:
+        return ""
+    result = _run_text(["docker", "image", "inspect", raw, "--format", "{{.Id}}"])
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _docker_container_image_ids() -> set[str]:
+    ps = _run_text(["docker", "ps", "-q"])
+    if ps.returncode != 0:
+        return set()
+    container_ids = [line.strip() for line in ps.stdout.splitlines() if line.strip()]
+    if not container_ids:
+        return set()
+    inspect = _run_text(["docker", "inspect", "--format", "{{.Image}}", *container_ids])
+    if inspect.returncode != 0:
+        return set()
+    return {line.strip() for line in inspect.stdout.splitlines() if line.strip()}
+
+
+def _image_refs_from_manifest(manifest: dict) -> set[str]:
+    refs: set[str] = set()
+    for value in _manifest_images(manifest).values():
+        if isinstance(value, dict):
+            ref = str(value.get("image") or "").strip()
+        else:
+            ref = str(value or "").strip()
+        if ref:
+            refs.add(ref)
+    return refs
+
+
+def _active_image_refs(layout: RuntimeLayout) -> set[str]:
+    refs = set(_rendered_compose_images(layout))
+    refs.update(_image_refs_from_manifest(_read_json(layout.release_manifest_path, {})))
+    return refs
+
+
+def _record_current_image_set(layout: RuntimeLayout, manifest: dict) -> dict[str, object]:
+    refs = _image_refs_from_manifest(manifest) or _active_image_refs(layout)
+    images: dict[str, dict[str, str]] = {}
+    service_refs = _manifest_service_image_refs(manifest)
+    if service_refs:
+        for service, ref in service_refs.items():
+            if not ref:
+                continue
+            image_id = _docker_image_id(ref)
+            images[service] = {"ref": ref, "id": image_id}
+    else:
+        for index, ref in enumerate(sorted(refs)):
+            image_id = _docker_image_id(ref)
+            images[f"image_{index + 1}"] = {"ref": ref, "id": image_id}
+
+    entry = {
+        "version": str(manifest.get("version") or ""),
+        "recordedAt": utc_now(),
+        "images": images,
+    }
+    state = _read_json(layout.deployment_state_path, {})
+    retention = state.setdefault("imageRetention", {})
+    history = retention.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+    version_value = str(entry.get("version") or "")
+    history = [
+        item
+        for item in history
+        if not (isinstance(item, dict) and version_value and str(item.get("version") or "") == version_value)
+    ]
+    history.append(entry)
+    retention["history"] = history[-12:]
+    retention["updatedAt"] = utc_now()
+    _write_json(layout.deployment_state_path, state)
+    return entry
+
+
+def _protected_image_ids(layout: RuntimeLayout, *, keep_deployments: int) -> tuple[set[str], int]:
+    protected: set[str] = set(_docker_container_image_ids())
+    for ref in _active_image_refs(layout):
+        image_id = _docker_image_id(ref)
+        if image_id:
+            protected.add(image_id)
+
+    state = _read_json(layout.deployment_state_path, {})
+    history = ((state.get("imageRetention") or {}).get("history") or []) if isinstance(state, dict) else []
+    if not isinstance(history, list):
+        history = []
+    retained_history = [item for item in history if isinstance(item, dict)][-max(0, int(keep_deployments)) :]
+    for item in retained_history:
+        images = item.get("images") if isinstance(item.get("images"), dict) else {}
+        for image in images.values():
+            if isinstance(image, dict):
+                image_id = str(image.get("id") or "").strip()
+                if image_id:
+                    protected.add(image_id)
+    return protected, len([item for item in history if isinstance(item, dict)])
+
+
+def _parse_docker_size(value: object) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?B)$", raw, flags=re.IGNORECASE)
+    if not match:
+        return 0
+    amount = float(match.group(1))
+    unit = match.group(2).upper()
+    multiplier = {"B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}.get(unit, 1)
+    return int(amount * multiplier)
+
+
+def _dangling_docker_images() -> list[dict[str, object]]:
+    result = _run_text(["docker", "image", "ls", "--no-trunc", "--filter", "dangling=true", "--format", "{{json .}}"])
+    if result.returncode != 0:
+        return []
+    rows: list[dict[str, object]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        image_id = str(parsed.get("ID") or "").strip()
+        if not image_id:
+            continue
+        rows.append(
+            {
+                "id": image_id,
+                "repository": str(parsed.get("Repository") or ""),
+                "tag": str(parsed.get("Tag") or ""),
+                "createdAt": str(parsed.get("CreatedAt") or ""),
+                "createdSince": str(parsed.get("CreatedSince") or ""),
+                "size": str(parsed.get("Size") or ""),
+                "sizeBytes": _parse_docker_size(parsed.get("Size")),
+            }
+        )
+    return rows
+
+
+def docker_image_retention_health(layout: RuntimeLayout, *, keep_deployments: int = DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS) -> dict[str, object]:
+    if shutil.which("docker") is None:
+        return {"ok": True, "skipped": True, "reason": "docker_missing", "candidates": []}
+    keep = max(0, int(keep_deployments))
+    protected, recorded_deployments = _protected_image_ids(layout, keep_deployments=keep)
+    dangling = _dangling_docker_images()
+    candidates = [row for row in dangling if str(row.get("id") or "") not in protected]
+    total_bytes = sum(int(row.get("sizeBytes") or 0) for row in candidates)
+    safe_to_prune = recorded_deployments >= keep + 1
+    return {
+        "ok": not candidates,
+        "danglingCount": len(dangling),
+        "candidateCount": len(candidates),
+        "candidateBytes": total_bytes,
+        "candidateSize": _format_bytes(total_bytes),
+        "keepDeployments": keep,
+        "recordedDeployments": recorded_deployments,
+        "safeToPrune": safe_to_prune,
+        "message": (
+            f"{len(candidates)} old dangling Docker images can be removed while keeping the current plus last {keep} recorded deployments."
+            if candidates and safe_to_prune
+            else (
+                f"{len(candidates)} dangling Docker images were found, but packetsafari-ops has only {recorded_deployments} recorded deployment image sets; recording more upgrades before automatic pruning is safer."
+                if candidates
+                else "No old dangling Docker images need cleanup."
+            )
+        ),
+        "candidateIds": [str(row.get("id") or "") for row in candidates if str(row.get("id") or "")],
+        "candidates": candidates[:50],
+    }
+
+
+def prune_old_docker_images(layout: RuntimeLayout, *, keep_deployments: int = DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS) -> dict[str, object]:
+    health = docker_image_retention_health(layout, keep_deployments=keep_deployments)
+    if not health.get("candidateCount"):
+        return {"status": "noop", **health}
+    if not health.get("safeToPrune"):
+        return {"status": "blocked", **health}
+    ids = [str(value or "") for value in health.get("candidateIds", []) if str(value or "")]
+    if not ids:
+        return {"status": "noop", **health}
+    result = _run_text(["docker", "image", "rm", *ids])
+    return {
+        "status": "ok" if result.returncode == 0 else "failed",
+        **health,
+        "removedIds": ids,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+    }
+
+
+def maybe_offer_docker_image_prune(args, layout: RuntimeLayout) -> dict[str, object]:
+    if bool(getattr(args, "skip_image_retention_check", False)):
+        return {"skipped": True, "reason": "disabled"}
+    keep = max(0, int(getattr(args, "image_retention_keep", DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS) or 0))
+    health = docker_image_retention_health(layout, keep_deployments=keep)
+    if bool(getattr(args, "prune_old_images", False)):
+        return prune_old_docker_images(layout, keep_deployments=keep)
+    if not health.get("candidateCount"):
+        return health
+    if not health.get("safeToPrune"):
+        print(f"PacketSafari image cleanup: {health.get('message')}", file=sys.stderr)
+        return health
+    print("", file=sys.stderr)
+    print("PacketSafari image cleanup opportunity:", file=sys.stderr)
+    print(f"  {health.get('candidateCount')} old dangling Docker images ({health.get('candidateSize')}) are outside the current + last {keep} deployment keep set.", file=sys.stderr)
+    print("  These images are not used by running containers and can usually be removed after a healthy update.", file=sys.stderr)
+    print("  To run without prompting next time, pass --prune-old-images; to only report, press Enter or answer no.", file=sys.stderr)
+    if not sys.stdin.isatty():
+        print("  Non-interactive shell detected; leaving images in place.", file=sys.stderr)
+        return health
+    answer = input("Remove old dangling PacketSafari images now? [y/N]: ").strip().lower()
+    if answer in {"y", "yes"}:
+        return prune_old_docker_images(layout, keep_deployments=keep)
+    return {"status": "skipped", **health}
+
+
+def healthcheck_deployment(args) -> dict[str, object]:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    profile = str(getattr(args, "profile", "") or _active_deployment_profile(layout))
+    setattr(args, "profile", profile)
+    doctor = doctor_deployment(args)
+    image_retention = maybe_offer_docker_image_prune(args, layout)
+    ok = bool(doctor.get("ok")) and not (image_retention.get("status") == "failed")
+    return {
+        "ok": ok,
+        "profile": profile,
+        "runtimeRoot": str(layout.runtime_root),
+        "doctor": doctor,
+        "imageRetention": image_retention,
+    }
+
+
+def format_healthcheck_report(payload: dict[str, object]) -> str:
+    lines = [
+        "PacketSafari healthcheck",
+        f"Profile: {payload.get('profile')}",
+        f"Runtime root: {payload.get('runtimeRoot')}",
+        "",
+    ]
+    doctor = payload.get("doctor") if isinstance(payload.get("doctor"), dict) else {}
+    checks = doctor.get("checks") if isinstance(doctor.get("checks"), list) else []
+    lines.append("Checks:")
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        marker = "ok" if check.get("ok") else "fail"
+        detail = str(check.get("message") or check.get("error") or "").strip()
+        suffix = f" - {detail}" if detail else ""
+        lines.append(f"  [{marker}] {check.get('name')}{suffix}")
+    image_retention = payload.get("imageRetention") if isinstance(payload.get("imageRetention"), dict) else {}
+    lines.append("")
+    lines.append("Docker image retention:")
+    lines.append(f"  {image_retention.get('message') or 'No image retention data.'}")
+    if image_retention.get("candidateCount"):
+        lines.append(f"  Candidates: {image_retention.get('candidateCount')} ({image_retention.get('candidateSize')})")
+        lines.append(f"  Keep policy: current + last {image_retention.get('keepDeployments')} recorded deployments")
+        if not image_retention.get("safeToPrune"):
+            lines.append("  Action: report only until enough deployment image history has been recorded.")
+    lines.append("")
+    lines.append(f"Overall: {'ok' if payload.get('ok') else 'needs attention'}")
+    return "\n".join(lines)
+
+
 def ensure_ecr_credential_helper_ready(layout: RuntimeLayout) -> None:
     ecr_registries = sorted(
         registry
@@ -2472,7 +2763,9 @@ def apply_update(args) -> dict:
     setattr(args, "bundle", None)
     if not str(getattr(args, "profile", "") or "").strip():
         setattr(args, "profile", _active_deployment_profile(layout))
-    return upgrade_release(args)
+    result = upgrade_release(args)
+    result["imageRetention"] = maybe_offer_docker_image_prune(args, layout)
+    return result
 
 
 def write_deployment_state(layout: RuntimeLayout, *, mode: str, action_type: str, action_status: str, action_message: str) -> None:
@@ -3340,6 +3633,7 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
         "note": rollback_note,
     }
     _write_json(layout.deployment_state_path, state)
+    image_set = _record_current_image_set(layout, manifest)
     write_helper_status(layout, status="ok", message=f"Upgrade to {deployment['installedVersion']} applied.")
     return {
         "message": "Upgrade applied.",
@@ -3348,6 +3642,7 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
         "profile": profile,
         "backupMode": backup_mode,
         "snapshot": str(snapshot_dir),
+        "imageSet": image_set,
     }
 
 

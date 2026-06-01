@@ -17,6 +17,8 @@ if __package__ in {None, ""}:
         diagnostics_logs,
         diagnostics_restart,
         doctor_deployment,
+        format_healthcheck_report,
+        healthcheck_deployment,
         configure_required_env,
         apply_update,
         check_for_update,
@@ -41,6 +43,8 @@ else:
         diagnostics_logs,
         diagnostics_restart,
         doctor_deployment,
+        format_healthcheck_report,
+        healthcheck_deployment,
         configure_required_env,
         apply_update,
         check_for_update,
@@ -123,6 +127,15 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
     doctor.add_argument("--manifest", help="Release manifest to use for required env checks. Defaults to the active manifest.")
     doctor.add_argument("--api-base-url")
+
+    healthcheck = subparsers.add_parser("healthcheck", help="Run guided health and storage hygiene checks.")
+    healthcheck.add_argument("--profile", choices=["onprem", "saas"], help="Deployment profile. Defaults to the active installed profile.")
+    healthcheck.add_argument("--manifest", help="Release manifest to use for required env checks. Defaults to the active manifest.")
+    healthcheck.add_argument("--api-base-url")
+    healthcheck.add_argument("--json", action="store_true")
+    healthcheck.add_argument("--image-retention-keep", type=int, default=2, help="Recorded previous deployment image sets to keep.")
+    healthcheck.add_argument("--prune-old-images", action="store_true", help="Remove safe old dangling images without prompting.")
+    healthcheck.add_argument("--skip-image-retention-check", action="store_true")
 
     upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest or offline bundle.")
     source = upgrade.add_mutually_exclusive_group()
@@ -230,6 +243,9 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--health-timeout", type=int, default=180)
     update.add_argument("--skip-health-check", action="store_true")
     update.add_argument("--skip-image-pull", action="store_true")
+    update.add_argument("--image-retention-keep", type=int, default=2, help="Recorded previous deployment image sets to keep before offering image cleanup.")
+    update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove safe old dangling images without prompting.")
+    update.add_argument("--skip-image-retention-check", action="store_true")
     update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
     update.add_argument(
         "--allow-unbacked-upgrade",
@@ -282,6 +298,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         print(json.dumps(doctor_deployment(args), indent=2))
         return 0
+    if args.command == "healthcheck":
+        payload = healthcheck_deployment(args)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(format_healthcheck_report(payload))
+        return 0 if payload.get("ok") else 1
     if args.command == "upgrade":
         print(json.dumps(upgrade_release(args), indent=2))
         return 0
