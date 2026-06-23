@@ -20,6 +20,7 @@ if __package__ in {None, ""}:
         format_healthcheck_report,
         healthcheck_deployment,
         configure_required_env,
+        configure_upstream_proxy,
         apply_update,
         check_for_update,
         install_release,
@@ -46,6 +47,7 @@ else:
         format_healthcheck_report,
         healthcheck_deployment,
         configure_required_env,
+        configure_upstream_proxy,
         apply_update,
         check_for_update,
         install_release,
@@ -207,10 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
     onboard.add_argument("--draft-json", default="{}")
 
     config = subparsers.add_parser("config", help="Inspect or update managed deployment config.")
-    config.add_argument("action", choices=["show", "check-env", "prompt-env"])
+    config.add_argument("action", choices=["show", "check-env", "prompt-env", "upstream-proxy"])
     config.add_argument("--manifest", help="Release manifest path or URL used to derive required env keys.")
     config.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
     config.add_argument("--output", help="Env file to update for prompt-env. Defaults to the managed runtime env.")
+    config.add_argument("--proxy-url", help="Corporate HTTP proxy URL to use for both HTTP_PROXY and HTTPS_PROXY.")
+    config.add_argument("--http-proxy", help="Corporate HTTP proxy URL for HTTP_PROXY.")
+    config.add_argument("--https-proxy", help="Corporate HTTP proxy URL for HTTPS_PROXY.")
+    config.add_argument("--no-proxy", help="Comma-separated NO_PROXY value for egress-ironproxy.")
+    config.add_argument("--clear", action="store_true", help="Remove HTTP_PROXY, HTTPS_PROXY, and NO_PROXY from ironproxy.env.")
+    config.add_argument("--restart", action="store_true", help="Restart egress-ironproxy after writing ironproxy.env.")
     add_download_args(config)
 
     update = subparsers.add_parser("update", help="Check or apply the configured release channel update.")
@@ -336,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "config":
         if args.action == "show":
             print(show_runtime_env(runtime_layout(args.runtime_root, args.container_runtime_root)))
+        elif args.action == "upstream-proxy":
+            print(json.dumps(configure_upstream_proxy(args), indent=2))
         else:
             print(json.dumps(configure_required_env(args), indent=2))
         return 0

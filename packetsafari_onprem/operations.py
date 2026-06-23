@@ -1928,6 +1928,102 @@ def configure_required_env(args) -> dict:
     }
 
 
+def _validate_upstream_proxy_url(value: str, *, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise RuntimeError(f"{field} cannot be empty.")
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError(f"{field} must be an http:// or https:// proxy URL with a host.")
+    return text
+
+
+def configure_upstream_proxy(args) -> dict:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    proxy_url = str(getattr(args, "proxy_url", "") or "").strip()
+    http_proxy = str(getattr(args, "http_proxy", "") or "").strip()
+    https_proxy = str(getattr(args, "https_proxy", "") or "").strip()
+    no_proxy = getattr(args, "no_proxy", None)
+    clear = bool(getattr(args, "clear", False))
+    restart = bool(getattr(args, "restart", False))
+
+    if clear and any([proxy_url, http_proxy, https_proxy, no_proxy is not None]):
+        raise RuntimeError("--clear cannot be combined with proxy values.")
+    if proxy_url and (http_proxy or https_proxy):
+        raise RuntimeError("--proxy-url cannot be combined with --http-proxy or --https-proxy.")
+    if not clear and not any([proxy_url, http_proxy, https_proxy, no_proxy is not None]):
+        raise RuntimeError("Provide --proxy-url, --http-proxy/--https-proxy, --no-proxy, or --clear.")
+
+    values = parse_env_file(layout.ironproxy_env_path)
+    changed_keys: list[str] = []
+
+    def set_or_remove(key: str, value: str | None) -> None:
+        previous = values.get(key)
+        if value is None:
+            if key in values:
+                values.pop(key, None)
+                changed_keys.append(key)
+            return
+        if previous != value:
+            values[key] = value
+            changed_keys.append(key)
+
+    if clear:
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+            set_or_remove(key, None)
+    else:
+        if proxy_url:
+            validated = _validate_upstream_proxy_url(proxy_url, field="--proxy-url")
+            set_or_remove("HTTP_PROXY", validated)
+            set_or_remove("HTTPS_PROXY", validated)
+        else:
+            if http_proxy:
+                set_or_remove("HTTP_PROXY", _validate_upstream_proxy_url(http_proxy, field="--http-proxy"))
+            if https_proxy:
+                set_or_remove("HTTPS_PROXY", _validate_upstream_proxy_url(https_proxy, field="--https-proxy"))
+        if no_proxy is not None:
+            set_or_remove("NO_PROXY", str(no_proxy).strip())
+
+    write_env_file(
+        layout.ironproxy_env_path,
+        values,
+        header_lines=[
+            "# Managed by PacketSafari ops.",
+            "# Upstream egress proxy secrets and corporate proxy settings.",
+            "# Mounted only into egress-ironproxy.",
+        ],
+    )
+
+    restarted = False
+    if restart:
+        restart_args = type(
+            "RestartArgs",
+            (),
+            {
+                "runtime_root": args.runtime_root,
+                "container_runtime_root": args.container_runtime_root,
+                "service": "egress-ironproxy",
+            },
+        )()
+        diagnostics_restart(restart_args)
+        restarted = True
+
+    return {
+        "ok": True,
+        "envPath": str(layout.ironproxy_env_path),
+        "changed": bool(changed_keys),
+        "changedKeys": changed_keys,
+        "cleared": clear,
+        "restartRequested": restart,
+        "restarted": restarted,
+        "proxy": {
+            "HTTP_PROXY": values.get("HTTP_PROXY", ""),
+            "HTTPS_PROXY": values.get("HTTPS_PROXY", ""),
+            "NO_PROXY": values.get("NO_PROXY", ""),
+        },
+    }
+
+
 def _release_public_key_candidates(layout: RuntimeLayout, explicit: str | None = None) -> list[Path]:
     candidates: list[Path] = []
     if explicit:
