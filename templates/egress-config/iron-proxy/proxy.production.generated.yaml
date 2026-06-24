@@ -45,14 +45,19 @@ transforms:
           rules:
             - host: "api.paddle.com"
             - host: "sandbox-api.paddle.com"
-  - name: aws_sigv4
+  - name: aws_auth
     config:
-      signers:
-        - service: ses
-          region: eu-central-1
-          access_key_id_env: PACKETSAFARI_SES_AWS_ACCESS_KEY_ID
-          secret_access_key_env: PACKETSAFARI_SES_AWS_SECRET_ACCESS_KEY
-          rules:
-            - host: "email.eu-central-1.amazonaws.com"
+      access_key_id:
+        type: "env"
+        var: PACKETSAFARI_SES_AWS_ACCESS_KEY_ID
+      secret_access_key:
+        type: "env"
+        var: PACKETSAFARI_SES_AWS_SECRET_ACCESS_KEY
+      allowed_services:
+        - "ses"
+      allowed_regions:
+        - "eu-central-1"
+      rules:
+        - host: "email.eu-central-1.amazonaws.com"
 log:
   level: "info"
