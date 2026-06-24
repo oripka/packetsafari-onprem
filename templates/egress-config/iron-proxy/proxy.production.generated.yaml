@@ -52,7 +52,6 @@ transforms:
           region: eu-central-1
           access_key_id_env: PACKETSAFARI_SES_AWS_ACCESS_KEY_ID
           secret_access_key_env: PACKETSAFARI_SES_AWS_SECRET_ACCESS_KEY
-          session_token_env: PACKETSAFARI_SES_AWS_SESSION_TOKEN
           rules:
             - host: "email.eu-central-1.amazonaws.com"
 log:
