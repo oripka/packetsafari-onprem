@@ -114,12 +114,20 @@ CloudFront-signed URLs, not raw S3 object access.
 - network access to the authenticated release URLs for connected installs, or local/USB access to the offline bundle
 - enough disk for the bundle, image load, database, captures, and rollback snapshots
 
-Minimum single-node sizing for test and small deployments:
+Supported single-node floor:
 
-- CPU: 4 vCPU
+- CPU: 2 vCPU
 - RAM: 16 GiB
 - Disk: 120 GiB root or data volume
 - Architecture: must match the release artifact, for example `linux-arm64` requires an ARM64 host
+
+Recommended starting point for small production deployments:
+
+- CPU: 4 vCPU
+- RAM: 16 GiB
+- Disk: 200 GiB root or data volume
+
+Heavy PCAP ingestion benefits directly from CPU and memory. For frequent large captures or multi-user analysis, start at 4-8 vCPU and 32 GiB RAM, then use `packetsafari-ops tune --apply` after resizing so worker, sharkd, Redis, and PostgreSQL limits match the host.
 
 Bootstrap installs these packages automatically on Ubuntu when it is run as root. To install them manually, or to disable automatic package installation with `PACKETSAFARI_ONPREM_INSTALL_HOST_DEPS=false`, use:
 

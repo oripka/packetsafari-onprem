@@ -4,12 +4,20 @@
 
 Use Ubuntu Server 24.04 LTS or newer for fresh install and deployment drills.
 
-Minimum single-node sizing:
+Supported single-node floor:
 
-- CPU: 4 vCPU
+- CPU: 2 vCPU
 - RAM: 16 GiB
 - Disk: 120 GiB root or data volume
 - Architecture: match the release artifact, for example `linux-arm64` requires an ARM64 host
+
+Recommended small-production baseline:
+
+- CPU: 4 vCPU
+- RAM: 16 GiB
+- Disk: 200 GiB root or data volume
+
+Large PCAP imports are CPU-bound during sharkd/index work and memory-sensitive during worker materialization. For frequent large captures, use 4-8 vCPU and 32 GiB RAM or larger, then run `packetsafari-ops tune --apply` after host resizing.
 
 Install required packages:
 

@@ -60,6 +60,10 @@ BACKUP_MODES = {"inline", "require-recent", "skip"}
 UPGRADE_SIMULATION_PHASES = {"preflight", "compose", "migration", "healthcheck", "promote"}
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+MIN_HOST_VCPUS = 2
+MIN_HOST_MEMORY_BYTES = 16 * GIB
+RECOMMENDED_SMALL_HOST_VCPUS = 4
+RECOMMENDED_SMALL_HOST_MEMORY_BYTES = 16 * GIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
 DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS = 2
 
@@ -967,6 +971,52 @@ def _host_resource_snapshot(layout: RuntimeLayout) -> dict[str, object]:
     }
 
 
+def _gib_label(value: int) -> str:
+    return f"{float(value) / float(GIB):.1f} GiB"
+
+
+def host_requirements_report(layout: RuntimeLayout) -> dict[str, object]:
+    host = _host_resource_snapshot(layout)
+    vcpus = int(host.get("vcpus") or 0)
+    memory_bytes = int(host.get("memoryBytes") or 0)
+    warnings: list[str] = []
+    if vcpus < MIN_HOST_VCPUS:
+        warnings.append(f"host has {vcpus} vCPU; PacketSafari requires at least {MIN_HOST_VCPUS} vCPU")
+    if memory_bytes < MIN_HOST_MEMORY_BYTES:
+        warnings.append(
+            f"host has {_gib_label(memory_bytes)} RAM; PacketSafari requires at least {_gib_label(MIN_HOST_MEMORY_BYTES)} RAM"
+        )
+    if not warnings and (vcpus < RECOMMENDED_SMALL_HOST_VCPUS or memory_bytes < RECOMMENDED_SMALL_HOST_MEMORY_BYTES):
+        warnings.append(
+            "host meets the supported floor but is below the recommended small-production baseline "
+            f"of {RECOMMENDED_SMALL_HOST_VCPUS} vCPU and {_gib_label(RECOMMENDED_SMALL_HOST_MEMORY_BYTES)} RAM"
+        )
+    message = "; ".join(warnings) if warnings else "host satisfies PacketSafari on-prem CPU and RAM requirements"
+    return {
+        "ok": not (vcpus < MIN_HOST_VCPUS or memory_bytes < MIN_HOST_MEMORY_BYTES),
+        "message": message,
+        "host": host,
+        "minimum": {
+            "vcpus": MIN_HOST_VCPUS,
+            "memoryBytes": MIN_HOST_MEMORY_BYTES,
+            "memory": _gib_label(MIN_HOST_MEMORY_BYTES),
+        },
+        "recommendedSmall": {
+            "vcpus": RECOMMENDED_SMALL_HOST_VCPUS,
+            "memoryBytes": RECOMMENDED_SMALL_HOST_MEMORY_BYTES,
+            "memory": _gib_label(RECOMMENDED_SMALL_HOST_MEMORY_BYTES),
+        },
+        "warnings": warnings,
+    }
+
+
+def warn_if_host_below_requirements(layout: RuntimeLayout) -> dict[str, object]:
+    report = host_requirements_report(layout)
+    for warning in report.get("warnings") or []:
+        print(f"WARNING: {warning}.", file=sys.stderr)
+    return report
+
+
 def _auto_sizing_profile(host: dict[str, object]) -> str:
     vcpus = int(host.get("vcpus") or 1)
     memory_gib = float(int(host.get("memoryBytes") or 0)) / float(GIB)
@@ -1223,6 +1273,7 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "requestedProfile": requested_profile,
         "effectiveProfile": effective_profile,
         "host": host,
+        "hostRequirements": host_requirements_report(layout),
         "services": services,
         "env": env,
         "generatedAt": utc_now(),
@@ -2849,6 +2900,7 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
 def apply_update(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     ensure_runtime_dirs(layout)
+    host_requirements = warn_if_host_below_requirements(layout)
     manifest_path = _download_update_manifest(args, layout)
     check_payload = _update_check_payload(args, layout, manifest_path)
     manifest = _read_json(manifest_path, {})
@@ -2857,9 +2909,11 @@ def apply_update(args) -> dict:
         return {"status": "noop", **check_payload}
     setattr(args, "manifest", str(manifest_path))
     setattr(args, "bundle", None)
+    setattr(args, "_host_requirements_report", host_requirements)
     if not str(getattr(args, "profile", "") or "").strip():
         setattr(args, "profile", _active_deployment_profile(layout))
     result = upgrade_release(args)
+    result["hostRequirements"] = host_requirements
     result["imageRetention"] = maybe_offer_docker_image_prune(args, layout)
     return result
 
@@ -2895,6 +2949,7 @@ def install_release(args) -> dict:
     if not supports_onprem_host_actions(layout):
         raise RuntimeError("Install is only supported for on-prem runtime roots like /opt/packetsafari, not local packetsafari-data mode.")
     ensure_runtime_dirs(layout)
+    host_requirements = warn_if_host_below_requirements(layout)
     with upgrade_lock(layout):
         sync_bundle(layout)
 
@@ -2944,6 +2999,7 @@ def install_release(args) -> dict:
                 "env": str(layout.runtime_sizing_env_path),
                 "compose": str(layout.compose_sizing_file),
             },
+            "hostRequirements": host_requirements,
             "message": "PacketSafari on-prem installed in onboarding mode. Finish setup in `packetsafari-ops tui` or open /onprem/onboarding in the local UI.",
         }
 
@@ -3638,6 +3694,14 @@ def doctor_deployment(args) -> dict:
         details.pop("ok", None)
         checks.append({"name": name, "ok": bool(check_ok), **details})
 
+    host_requirements = host_requirements_report(layout)
+    add_check(
+        "host_requirements",
+        True,
+        **host_requirements,
+        warning=not bool(host_requirements.get("ok")),
+    )
+
     try:
         required = _merged_required_env_keys(manifest, profile=profile)
         missing = [key for key in required if not _required_env_value_is_valid(key, str(runtime_env.get(key, "")))]
@@ -3764,6 +3828,9 @@ def upgrade_release(args) -> dict:
     backup_mode = resolve_backup_mode(args, profile=profile)
     if not supports_upgrade_host_actions(layout, profile=profile):
         raise RuntimeError(f"Upgrade profile {profile!r} is only supported for managed runtime roots like /opt/packetsafari.")
+    host_requirements = getattr(args, "_host_requirements_report", None)
+    if not isinstance(host_requirements, dict):
+        host_requirements = warn_if_host_below_requirements(layout)
     with upgrade_lock(layout):
         ensure_runtime_dirs(layout)
         sync_bundle(layout)
@@ -3870,7 +3937,9 @@ def upgrade_release(args) -> dict:
 
             phase = "promote"
             maybe_fail_upgrade_simulation(layout, args, "promote")
-            return _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
+            result = _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
+            result["hostRequirements"] = host_requirements
+            return result
         except Exception as exc:
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")
             if snapshot_dir is not None:
@@ -3964,6 +4033,7 @@ def tune_runtime(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     if not supports_onprem_host_actions(layout):
         raise RuntimeError("Sizing is only supported for on-prem runtime roots like /opt/packetsafari, not local packetsafari-data mode.")
+    host_requirements = warn_if_host_below_requirements(layout)
     plan = write_sizing_profile(layout, profile=str(getattr(args, "profile", "auto") or "auto"))
     applied = False
     if bool(getattr(args, "apply", False)):
@@ -3987,6 +4057,7 @@ def tune_runtime(args) -> dict:
         "state": str(layout.sizing_state_path),
         "env": str(layout.runtime_sizing_env_path),
         "compose": str(layout.compose_sizing_file),
+        "hostRequirements": host_requirements,
         "plan": plan,
     }
 

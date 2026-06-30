@@ -56,6 +56,49 @@ def test_sizing_plan_keeps_index_task_memory_within_worker_limit(monkeypatch, tm
     assert per_task_mib < 3072
 
 
+def test_host_requirements_report_flags_hosts_below_supported_floor(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+
+    monkeypatch.setattr(
+        operations,
+        "_host_resource_snapshot",
+        lambda _layout: {
+            "vcpus": 1,
+            "memoryBytes": 8 * operations.GIB,
+            "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+        },
+    )
+
+    report = operations.host_requirements_report(layout)
+
+    assert report["ok"] is False
+    assert report["minimum"]["vcpus"] == 2
+    assert report["minimum"]["memoryBytes"] == 16 * operations.GIB
+    assert len(report["warnings"]) == 2
+
+
+def test_host_requirements_report_accepts_supported_floor_with_recommendation(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+
+    monkeypatch.setattr(
+        operations,
+        "_host_resource_snapshot",
+        lambda _layout: {
+            "vcpus": 2,
+            "memoryBytes": 16 * operations.GIB,
+            "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+        },
+    )
+
+    report = operations.host_requirements_report(layout)
+
+    assert report["ok"] is True
+    assert report["recommendedSmall"]["vcpus"] == 4
+    assert report["warnings"] == [
+        "host meets the supported floor but is below the recommended small-production baseline of 4 vCPU and 16.0 GiB RAM"
+    ]
+
+
 def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     layout.compose_file.parent.mkdir(parents=True, exist_ok=True)
