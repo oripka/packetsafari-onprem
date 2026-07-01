@@ -297,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"Installer version: {payload['installerVersion']}")
             print(f"Runtime root: {payload['runtimeRoot']}")
+            sizing_status = payload.get("sizingStatus") or {}
+            if sizing_status.get("stale"):
+                print(f"WARNING: {sizing_status.get('message')}", file=sys.stderr)
+                for warning in sizing_status.get("warnings") or []:
+                    print(f"WARNING: {warning}", file=sys.stderr)
             state = payload.get("state") or {}
             if state:
                 print(json.dumps(state, indent=2))

@@ -17,7 +17,7 @@ Recommended small-production baseline:
 - RAM: 16 GiB
 - Disk: 200 GiB root or data volume
 
-Large PCAP imports are CPU-bound during sharkd/index work and memory-sensitive during worker materialization. For frequent large captures, use 4-8 vCPU and 32 GiB RAM or larger, then run `packetsafari-ops tune --apply` after host resizing.
+Large PCAP imports are CPU-bound during sharkd/index work and memory-sensitive during worker materialization. For frequent large captures, use 4-8 vCPU and 32 GiB RAM or larger, then run `packetsafari-ops tune --apply` after host resizing. If the host was resized but tuning was not reapplied, `packetsafari-ops status`, `update`, `upgrade`, and `tune` surface a stale-sizing warning with the saved and current host shape.
 
 Install required packages:
 

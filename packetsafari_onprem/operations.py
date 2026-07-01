@@ -1010,6 +1010,60 @@ def host_requirements_report(layout: RuntimeLayout) -> dict[str, object]:
     }
 
 
+def sizing_state_status(layout: RuntimeLayout) -> dict[str, object]:
+    host = _host_resource_snapshot(layout)
+    sizing = _read_json(layout.sizing_state_path, {})
+    saved_host = sizing.get("host") if isinstance(sizing.get("host"), dict) else {}
+    if not saved_host:
+        return {
+            "ok": True,
+            "stale": False,
+            "message": "no generated sizing state found",
+            "currentHost": host,
+            "sizedHost": {},
+            "warnings": [],
+        }
+
+    current_vcpus = int(host.get("vcpus") or 0)
+    current_memory = int(host.get("memoryBytes") or 0)
+    sized_vcpus = int(saved_host.get("vcpus") or 0)
+    sized_memory = int(saved_host.get("memoryBytes") or 0)
+    memory_delta = abs(current_memory - sized_memory)
+    memory_threshold = max(512 * MIB, int(max(current_memory, sized_memory) * 0.05))
+    warnings: list[str] = []
+    if sized_vcpus and current_vcpus != sized_vcpus:
+        warnings.append(f"host vCPU count changed from {sized_vcpus} to {current_vcpus}")
+    if sized_memory and memory_delta >= memory_threshold:
+        warnings.append(f"host RAM changed from {_gib_label(sized_memory)} to {_gib_label(current_memory)}")
+
+    stale = bool(warnings)
+    message = (
+        "host sizing state is stale; run `packetsafari-ops tune --apply` to regenerate runtime sizing"
+        if stale
+        else "host sizing state matches current CPU and RAM"
+    )
+    return {
+        "ok": not stale,
+        "stale": stale,
+        "message": message,
+        "currentHost": host,
+        "sizedHost": saved_host,
+        "warnings": warnings,
+        "state": str(layout.sizing_state_path),
+        "env": str(layout.runtime_sizing_env_path),
+        "compose": str(layout.compose_sizing_file),
+    }
+
+
+def warn_if_sizing_state_stale(layout: RuntimeLayout) -> dict[str, object]:
+    report = sizing_state_status(layout)
+    if report.get("stale"):
+        print(f"WARNING: {report['message']}.", file=sys.stderr)
+        for warning in report.get("warnings") or []:
+            print(f"WARNING: {warning}.", file=sys.stderr)
+    return report
+
+
 def warn_if_host_below_requirements(layout: RuntimeLayout) -> dict[str, object]:
     report = host_requirements_report(layout)
     for warning in report.get("warnings") or []:
@@ -2884,6 +2938,7 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         "targetVersion": target,
     }
     ops = tooling_update_status(manifest)
+    sizing_status = sizing_state_status(layout)
     return {
         **app,
         "channel": str(manifest.get("channel") or ""),
@@ -2894,6 +2949,7 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         "app": app,
         "ops": ops,
         "tooling": ops,
+        "sizingStatus": sizing_status,
     }
 
 
@@ -2901,6 +2957,7 @@ def apply_update(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     ensure_runtime_dirs(layout)
     host_requirements = warn_if_host_below_requirements(layout)
+    sizing_status = warn_if_sizing_state_stale(layout)
     manifest_path = _download_update_manifest(args, layout)
     check_payload = _update_check_payload(args, layout, manifest_path)
     manifest = _read_json(manifest_path, {})
@@ -2910,10 +2967,12 @@ def apply_update(args) -> dict:
     setattr(args, "manifest", str(manifest_path))
     setattr(args, "bundle", None)
     setattr(args, "_host_requirements_report", host_requirements)
+    setattr(args, "_sizing_status_report", sizing_status)
     if not str(getattr(args, "profile", "") or "").strip():
         setattr(args, "profile", _active_deployment_profile(layout))
     result = upgrade_release(args)
     result["hostRequirements"] = host_requirements
+    result["sizingStatus"] = sizing_status
     result["imageRetention"] = maybe_offer_docker_image_prune(args, layout)
     return result
 
@@ -3020,6 +3079,7 @@ def status(layout: RuntimeLayout) -> dict:
         "composeSizingFile": str(layout.compose_sizing_file),
         "composeFiles": compose_files,
         "sizing": _read_json(layout.sizing_state_path, {}),
+        "sizingStatus": sizing_state_status(layout),
         "backups": [path.name for path in sorted(layout.backup_dir.glob("*"), reverse=True) if path.is_dir()][:10],
     }
 
@@ -3831,6 +3891,9 @@ def upgrade_release(args) -> dict:
     host_requirements = getattr(args, "_host_requirements_report", None)
     if not isinstance(host_requirements, dict):
         host_requirements = warn_if_host_below_requirements(layout)
+    sizing_status = getattr(args, "_sizing_status_report", None)
+    if not isinstance(sizing_status, dict):
+        sizing_status = warn_if_sizing_state_stale(layout)
     with upgrade_lock(layout):
         ensure_runtime_dirs(layout)
         sync_bundle(layout)
@@ -3939,6 +4002,7 @@ def upgrade_release(args) -> dict:
             maybe_fail_upgrade_simulation(layout, args, "promote")
             result = _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
             result["hostRequirements"] = host_requirements
+            result["sizingStatus"] = sizing_status
             return result
         except Exception as exc:
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")
@@ -4034,7 +4098,9 @@ def tune_runtime(args) -> dict:
     if not supports_onprem_host_actions(layout):
         raise RuntimeError("Sizing is only supported for on-prem runtime roots like /opt/packetsafari, not local packetsafari-data mode.")
     host_requirements = warn_if_host_below_requirements(layout)
+    previous_sizing_status = warn_if_sizing_state_stale(layout)
     plan = write_sizing_profile(layout, profile=str(getattr(args, "profile", "auto") or "auto"))
+    current_sizing_status = sizing_state_status(layout)
     applied = False
     if bool(getattr(args, "apply", False)):
         docker_compose_up(layout)
@@ -4058,6 +4124,8 @@ def tune_runtime(args) -> dict:
         "env": str(layout.runtime_sizing_env_path),
         "compose": str(layout.compose_sizing_file),
         "hostRequirements": host_requirements,
+        "previousSizingStatus": previous_sizing_status,
+        "sizingStatus": current_sizing_status,
         "plan": plan,
     }
 

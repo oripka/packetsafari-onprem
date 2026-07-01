@@ -127,7 +127,7 @@ Recommended starting point for small production deployments:
 - RAM: 16 GiB
 - Disk: 200 GiB root or data volume
 
-Heavy PCAP ingestion benefits directly from CPU and memory. For frequent large captures or multi-user analysis, start at 4-8 vCPU and 32 GiB RAM, then use `packetsafari-ops tune --apply` after resizing so worker, sharkd, Redis, and PostgreSQL limits match the host.
+Heavy PCAP ingestion benefits directly from CPU and memory. For frequent large captures or multi-user analysis, start at 4-8 vCPU and 32 GiB RAM, then use `packetsafari-ops tune --apply` after resizing so worker, sharkd, Redis, and PostgreSQL limits match the host. `packetsafari-ops status`, `update`, `upgrade`, and `tune` report a stale-sizing warning when the saved runtime sizing was generated for a different CPU or RAM shape.
 
 Bootstrap installs these packages automatically on Ubuntu when it is run as root. To install them manually, or to disable automatic package installation with `PACKETSAFARI_ONPREM_INSTALL_HOST_DEPS=false`, use:
 

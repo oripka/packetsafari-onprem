@@ -99,6 +99,69 @@ def test_host_requirements_report_accepts_supported_floor_with_recommendation(mo
     ]
 
 
+def test_sizing_state_status_flags_host_resize(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.state_dir.mkdir(parents=True, exist_ok=True)
+    operations._write_json(
+        layout.sizing_state_path,
+        {
+            "host": {
+                "vcpus": 1,
+                "memoryBytes": 8 * operations.GIB,
+                "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        operations,
+        "_host_resource_snapshot",
+        lambda _layout: {
+            "vcpus": 2,
+            "memoryBytes": 16 * operations.GIB,
+            "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+        },
+    )
+
+    report = operations.sizing_state_status(layout)
+
+    assert report["ok"] is False
+    assert report["stale"] is True
+    assert report["warnings"] == [
+        "host vCPU count changed from 1 to 2",
+        "host RAM changed from 8.0 GiB to 16.0 GiB",
+    ]
+
+
+def test_sizing_state_status_accepts_matching_saved_host(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    layout.state_dir.mkdir(parents=True, exist_ok=True)
+    operations._write_json(
+        layout.sizing_state_path,
+        {
+            "host": {
+                "vcpus": 2,
+                "memoryBytes": 16 * operations.GIB,
+                "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        operations,
+        "_host_resource_snapshot",
+        lambda _layout: {
+            "vcpus": 2,
+            "memoryBytes": 16 * operations.GIB - 128 * operations.MIB,
+            "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+        },
+    )
+
+    report = operations.sizing_state_status(layout)
+
+    assert report["ok"] is True
+    assert report["stale"] is False
+    assert report["warnings"] == []
+
+
 def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     layout.compose_file.parent.mkdir(parents=True, exist_ok=True)
