@@ -9,7 +9,7 @@ tls:
   ca_cert: "/var/lib/packetsafari/egress-proxy/ca.crt"
   ca_key: "/var/lib/packetsafari/egress-proxy/ca.key"
   cert_cache_size: 1000
-  leaf_cert_expiry_hours: 168
+  leaf_cert_expiry_hours: 8760
 transforms:
   - name: allowlist
     config:
