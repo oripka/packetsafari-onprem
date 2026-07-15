@@ -24,6 +24,8 @@ def test_sizing_plan_leaves_index_concurrency_runtime_sized(monkeypatch, tmp_pat
     assert env["PACKETSAFARI_CELERY_INDEX_CPU_FRACTION"] == "0.85"
     assert env["PACKETSAFARI_CELERY_INDEX_MEMORY_PER_TASK_MIB"] == "1536"
     assert env["PACKETSAFARI_CELERY_INDEX_MEMORY_RESERVE_MIB"] == "4096"
+    assert env["PACKETSAFARI_MAINTENANCE_STORAGE_CLEANUP_RESCHEDULE_ENABLED"] == "true"
+    assert "MAINTENANCE_STORAGE_CLEANUP_RESCHEDULE_ENABLED" not in env
     assert plan["services"]["worker"]["cpus"] == 24.0
     assert plan["services"]["sharkd"]["cpus"] == 17.5
     for service in plan["services"].values():

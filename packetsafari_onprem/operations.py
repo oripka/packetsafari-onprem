@@ -1309,7 +1309,7 @@ def _build_sizing_plan(layout: RuntimeLayout, requested_profile: str) -> dict[st
         "PACKETSAFARI_ROW_WINDOW_MAX_LIMIT_ROWS": "512",
         "PACKETSAFARI_ROW_WINDOW_INFLIGHT_WAIT_SECONDS": "12",
         "PACKETSAFARI_ROW_WINDOW_LOCK_TTL_SECONDS": "30",
-        "MAINTENANCE_STORAGE_CLEANUP_RESCHEDULE_ENABLED": "false",
+        "PACKETSAFARI_MAINTENANCE_STORAGE_CLEANUP_RESCHEDULE_ENABLED": "true",
         "PACKETSAFARI_CAPTURE_SHARKD_LRU_SIZE": str(sharkd_lru_size),
         "PACKETSAFARI_SHARKD_PACKETSTATS_RULE_SHARD_WORKERS": str(rule_shard_workers),
         "HEAVY_STAGE_MIN_AVAILABLE_MIB": str({"small": 768, "medium": 1024, "large": 1536}[effective_profile]),
