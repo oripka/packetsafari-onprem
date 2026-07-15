@@ -1,5 +1,14 @@
 # PacketSafari On-Prem — Working Notes
 
+## Product Vision
+
+- Before planning or implementing product or delivery work, read the canonical
+  PacketSafari vision at `../packetsafari/VISION.md` and use it as the decision
+  framework for scope, tradeoffs, and prioritization.
+- On-prem work should advance the shared product vision without silently
+  weakening evidence quality, reliability, privacy, security, operability, or
+  commercial viability.
+
 ## Scope
 
 - This repo owns the customer-facing on-prem bootstrap, signed entitlement tooling, release manifest handling, compose rendering, and host install / upgrade / rollback operations.
