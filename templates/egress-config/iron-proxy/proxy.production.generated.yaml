@@ -19,7 +19,6 @@ transforms:
         - "api.paddle.com"
         - "auth.openai.com"
         - "email.eu-central-1.amazonaws.com"
-        - "sns.eu-central-1.amazonaws.com"
         - "oidc.external.test"
         - "saml.external.test"
         - "sandbox-api.paddle.com"

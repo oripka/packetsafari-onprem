@@ -51,16 +51,6 @@
     },
     {
       "classification": "feature-optional",
-      "host": "sns.eu-central-1.amazonaws.com",
-      "notes": "AWS SNS signing certificates and subscription confirmation for authenticated SES feedback notifications.",
-      "owners": [
-        "backend"
-      ],
-      "port": 443,
-      "purpose": "Current mail path"
-    },
-    {
-      "classification": "feature-optional",
       "host": "api.paddle.com",
       "notes": "Production Paddle API.",
       "owners": [
