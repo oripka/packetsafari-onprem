@@ -112,6 +112,7 @@ CloudFront-signed URLs, not raw S3 object access.
 - `curl`, `python3`, `tar`, `openssl`, and `zstd` available on the host
 - write access to the managed runtime root (default: `/opt/packetsafari`)
 - network access to the authenticated release URLs for connected installs, or local/USB access to the offline bundle
+- a customer-managed compatible AI endpoint, credentials, and compute for PacketSafari Agent operation
 - enough disk for the bundle, image load, database, captures, and rollback snapshots
 
 Supported single-node floor:
@@ -329,16 +330,16 @@ docker exec -it packetsafari-backend python3 /app/scripts/create_initial_admin.p
 
 ## License Claims
 
-On-prem licenses are signed offline entitlement tokens. Current tokens carry explicit claims for `agent_enabled`, `max_users`, `max_agent_runs_per_month`, `offline_expiry`, `customer_id`, `deployment_id`, and `support_tier`.
+On-prem licenses are signed offline entitlement tokens. Current tokens carry explicit claims for `agent_enabled`, `max_users`, `max_agent_runs_per_month`, `offline_expiry`, `customer_id`, `deployment_id`, and `support_tier`. The established `max_agent_runs_per_month` claim now represents weighted Agent units per licensed deployment; the claim name remains unchanged so existing runtimes continue to verify new tokens.
 
 Create and verify tokens with:
 
 ```bash
-python3 scripts/license_create.py --private-key keys/license-private.pem --customer-id customer-acme --customer-email security@example.com --license-id lic-acme-001 --deployment-id dep-acme-prod --support-tier standard --max-users 25 --max-agent-runs-per-month 1000 --agent-enabled --days 365 --output /tmp/packetsafari-license-token.json
+python3 scripts/license_create.py --private-key keys/license-private.pem --customer-id customer-acme --customer-email security@example.com --license-id lic-acme-001 --deployment-id dep-acme-prod --support-tier enterprise --max-users 25 --max-agent-units-per-month 5000 --agent-enabled --days 365 --output /tmp/packetsafari-license-token.json
 python3 scripts/license_verify.py --token /tmp/packetsafari-license-token.json --public-key keys/license-public.pem
 ```
 
-See `docs/license-claims.md` for the full claim schema. The private signing key is internal-only and must never be installed on a customer host.
+The default enterprise entitlement is 25 enabled named users and 5,000 weighted Agent units per licensed deployment and calendar month. Agent operation uses the customer-managed compatible AI endpoint, credentials, and compute; neither the license token nor an offline bundle supplies upstream AI capacity. See `docs/license-claims.md` for the unit schedule and full claim schema. The private signing key is internal-only and must never be installed on a customer host.
 
 ## Audit Logging Modes
 

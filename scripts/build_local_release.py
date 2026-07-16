@@ -219,7 +219,7 @@ def create_dev_license(output_dir: Path, key_dir: Path, version: str, channel: s
             "development",
             "--max-users",
             "25",
-            "--max-agent-runs-per-month",
+            "--max-agent-units-per-month",
             "1000",
             "--channel",
             channel,

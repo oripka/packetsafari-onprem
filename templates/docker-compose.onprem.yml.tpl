@@ -249,10 +249,18 @@ services:
           --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
           --without-gossip --without-mingle \
           --concurrency="$${CELERY_AICHAT_CONCURRENCY:-2}" \
-          --queues=aichat \
+          --queues=aichat,aichat_priority \
           --hostname=aichat@%h &
         AICHAT_PID=$$!
         PIDS+=("$$AICHAT_PID")
+
+        CELERY_PRIORITY_AGENT_CONCURRENCY="$${PACKETSAFARI_CELERY_PRIORITY_AGENT_CONCURRENCY:-1}"
+        celery -A packetsafari.celery_app worker \
+          --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
+          --without-gossip --without-mingle --prefetch-multiplier=1 \
+          --concurrency="$$CELERY_PRIORITY_AGENT_CONCURRENCY" \
+          --queues=aichat_priority --hostname=aichat-priority@%h &
+        PIDS+=("$$!")
 
         celery -A packetsafari.celery_app worker \
           --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" \
@@ -274,6 +282,13 @@ services:
 
         CELERY_RESERVED_ANALYSIS_CONCURRENCY="$${PACKETSAFARI_RESERVED_ANALYSIS_SLOTS:-0}"
         if [ "$$CELERY_RESERVED_ANALYSIS_CONCURRENCY" -gt 0 ]; then
+          celery -A packetsafari.celery_app worker \
+            --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
+            --without-gossip --without-mingle --prefetch-multiplier=1 \
+            --concurrency="$$CELERY_RESERVED_ANALYSIS_CONCURRENCY" \
+            --queues=aichat_reserved --hostname=aichat-reserved@%h &
+          PIDS+=("$$!")
+
           celery -A packetsafari.celery_app worker \
             --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" --pool=threads \
             --without-gossip --without-mingle --prefetch-multiplier=1 \

@@ -32,7 +32,7 @@ def _valid_payload(**overrides) -> dict:
         "schema_version": 1,
         "agent_enabled": True,
         "max_users": 25,
-        "max_agent_runs_per_month": 1000,
+        "max_agent_runs_per_month": 5000,
         "offline_expiry": "2099-01-01T00:00:00+00:00",
         "customer_id": "customer-1",
         "deployment_id": "deployment-1",
