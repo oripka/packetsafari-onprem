@@ -104,8 +104,10 @@ services:
       - |
         set -euo pipefail
         /usr/local/bin/setvolumepermissions.sh /
+        PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex PACKETSAFARI_STORAGE_SUBDIRS="sqlite" /usr/local/bin/setvolumepermissions.sh /
     volumes:
       - packetsafari-storage:/storage
+      - packetsafari-codexruntime:/var/lib/packetsafari/codex
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"
     depends_on:
       egress-dns:
@@ -166,6 +168,7 @@ services:
       start_period: 30s
     volumes:
       - packetsafari-storage:/storage
+      - packetsafari-codexruntime:/var/lib/packetsafari/codex
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"
       - "{{ host_runtime_root }}/configuration/iron-proxy:/app/configuration/iron-proxy"
       - "{{ host_runtime_root }}/configuration/egress-allowlist.production.yaml:/app/configuration/egress-allowlist.production.yaml"
@@ -304,6 +307,7 @@ services:
         exit "$${EXIT_CODE}"
     volumes:
       - packetsafari-storage:/storage
+      - packetsafari-codexruntime:/var/lib/packetsafari/codex
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"
       - "{{ host_runtime_root }}/configuration/iron-proxy:/app/configuration/iron-proxy"
       - "{{ host_runtime_root }}/configuration/egress-allowlist.production.yaml:/app/configuration/egress-allowlist.production.yaml"
@@ -416,6 +420,7 @@ services:
 
 volumes:
   packetsafari-storage:
+  packetsafari-codexruntime:
   packetsafari-postgres:
   packetsafari-redis:
   packetsafari-egress-proxy-certs:

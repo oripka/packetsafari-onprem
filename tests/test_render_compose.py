@@ -149,3 +149,44 @@ def test_rendered_onprem_compose_uses_journald_logging(tmp_path):
     assert "driver: journald" in rendered
     assert 'tag: "packetsafari/{{.Name}}/{{.ID}}"' in rendered
     assert rendered.count("logging: *packetsafari-journald-logging") >= 10
+
+
+def test_onprem_backend_and_worker_share_persistent_codex_runtime(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    output_path = tmp_path / "compose.yml"
+    template_path = Path(__file__).resolve().parents[1] / "templates" / "docker-compose.onprem.yml.tpl"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "images": {
+                    "frontend": "repo/frontend:1",
+                    "backend": "repo/backend:1",
+                    "worker": "repo/worker:1",
+                    "sharkd": "repo/sharkd:1",
+                    "egress-ironproxy": "repo/ironproxy:1",
+                    "egress-firewall": "repo/firewall:1",
+                    "egress-dns": "repo/dns:1",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert render_compose.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--template",
+            str(template_path),
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+
+    rendered = output_path.read_text(encoding="utf-8")
+    assert rendered.count("packetsafari-codexruntime:/var/lib/packetsafari/codex") == 3
+    assert "packetsafari-codexruntime:" in rendered.split("\nvolumes:\n", 1)[1]
+    assert (
+        "PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex "
+        'PACKETSAFARI_STORAGE_SUBDIRS="sqlite" /usr/local/bin/setvolumepermissions.sh /'
+    ) in rendered
