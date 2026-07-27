@@ -91,13 +91,14 @@ services:
   storage-init:
     image: "{{ backend_image }}"
     container_name: packetsafari-storage-init
+    user: "0:0"
     restart: "no"
     logging: *packetsafari-journald-logging
     env_file:
       - "{{ runtime_env_path }}"
     environment:
       PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
-      PACKETSAFARI_STORAGE_SUBDIRS: "upload colorrules temporary avatars uploadchunk capture-agent anoncap analysis analysis/runtime onprem onprem/state onprem/env onprem/secrets"
+      PACKETSAFARI_STORAGE_SUBDIRS: "upload colorrules temporary avatars uploadchunk capture-agent anoncap analysis analysis/runtime analysis/runtime/typed-shared analysis/runtime/match-bitsets onprem onprem/state onprem/env onprem/secrets"
     command:
       - /bin/bash
       - -lc
