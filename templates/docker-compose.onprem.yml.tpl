@@ -98,14 +98,15 @@ services:
       - "{{ runtime_env_path }}"
     environment:
       PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
-      PACKETSAFARI_STORAGE_SUBDIRS: "upload colorrules temporary avatars uploadchunk capture-agent anoncap analysis analysis/runtime analysis/runtime/typed-shared analysis/runtime/match-bitsets onprem onprem/state onprem/env onprem/secrets"
+      PACKETSAFARI_STORAGE_SUBDIRS: "upload upload/archive colorrules temporary avatars uploadchunk capture-agent anoncap agent-visual-reports admin intelligence intelligence/ja4 intelligence/suricata intelligence/suricata/rules intelligence/suricata/update intelligence/zeek intelligence/zeek/intel runtime logs analysis analysis/runtime analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets onprem onprem/state onprem/env onprem/secrets"
+      PACKETSAFARI_STORAGE_REPAIR_SUBDIRS: "uploadchunk upload/archive capture-agent anoncap agent-visual-reports analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets"
     command:
       - /bin/bash
       - -lc
       - |
         set -euo pipefail
         /usr/local/bin/setvolumepermissions.sh /
-        PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex PACKETSAFARI_STORAGE_SUBDIRS="sqlite" /usr/local/bin/setvolumepermissions.sh /
+        PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex PACKETSAFARI_STORAGE_SUBDIRS="sqlite" PACKETSAFARI_STORAGE_REPAIR_SUBDIRS="." /usr/local/bin/setvolumepermissions.sh /
     volumes:
       - packetsafari-storage:/storage
       - packetsafari-codexruntime:/var/lib/packetsafari/codex

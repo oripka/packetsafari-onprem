@@ -189,8 +189,20 @@ def test_onprem_backend_and_worker_share_persistent_codex_runtime(tmp_path):
     storage_init = rendered.split("\n  storage-init:", 1)[1].split("\n  backend:", 1)[0]
     assert 'user: "0:0"' in storage_init
     assert "analysis/runtime/typed-shared" in storage_init
+    for writable_root in (
+        "upload/archive",
+        "agent-visual-reports",
+        "admin",
+        "intelligence/suricata/rules",
+        "runtime",
+        "logs",
+        "analysis/runtime/typed",
+        "analysis/runtime/typed-securityscan",
+    ):
+        assert writable_root in storage_init
+    assert "PACKETSAFARI_STORAGE_REPAIR_SUBDIRS" in storage_init
     assert "analysis/runtime/match-bitsets" in storage_init
     assert (
         "PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex "
-        'PACKETSAFARI_STORAGE_SUBDIRS="sqlite" /usr/local/bin/setvolumepermissions.sh /'
+        'PACKETSAFARI_STORAGE_SUBDIRS="sqlite" PACKETSAFARI_STORAGE_REPAIR_SUBDIRS="." /usr/local/bin/setvolumepermissions.sh /'
     ) in rendered
