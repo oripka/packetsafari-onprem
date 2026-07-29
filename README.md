@@ -9,6 +9,7 @@ Customer-facing Python-native installer, operator CLI, and simple interactive me
 - `scripts/license_*.py` - offline entitlement token tooling
 - `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
 - `docs/upgrade-runbook.md` - connected and air-gapped upgrade/rollback runbook
+- `docs/ai-model-onboarding.md` - customer-managed AI endpoint, model-profile, parser, qualification, and offline onboarding workflow
 - `scripts/render_compose.py` - render pinned on-prem compose files from release manifests
 - `scripts/build_offline_bundle.py` - build signed USB/offline install/upgrade bundles from a release manifest
 - `scripts/build_local_release.py` - build a locally hosted on-prem release directory for VM validation
