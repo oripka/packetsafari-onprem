@@ -285,6 +285,14 @@ services:
           --queues=index_priority --hostname=index-priority@%h &
         PIDS+=("$$!")
 
+        # Standard Security is one bounded Sharkd IDS request on a dedicated
+        # durable queue, isolated from index-worker capacity and prefetch.
+        celery -A packetsafari.celery_app worker \
+          --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" --pool=solo \
+          --without-gossip --without-mingle --prefetch-multiplier=1 \
+          --concurrency=1 --queues=security --hostname=security@%h &
+        PIDS+=("$$!")
+
         CELERY_RESERVED_ANALYSIS_CONCURRENCY="$${PACKETSAFARI_RESERVED_ANALYSIS_SLOTS:-0}"
         if [ "$$CELERY_RESERVED_ANALYSIS_CONCURRENCY" -gt 0 ]; then
           celery -A packetsafari.celery_app worker \
