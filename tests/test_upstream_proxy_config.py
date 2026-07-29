@@ -46,12 +46,16 @@ def test_configure_upstream_proxy_sets_both_proxy_env_values(tmp_path):
 def test_configure_upstream_proxy_preserves_existing_ironproxy_secrets(tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     layout.ironproxy_env_path.parent.mkdir(parents=True)
-    layout.ironproxy_env_path.write_text('OPENAI_API_KEY="secret"\n', encoding="utf-8")
+    layout.ironproxy_env_path.write_text(
+        'OPENAI_API_KEY="secret"\nOPENROUTER_API_KEY="router-secret"\n',
+        encoding="utf-8",
+    )
 
     operations.configure_upstream_proxy(_args(tmp_path, https_proxy="http://proxy.example:8080"))
 
     values = parse_env_file(layout.ironproxy_env_path)
     assert values["OPENAI_API_KEY"] == "secret"
+    assert values["OPENROUTER_API_KEY"] == "router-secret"
     assert values["HTTPS_PROXY"] == "http://proxy.example:8080"
 
 
@@ -62,6 +66,7 @@ def test_configure_upstream_proxy_clear_removes_proxy_keys_only(tmp_path):
         '\n'.join(
             [
                 'OPENAI_API_KEY="secret"',
+                'OPENROUTER_API_KEY="router-secret"',
                 'HTTP_PROXY="http://proxy.example:8080"',
                 'HTTPS_PROXY="http://proxy.example:8080"',
                 'NO_PROXY="localhost"',
@@ -75,7 +80,10 @@ def test_configure_upstream_proxy_clear_removes_proxy_keys_only(tmp_path):
 
     values = parse_env_file(layout.ironproxy_env_path)
     assert result["cleared"] is True
-    assert values == {"OPENAI_API_KEY": "secret"}
+    assert values == {
+        "OPENAI_API_KEY": "secret",
+        "OPENROUTER_API_KEY": "router-secret",
+    }
 
 
 def test_configure_upstream_proxy_rejects_invalid_urls(tmp_path):

@@ -19,6 +19,17 @@
     },
     {
       "classification": "feature-optional",
+      "host": "openrouter.ai",
+      "notes": "OpenRouter API endpoint for qualified hosted alternative-model routes.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Core AI / auth"
+    },
+    {
+      "classification": "feature-optional",
       "host": "auth.openai.com",
       "notes": "Codex device login flow.",
       "owners": [

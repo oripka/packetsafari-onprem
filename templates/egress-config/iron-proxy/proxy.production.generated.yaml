@@ -20,6 +20,7 @@ transforms:
         - "auth.openai.com"
         - "email.eu-central-1.amazonaws.com"
         - "oidc.external.test"
+        - "openrouter.ai"
         - "saml.external.test"
         - "sandbox-api.paddle.com"
         - "sslbl.abuse.ch"
@@ -36,6 +37,15 @@ transforms:
           match_body: false
           rules:
             - host: "api.openai.com"
+        - source:
+            type: "env"
+            var: OPENROUTER_API_KEY
+          proxy_value: "ps_proxy_openrouter_api_key"
+          match_headers:
+            - "Authorization"
+          match_body: false
+          rules:
+            - host: "openrouter.ai"
         - source:
             type: "env"
             var: PACKETSAFARI_PADDLE_API_KEY

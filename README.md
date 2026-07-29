@@ -267,7 +267,7 @@ only for staged/private/customer-specific manifests.
 `doctor --profile saas` checks product readiness, not just Docker liveness. It
 verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL` and
 `PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, plus upstream OpenAI/Paddle keys from
-`env/ironproxy.env`. `OPENAI_API_KEY` and `PACKETSAFARI_PADDLE_API_KEY` should
+`env/ironproxy.env`. `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `PACKETSAFARI_PADDLE_API_KEY` should
 be real only in that ironproxy env file; backend/worker should receive proxy
 placeholders from `env/runtime.env`. The doctor also probes backend
 health/config, checks frontend `runtime-config.json`, and inspects Compose

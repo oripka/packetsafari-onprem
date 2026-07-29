@@ -39,10 +39,12 @@ SAAS_REQUIRED_ENV_KEYS = [
 ]
 IRONPROXY_UPSTREAM_SECRET_KEYS = {
     "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
     "PACKETSAFARI_PADDLE_API_KEY",
 }
 IRONPROXY_PLACEHOLDER_VALUES = {
     "OPENAI_API_KEY": "ps_proxy_openai_api_key",
+    "OPENROUTER_API_KEY": "ps_proxy_openrouter_api_key",
     "PACKETSAFARI_PADDLE_API_KEY": "ps_proxy_paddle_api_key",
 }
 INVALID_REQUIRED_ENV_VALUES = {
@@ -54,6 +56,7 @@ INVALID_REQUIRED_ENV_VALUES = {
     "example",
     "example-secret",
     "ps_proxy_openai_api_key",
+    "ps_proxy_openrouter_api_key",
     "ps_proxy_paddle_api_key",
 }
 BACKUP_MODES = {"inline", "require-recent", "skip"}
@@ -2035,7 +2038,7 @@ def configure_required_env(args) -> dict:
             header_lines=[
                 "# Managed by PacketSafari ops.",
                 "# Generated/updated by packetsafari-ops config prompt-env.",
-                "# Upstream OpenAI/Paddle API secrets are stored in ironproxy.env.",
+                "# Upstream OpenAI/OpenRouter/Paddle API secrets are stored in ironproxy.env.",
             ],
         )
         write_env_file(
