@@ -98,8 +98,8 @@ services:
       - "{{ runtime_env_path }}"
     environment:
       PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
-      PACKETSAFARI_STORAGE_SUBDIRS: "upload upload/archive colorrules temporary avatars uploadchunk capture-agent anoncap agent-visual-reports admin intelligence intelligence/ja4 intelligence/suricata intelligence/suricata/rules intelligence/suricata/update intelligence/zeek intelligence/zeek/intel runtime logs analysis analysis/runtime analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets onprem onprem/state onprem/env onprem/secrets"
-      PACKETSAFARI_STORAGE_REPAIR_SUBDIRS: "uploadchunk upload/archive capture-agent anoncap agent-visual-reports analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets"
+      PACKETSAFARI_STORAGE_SUBDIRS: "upload upload/archive colorrules temporary avatars uploadchunk capture-agent anoncap agent-visual-reports admin intelligence intelligence/ja4 intelligence/suricata intelligence/suricata/rules intelligence/suricata/update intelligence/zeek intelligence/zeek/intel runtime runtime/sharkd-ids-cache logs analysis analysis/runtime analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets onprem onprem/state onprem/env onprem/secrets"
+      PACKETSAFARI_STORAGE_REPAIR_SUBDIRS: "uploadchunk upload/archive capture-agent anoncap agent-visual-reports runtime/sharkd-ids-cache analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets"
     command:
       - /bin/bash
       - -lc
@@ -135,6 +135,7 @@ services:
       PACKETSAFARI_CAPTURE_SHARKD_HOST: sharkd
       PACKETSAFARI_CAPTURE_SHARKD_PORT: "4448"
       PACKETSAFARI_CAPTURE_SHARKD_PROTOCOL: ws
+      SHARKD_IDS_SHARED_CACHE_DIR: /storage/runtime/sharkd-ids-cache
       PACKETSAFARI_SKIP_LEGACY_INDEX_BOOTSTRAP: "true"
       PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_HOST: redis
       PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PORT: "6379"
@@ -212,6 +213,7 @@ services:
       PACKETSAFARI_CAPTURE_SHARKD_HOST: sharkd
       PACKETSAFARI_CAPTURE_SHARKD_PORT: "4448"
       PACKETSAFARI_CAPTURE_SHARKD_PROTOCOL: ws
+      SHARKD_IDS_SHARED_CACHE_DIR: /storage/runtime/sharkd-ids-cache
       PACKETSAFARI_SKIP_LEGACY_INDEX_BOOTSTRAP: "true"
       PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_HOST: redis
       PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PORT: "6379"
@@ -394,6 +396,8 @@ services:
       - "{{ runtime_env_path }}"
     environment:
       SHARKD_JWT_SECRET: "${SHARKD_JWT_SECRET:?required}"
+      SHARKD_IDS_CACHE_DIR: /storage/runtime/sharkd-ids-cache
+      SHARKD_IDS_SHARED_CACHE_DIR: /storage/runtime/sharkd-ids-cache
     ports:
       - "4448:4448"
     healthcheck:

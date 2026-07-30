@@ -206,3 +206,51 @@ def test_onprem_backend_and_worker_share_persistent_codex_runtime(tmp_path):
         "PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex "
         'PACKETSAFARI_STORAGE_SUBDIRS="sqlite" PACKETSAFARI_STORAGE_REPAIR_SUBDIRS="." /usr/local/bin/setvolumepermissions.sh /'
     ) in rendered
+
+
+def test_onprem_services_share_persistent_bounded_ids_cache(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    output_path = tmp_path / "compose.yml"
+    template_path = Path(__file__).resolve().parents[1] / "templates" / "docker-compose.onprem.yml.tpl"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "images": {
+                    "frontend": "repo/frontend:1",
+                    "backend": "repo/backend:1",
+                    "worker": "repo/worker:1",
+                    "sharkd": "repo/sharkd:1",
+                    "egress-ironproxy": "repo/ironproxy:1",
+                    "egress-firewall": "repo/firewall:1",
+                    "egress-dns": "repo/dns:1",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert render_compose.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--template",
+            str(template_path),
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+
+    rendered = output_path.read_text(encoding="utf-8")
+    cache_path = "/storage/runtime/sharkd-ids-cache"
+    storage_init = rendered.split("\n  storage-init:", 1)[1].split("\n  backend:", 1)[0]
+    backend = rendered.split("\n  backend:", 1)[1].split("\n  worker:", 1)[0]
+    worker = rendered.split("\n  worker:", 1)[1].split("\n  postgres:", 1)[0]
+    sharkd = rendered.split("\n  sharkd:", 1)[1].split("\n  egress-dns:", 1)[0]
+
+    assert "runtime/sharkd-ids-cache" in storage_init
+    assert f"SHARKD_IDS_SHARED_CACHE_DIR: {cache_path}" in backend
+    assert f"SHARKD_IDS_SHARED_CACHE_DIR: {cache_path}" in worker
+    assert f"SHARKD_IDS_CACHE_DIR: {cache_path}" in sharkd
+    assert f"SHARKD_IDS_SHARED_CACHE_DIR: {cache_path}" in sharkd
+    assert "packetsafari-storage:/storage" in backend
+    assert "packetsafari-storage:/storage" in worker
+    assert "packetsafari-storage:/storage" in sharkd
