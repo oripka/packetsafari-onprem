@@ -85,7 +85,8 @@
       "host": "www.openinfosecfoundation.org",
       "notes": "Suricata source index.",
       "owners": [
-        "sharkd"
+        "backend",
+        "worker"
       ],
       "port": 443,
       "purpose": "Security intelligence"
@@ -95,7 +96,41 @@
       "host": "sslbl.abuse.ch",
       "notes": "abuse.ch SSL blacklist.",
       "owners": [
-        "sharkd"
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "rules.emergingthreats.net",
+      "notes": "Emerging Threats Open Suricata rules.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "urlhaus.abuse.ch",
+      "notes": "Abuse.ch URLhaus Suricata rules.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "ti.stamus-networks.io",
+      "notes": "Opt-in Stamus Lateral Suricata rules and GPL materials.",
+      "owners": [
+        "backend",
+        "worker"
       ],
       "port": 443,
       "purpose": "Security intelligence"
@@ -105,7 +140,8 @@
       "dynamic_config": "INTELLIGENCE_*_SOURCE_URL hostnames",
       "notes": "Add concrete hosts from configured feed URLs before enforcement.",
       "owners": [
-        "sharkd"
+        "backend",
+        "worker"
       ],
       "purpose": "Security intelligence"
     },

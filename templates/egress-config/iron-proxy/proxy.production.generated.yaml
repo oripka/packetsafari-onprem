@@ -21,9 +21,12 @@ transforms:
         - "email.eu-central-1.amazonaws.com"
         - "oidc.external.test"
         - "openrouter.ai"
+        - "rules.emergingthreats.net"
         - "saml.external.test"
         - "sandbox-api.paddle.com"
         - "sslbl.abuse.ch"
+        - "ti.stamus-networks.io"
+        - "urlhaus.abuse.ch"
         - "www.openinfosecfoundation.org"
   - name: secrets
     config:
