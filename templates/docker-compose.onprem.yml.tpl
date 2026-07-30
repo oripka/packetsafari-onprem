@@ -398,6 +398,7 @@ services:
       SHARKD_JWT_SECRET: "${SHARKD_JWT_SECRET:?required}"
       SHARKD_IDS_CACHE_DIR: /storage/runtime/sharkd-ids-cache
       SHARKD_IDS_SHARED_CACHE_DIR: /storage/runtime/sharkd-ids-cache
+      SHARKD_IDS_ARTIFACT_ROOT: /storage/analysis/runtime/ids-alerts
     ports:
       - "4448:4448"
     healthcheck:
