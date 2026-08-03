@@ -182,6 +182,8 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
     assert 'CELERY_INDEX_CONCURRENCY:-auto' in rendered
     assert "  frontend:" in rendered
     assert "mem_limit:" not in rendered
+    assert '--save "3600 1 300 100 60 10000"' in rendered
+    assert "--save 20 1" not in rendered
 
 
 def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_path):

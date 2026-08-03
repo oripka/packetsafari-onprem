@@ -149,6 +149,8 @@ def test_rendered_onprem_compose_uses_journald_logging(tmp_path):
     assert "driver: journald" in rendered
     assert 'tag: "packetsafari/{{.Name}}/{{.ID}}"' in rendered
     assert rendered.count("logging: *packetsafari-journald-logging") >= 10
+    assert '--save "3600 1 300 100 60 10000"' in rendered
+    assert "--save 20 1" not in rendered
 
 
 def test_onprem_backend_and_worker_share_persistent_codex_runtime(tmp_path):

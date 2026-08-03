@@ -1475,7 +1475,7 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
     ]
     redis_command = [
         "    command: >-",
-        "      sh -ec 'REDIS_PASSWORD=\"$${REDIS_PASSWORD:-$${PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD:-$${PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD:-}}}\"; test -n \"$$REDIS_PASSWORD\"; exec /opt/redis-stack/bin/redis-server --dir /data --save 20 1 --loglevel warning --protected-mode no --requirepass \"$$REDIS_PASSWORD\" --maxmemory \"$${PACKETSAFARI_REDIS_MAXMEMORY:-1g}\" --maxmemory-policy allkeys-lru --loadmodule /opt/redis-stack/lib/rediscompat.so --loadmodule /opt/redis-stack/lib/redisearch.so MAXSEARCHRESULTS 10000 MAXAGGREGATERESULTS 10000 --loadmodule /opt/redis-stack/lib/rejson.so'",
+        "      sh -ec 'REDIS_PASSWORD=\"$${REDIS_PASSWORD:-$${PACKETSAFARI_RUNTIME_TASK_QUEUE_REDIS_PASSWORD:-$${PACKETSAFARI_RUNTIME_CACHE_REDIS_PASSWORD:-}}}\"; test -n \"$$REDIS_PASSWORD\"; exec /opt/redis-stack/bin/redis-server --dir /data --save \"3600 1 300 100 60 10000\" --loglevel warning --protected-mode no --requirepass \"$$REDIS_PASSWORD\" --maxmemory \"$${PACKETSAFARI_REDIS_MAXMEMORY:-1g}\" --maxmemory-policy allkeys-lru --loadmodule /opt/redis-stack/lib/rediscompat.so --loadmodule /opt/redis-stack/lib/redisearch.so MAXSEARCHRESULTS 10000 MAXAGGREGATERESULTS 10000 --loadmodule /opt/redis-stack/lib/rejson.so'",
     ]
 
     lines = [
