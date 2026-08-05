@@ -2690,11 +2690,12 @@ def _present_compose_services(layout: RuntimeLayout, services: list[str] | None)
 
 def docker_compose_stop(layout: RuntimeLayout, *, services: list[str] | None = None, timeout: int = 120) -> None:
     services = _present_compose_services(layout, services)
+    cwd: Path | None = None
     if layout.kind == "local-data-root":
         repo_root = app_repo_root()
         if repo_root is None:
             raise RuntimeError("Unable to locate the PacketSafari app repo for local dev compose operations.")
-        command = [
+        compose_command = [
             "docker",
             "compose",
             "--env-file",
@@ -2703,24 +2704,27 @@ def docker_compose_stop(layout: RuntimeLayout, *, services: list[str] | None = N
             "production",
             "-f",
             str(repo_root / "docker-compose-dev.yml"),
-            "stop",
-            "-t",
-            str(timeout),
         ]
-        if services:
-            command.extend(services)
-        subprocess.run(command, check=True, cwd=repo_root)
-        return
-    command = [*_compose_base_command(layout), "stop", "-t", str(timeout)]
+        cwd = repo_root
+    else:
+        compose_command = _compose_base_command(layout)
+
+    # Do not pass `docker compose stop -t` here. That option overrides each
+    # service's stop_grace_period, which made a non-responsive sharkd delay an
+    # upgrade for the full 120-second host watchdog instead of its configured
+    # five seconds. Keep `timeout` solely as a guard against Compose or Docker
+    # itself hanging; normal container termination follows the rendered
+    # service-specific grace periods.
+    command = [*compose_command, "stop"]
     if services:
         command.extend(services)
     try:
-        subprocess.run(command, check=True, timeout=timeout + 30)
+        subprocess.run(command, check=True, timeout=timeout, cwd=cwd)
     except subprocess.TimeoutExpired:
-        kill_command = [*_compose_base_command(layout), "kill"]
+        kill_command = [*compose_command, "kill"]
         if services:
             kill_command.extend(services)
-        subprocess.run(kill_command, check=True)
+        subprocess.run(kill_command, check=True, cwd=cwd)
 
 
 def docker_compose_run(

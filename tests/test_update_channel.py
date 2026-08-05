@@ -61,6 +61,48 @@ def test_ensure_journald_retention_config_writes_bounded_policy(tmp_path, monkey
     assert calls == []
 
 
+def test_docker_compose_stop_preserves_service_grace_periods(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.compose_file.write_text("services:\n  sharkd:\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+
+    monkeypatch.setattr(operations.subprocess, "run", fake_run)
+
+    operations.docker_compose_stop(layout, services=["sharkd"], timeout=120)
+
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[-2:] == ["stop", "sharkd"]
+    assert "-t" not in command
+    assert kwargs == {"check": True, "timeout": 120, "cwd": None}
+
+
+def test_docker_compose_stop_kills_services_after_host_watchdog(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.compose_file.write_text("services:\n  sharkd:\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+        if command[-2:] == ["stop", "sharkd"]:
+            raise operations.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(operations.subprocess, "run", fake_run)
+
+    operations.docker_compose_stop(layout, services=["sharkd"], timeout=120)
+
+    assert [command[-2:] for command, _ in calls] == [
+        ["stop", "sharkd"],
+        ["kill", "sharkd"],
+    ]
+    assert calls[1][1] == {"check": True, "cwd": None}
+
+
 def test_materialize_source_copies_s3_with_aws_cli(monkeypatch, tmp_path):
     calls: list[list[str]] = []
 

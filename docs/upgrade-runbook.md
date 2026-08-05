@@ -386,8 +386,10 @@ tar -tf "$latest/storage.tar" | grep -E '(^|/)onprem(/|$)' && echo "invalid back
 ```
 
 If `docker compose stop` hangs on a service, `packetsafari-ops` enforces a
-host-side timeout and falls back to `docker compose kill` for the requested
-services before continuing rollback or upgrade.
+120-second host-side watchdog and falls back to `docker compose kill` for the
+requested services before continuing rollback or upgrade. Normal container
+shutdown uses each rendered service's `stop_grace_period`; the watchdog does
+not override those service-specific grace periods.
 
 ## Current Validation Status
 
