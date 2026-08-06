@@ -80,6 +80,7 @@ def required_onprem_env(app_root: Path) -> list[str]:
     fallback = [
         "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
         "REDIS_PASSWORD",
+        "AI_AGENT_STREAM_TICKET_SECRET",
         "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
     ]
     if not registry_path.exists():

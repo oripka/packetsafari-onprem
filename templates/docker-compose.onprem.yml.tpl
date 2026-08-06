@@ -82,6 +82,8 @@ services:
     depends_on:
       backend:
         condition: service_started
+      agent-stream-gateway:
+        condition: service_healthy
       sharkd:
         condition: service_started
     networks:
@@ -120,6 +122,58 @@ services:
     dns:
       - 172.20.0.3
 
+  agent-stream-gateway:
+    image: "{{ backend_image }}"
+    container_name: packetsafari-agent-stream-gateway
+    user: backendu
+    init: true
+    restart: always
+    stop_grace_period: 40s
+    logging: *packetsafari-journald-logging
+    env_file:
+      - "{{ runtime_env_path }}"
+    environment:
+      PYTHONPATH: /app
+      PACKETSAFARI_RUNTIME_ROLE: agent_stream_gateway
+      PACKETSAFARI_SKIP_SERVICE_INIT: "true"
+      PACKETSAFARI_RUNTIME_CACHE_REDIS_HOST: redis
+      PACKETSAFARI_RUNTIME_CACHE_REDIS_PORT: "6379"
+      PACKETSAFARI_RUNTIME_CACHE_REDIS_DB: "0"
+      AI_AGENT_STREAM_TICKET_SECRET: "${AI_AGENT_STREAM_TICKET_SECRET:?required}"
+      AI_AGENT_STREAM_TICKET_TTL_SECONDS: "${AI_AGENT_STREAM_TICKET_TTL_SECONDS:-30}"
+    command:
+      - uvicorn
+      - packetsafari.agent_stream_gateway:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8091"
+      - --workers
+      - "1"
+      - --timeout-graceful-shutdown
+      - "30"
+      - --no-access-log
+    expose:
+      - "8091"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import http.client,sys; c=http.client.HTTPConnection('127.0.0.1',8091,timeout=3); c.request('GET','/healthz'); r=c.getresponse(); r.read(1024); sys.exit(0 if 200 <= r.status < 300 else 1)\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      redis:
+        condition: service_started
+    networks:
+      packetsafari:
+        ipv4_address: 172.20.0.22
+    dns:
+      - 172.20.0.3
+
   backend:
     image: "{{ backend_image }}"
     container_name: packetsafari-backend
@@ -144,6 +198,9 @@ services:
       PACKETSAFARI_RUNTIME_CACHE_REDIS_PORT: "6379"
       PACKETSAFARI_RUNTIME_CACHE_REDIS_DB: "0"
       PACKETSAFARI_RUNTIME_CHECKPOINT_REDIS_DB: "0"
+      AI_AGENT_STREAM_GATEWAY_INTERNAL_URL: "${AI_AGENT_STREAM_GATEWAY_INTERNAL_URL:-http://agent-stream-gateway:8091}"
+      AI_AGENT_STREAM_TICKET_SECRET: "${AI_AGENT_STREAM_TICKET_SECRET:?required}"
+      AI_AGENT_STREAM_TICKET_TTL_SECONDS: "${AI_AGENT_STREAM_TICKET_TTL_SECONDS:-30}"
       APP_BASE_URL: "${APP_BASE_URL:-https://packetsafari.com}"
       NEWSLETTER_FROM_EMAIL: "${NEWSLETTER_FROM_EMAIL:-contact@packetsafari.com}"
       NEWSLETTER_FROM_NAME: "${NEWSLETTER_FROM_NAME:-PacketSafari}"
@@ -153,7 +210,7 @@ services:
       PACKETSAFARI_EGRESS_PROXY_URL: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTP_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTPS_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
-      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,agent-stream-gateway,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       SSL_CERT_FILE: /etc/packetsafari/egress-proxy/ca.crt
       REQUESTS_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
       CURL_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
@@ -193,6 +250,8 @@ services:
         condition: service_healthy
       egress-firewall:
         condition: service_started
+      agent-stream-gateway:
+        condition: service_healthy
     networks:
       packetsafari:
         ipv4_address: 172.20.0.20
@@ -235,7 +294,7 @@ services:
       PACKETSAFARI_EGRESS_PROXY_URL: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTP_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTPS_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
-      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,agent-stream-gateway,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       SSL_CERT_FILE: /etc/packetsafari/egress-proxy/ca.crt
       REQUESTS_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
       CURL_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt

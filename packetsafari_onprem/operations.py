@@ -69,6 +69,9 @@ RECOMMENDED_SMALL_HOST_VCPUS = 4
 RECOMMENDED_SMALL_HOST_MEMORY_BYTES = 16 * GIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
 DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS = 2
+AUTO_GENERATED_UPGRADE_ENV_KEYS = frozenset({
+    "AI_AGENT_STREAM_TICKET_SECRET",
+})
 
 DEFAULT_LOGGING_VALUES = {
     "AUDIT_LOG_ENABLED": "true",
@@ -1883,6 +1886,7 @@ def _generated_env_default(key: str) -> str:
     upper = key.upper()
     if upper in {
         "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
+        "AI_AGENT_STREAM_TICKET_SECRET",
         "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
         "REDIS_PASSWORD",
         "PACKETSAFARI_RUNTIME_REDIS_PASSWORD",
@@ -1959,6 +1963,43 @@ def _generated_env_default_for_values(key: str, values: dict[str, str]) -> str:
     if upper == "PACKETSAFARI_RUNTIME_POSTGRES_URL":
         return _postgres_url_default(values)
     return _generated_env_default(key)
+
+
+def ensure_generated_upgrade_env(
+    layout: RuntimeLayout,
+    manifest: dict,
+    *,
+    profile: str,
+) -> list[str]:
+    """Backfill safe internal secrets required by a newer release.
+
+    Existing valid values are never rotated. Only explicitly allowlisted,
+    PacketSafari-internal values may be generated during a non-interactive
+    upgrade; customer credentials continue to require operator input.
+    """
+
+    required = set(_merged_required_env_keys(manifest, profile=profile))
+    values = parse_env_file(layout.runtime_env_path)
+    generated: list[str] = []
+    for key in sorted(AUTO_GENERATED_UPGRADE_ENV_KEYS & required):
+        if _required_env_value_is_valid(key, str(values.get(key, ""))):
+            continue
+        generated_value = _generated_env_default_for_values(key, values)
+        if not _required_env_value_is_valid(key, generated_value):
+            raise RuntimeError(f"Unable to generate required internal runtime value: {key}")
+        values[key] = generated_value
+        generated.append(key)
+
+    if generated:
+        write_env_file(
+            layout.runtime_env_path,
+            values,
+            header_lines=[
+                "# Managed by PacketSafari ops.",
+                "# Missing internal secrets may be generated during upgrades; existing values are preserved.",
+            ],
+        )
+    return generated
 
 
 def configure_required_env(args) -> dict:
@@ -2829,6 +2870,7 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
     postgres_password = secrets.token_urlsafe(32)
     redis_password = secrets.token_urlsafe(32)
     jwt_secret = secrets.token_urlsafe(64)
+    agent_stream_ticket_secret = secrets.token_urlsafe(64)
     sharkd_secret = secrets.token_urlsafe(64)
     lines = [
         "# Managed by PacketSafari on-prem Python operations.",
@@ -2874,6 +2916,9 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         'NUXT_PUBLIC_API_BASE="/api/v2/"',
         'NUXT_PUBLIC_SHARKD_WS_URL=""',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
+        f"AI_AGENT_STREAM_TICKET_SECRET={quote_env_value(agent_stream_ticket_secret)}",
+        'AI_AGENT_STREAM_GATEWAY_INTERNAL_URL="http://agent-stream-gateway:8091"',
+        'AI_AGENT_STREAM_TICKET_TTL_SECONDS="30"',
         f"PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET={quote_env_value(sharkd_secret)}",
         f"SHARKD_JWT_SECRET={quote_env_value(sharkd_secret)}",
     ]
@@ -3943,6 +3988,7 @@ def upgrade_release(args) -> dict:
         source = "bundle" if getattr(args, "bundle", None) else "manifest"
         snapshot_dir: Path | None = None
         phase = "preflight"
+        generated_runtime_env_keys: list[str] = []
         try:
             if source == "bundle":
                 target_manifest_path = prepare_offline_bundle(layout, args)
@@ -3962,6 +4008,19 @@ def upgrade_release(args) -> dict:
                 verify_license_allows_release(layout, manifest)
             else:
                 verify_saas_operator_authorization(layout, args, manifest)
+            generated_runtime_env_keys = ensure_generated_upgrade_env(
+                layout,
+                manifest,
+                profile=profile,
+            )
+            if generated_runtime_env_keys:
+                generated_names = ", ".join(generated_runtime_env_keys)
+                message = (
+                    "Generated missing managed internal runtime secret(s): "
+                    f"{generated_names}. Existing values were preserved; secret values were not logged."
+                )
+                print(f"PacketSafari update: {message}", file=sys.stderr)
+                write_helper_status(layout, status="upgrading", message=message)
             validate_required_env(layout, manifest, profile=profile)
             external_backup_proof = None
             if backup_mode == "require-recent":
@@ -4046,6 +4105,7 @@ def upgrade_release(args) -> dict:
             result = _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
             result["hostRequirements"] = host_requirements
             result["sizingStatus"] = sizing_status
+            result["generatedRuntimeEnvKeys"] = generated_runtime_env_keys
             return result
         except Exception as exc:
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")
