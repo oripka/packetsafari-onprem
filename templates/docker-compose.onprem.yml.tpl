@@ -319,7 +319,7 @@ services:
           --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
           --without-gossip --without-mingle \
           --concurrency="$${CELERY_AICHAT_CONCURRENCY:-2}" \
-          --queues=aichat,aichat_priority \
+          --queues=aichat \
           --hostname=aichat@%h &
         AICHAT_PID=$$!
         PIDS+=("$$AICHAT_PID")
@@ -337,7 +337,7 @@ services:
           --pool=threads \
           --without-gossip --without-mingle \
           --concurrency="$${CELERY_INDEX_CONCURRENCY:-auto}" \
-          --queues=index,index_priority \
+          --queues=index \
           --hostname=index@%h &
         INDEX_PID=$$!
         PIDS+=("$$INDEX_PID")
