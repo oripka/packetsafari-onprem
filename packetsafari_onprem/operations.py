@@ -3717,6 +3717,56 @@ def wait_for_health(*, url: str = "http://127.0.0.1:8080/api/v2/health", timeout
     raise RuntimeError(f"Health check failed at {url}: {last_error}")
 
 
+def _agent_stream_gateway_probe(layout: RuntimeLayout) -> dict[str, object]:
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+    probe = """
+import json
+import urllib.request
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8091/healthz", timeout=3) as response:
+        response.read(1024)
+        print(json.dumps({"ok": 200 <= response.status < 300, "status": response.status}))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    raise
+"""
+    result = subprocess.run(
+        [*_compose_base_command(layout), "exec", "-T", "agent-stream-gateway", "python3", "-c", probe],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = result.stdout.strip().splitlines()
+    payload: dict[str, object] = {}
+    if output:
+        try:
+            parsed = json.loads(output[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "error": str(payload.get("error") or result.stderr.strip() or "gateway_health_failed"),
+        }
+    return payload or {"ok": False, "error": "gateway_health_missing_result"}
+
+
+def wait_for_agent_stream_gateway(layout: RuntimeLayout, *, timeout_seconds: int = 180) -> None:
+    deadline = time.time() + timeout_seconds
+    last_error = ""
+    while time.time() < deadline:
+        result = _agent_stream_gateway_probe(layout)
+        if result.get("ok"):
+            return
+        last_error = str(result.get("error") or result.get("status") or "not ready")
+        time.sleep(5)
+    raise RuntimeError(f"Agent stream gateway health check failed: {last_error}")
+
+
 def _http_probe(url: str, *, timeout: int = 8) -> dict[str, object]:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -3894,6 +3944,9 @@ def doctor_deployment(args) -> dict:
 
     compose = _compose_service_status(layout)
     add_check("compose_services", bool(compose.get("ok")), **compose)
+
+    gateway = _agent_stream_gateway_probe(layout)
+    add_check("agent_stream_gateway", bool(gateway.get("ok")), **gateway)
 
     sharkd = _backend_sharkd_probe(layout)
     add_check("backend_sharkd", bool(sharkd.get("ok")), **sharkd)
@@ -4096,7 +4149,9 @@ def upgrade_release(args) -> dict:
             docker_compose_up(layout, pull_policy="never")
             maybe_fail_upgrade_simulation(layout, args, "healthcheck")
             if not bool(getattr(args, "skip_health_check", False)):
-                wait_for_health(timeout_seconds=int(getattr(args, "health_timeout", 180) or 180))
+                health_timeout = int(getattr(args, "health_timeout", 180) or 180)
+                wait_for_health(timeout_seconds=health_timeout)
+                wait_for_agent_stream_gateway(layout, timeout_seconds=health_timeout)
                 if profile == "saas":
                     assert_doctor_ok(args)
 
