@@ -2361,7 +2361,7 @@ def _docker_image_id(ref: str) -> str:
 
 
 def _docker_container_image_ids() -> set[str]:
-    ps = _run_text(["docker", "ps", "-q"])
+    ps = _run_text(["docker", "ps", "-aq"])
     if ps.returncode != 0:
         return set()
     container_ids = [line.strip() for line in ps.stdout.splitlines() if line.strip()]
@@ -2440,7 +2440,8 @@ def _protected_image_ids(layout: RuntimeLayout, *, keep_deployments: int) -> tup
     history = ((state.get("imageRetention") or {}).get("history") or []) if isinstance(state, dict) else []
     if not isinstance(history, list):
         history = []
-    retained_history = [item for item in history if isinstance(item, dict)][-max(0, int(keep_deployments)) :]
+    history_keep = max(0, int(keep_deployments)) + 1
+    retained_history = [item for item in history if isinstance(item, dict)][-history_keep:]
     for item in retained_history:
         images = item.get("images") if isinstance(item.get("images"), dict) else {}
         for image in images.values():
@@ -2464,11 +2465,43 @@ def _parse_docker_size(value: object) -> int:
     return int(amount * multiplier)
 
 
-def _dangling_docker_images() -> list[dict[str, object]]:
-    result = _run_text(["docker", "image", "ls", "--no-trunc", "--filter", "dangling=true", "--format", "{{json .}}"])
+def _image_repository(ref: object) -> str:
+    value = str(ref or "").strip()
+    if not value or value == "<none>":
+        return ""
+    value = value.split("@", 1)[0]
+    slash = value.rfind("/")
+    colon = value.rfind(":")
+    if colon > slash:
+        value = value[:colon]
+    return value
+
+
+def _managed_docker_repositories(layout: RuntimeLayout) -> set[str]:
+    refs = set(_active_image_refs(layout))
+    state = _read_json(layout.deployment_state_path, {})
+    history = ((state.get("imageRetention") or {}).get("history") or []) if isinstance(state, dict) else []
+    if isinstance(history, list):
+        for entry in history:
+            images = entry.get("images") if isinstance(entry, dict) else {}
+            if not isinstance(images, dict):
+                continue
+            for image in images.values():
+                if isinstance(image, dict):
+                    ref = str(image.get("ref") or "").strip()
+                    if ref:
+                        refs.add(ref)
+    return {repository for ref in refs if (repository := _image_repository(ref))}
+
+
+def _managed_docker_images(layout: RuntimeLayout) -> list[dict[str, object]]:
+    repositories = _managed_docker_repositories(layout)
+    if not repositories:
+        return []
+    result = _run_text(["docker", "image", "ls", "--no-trunc", "--digests", "--format", "{{json .}}"])
     if result.returncode != 0:
         return []
-    rows: list[dict[str, object]] = []
+    rows_by_id: dict[str, dict[str, object]] = {}
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -2480,20 +2513,103 @@ def _dangling_docker_images() -> list[dict[str, object]]:
         if not isinstance(parsed, dict):
             continue
         image_id = str(parsed.get("ID") or "").strip()
-        if not image_id:
+        repository = _image_repository(parsed.get("Repository"))
+        if not image_id or repository not in repositories:
             continue
-        rows.append(
+        row = rows_by_id.setdefault(
+            image_id,
             {
                 "id": image_id,
-                "repository": str(parsed.get("Repository") or ""),
-                "tag": str(parsed.get("Tag") or ""),
+                "repositories": [],
+                "tags": [],
+                "digests": [],
                 "createdAt": str(parsed.get("CreatedAt") or ""),
                 "createdSince": str(parsed.get("CreatedSince") or ""),
                 "size": str(parsed.get("Size") or ""),
                 "sizeBytes": _parse_docker_size(parsed.get("Size")),
-            }
+            },
         )
-    return rows
+        for key, value in (
+            ("repositories", repository),
+            ("tags", str(parsed.get("Tag") or "")),
+            ("digests", str(parsed.get("Digest") or "")),
+        ):
+            values = row[key]
+            if isinstance(values, list) and value and value != "<none>" and value not in values:
+                values.append(value)
+    return list(rows_by_id.values())
+
+
+def _docker_all_image_ids() -> set[str]:
+    result = _run_text(["docker", "image", "ls", "-aq", "--no-trunc"])
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _docker_layer_reclaim_estimate(candidate_ids: set[str], retained_ids: set[str]) -> dict[str, object]:
+    if not candidate_ids:
+        return {"status": "exact", "method": "overlay2-layerdb", "bytes": 0, "size": _format_bytes(0)}
+    all_ids = sorted(candidate_ids | retained_ids)
+    inspect = _run_text(["docker", "image", "inspect", *all_ids])
+    info = _run_text(["docker", "info", "--format", "{{json .}}"])
+    if inspect.returncode != 0 or info.returncode != 0:
+        return {"status": "unavailable", "method": "docker-inspect", "bytes": None, "size": "unknown"}
+    try:
+        images = json.loads(inspect.stdout)
+        docker_info = json.loads(info.stdout)
+    except json.JSONDecodeError:
+        return {"status": "unavailable", "method": "docker-inspect", "bytes": None, "size": "unknown"}
+    if str(docker_info.get("Driver") or "") != "overlay2":
+        return {
+            "status": "unavailable",
+            "method": str(docker_info.get("Driver") or "unknown"),
+            "bytes": None,
+            "size": "unknown",
+        }
+
+    candidate_layers: set[str] = set()
+    retained_layers: set[str] = set()
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        image_id = str(image.get("Id") or "")
+        layers = {
+            str(value or "").strip()
+            for value in ((image.get("RootFS") or {}).get("Layers") or [])
+            if str(value or "").strip()
+        }
+        if image_id in candidate_ids:
+            candidate_layers.update(layers)
+        else:
+            retained_layers.update(layers)
+
+    docker_root = Path(str(docker_info.get("DockerRootDir") or "/var/lib/docker"))
+    layerdb = docker_root / "image" / "overlay2" / "layerdb" / "sha256"
+    sizes: dict[str, int] = {}
+    try:
+        for entry in layerdb.iterdir():
+            diff_path = entry / "diff"
+            size_path = entry / "size"
+            if not diff_path.is_file() or not size_path.is_file():
+                continue
+            diff_id = diff_path.read_text(encoding="utf-8").strip()
+            sizes[diff_id] = max(0, int(size_path.read_text(encoding="utf-8").strip() or 0))
+    except (OSError, ValueError):
+        return {"status": "unavailable", "method": "overlay2-layerdb", "bytes": None, "size": "unknown"}
+
+    reclaimable_layers = candidate_layers - retained_layers
+    unknown_layers = sorted(reclaimable_layers - sizes.keys())
+    reclaimable_bytes = sum(sizes.get(layer, 0) for layer in reclaimable_layers)
+    return {
+        "status": "exact" if not unknown_layers else "partial",
+        "method": "overlay2-layerdb",
+        "bytes": reclaimable_bytes,
+        "size": _format_bytes(reclaimable_bytes),
+        "candidateLayerCount": len(candidate_layers),
+        "reclaimableLayerCount": len(reclaimable_layers),
+        "unknownLayerCount": len(unknown_layers),
+    }
 
 
 def docker_image_retention_health(layout: RuntimeLayout, *, keep_deployments: int = DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS) -> dict[str, object]:
@@ -2501,26 +2617,33 @@ def docker_image_retention_health(layout: RuntimeLayout, *, keep_deployments: in
         return {"ok": True, "skipped": True, "reason": "docker_missing", "candidates": []}
     keep = max(0, int(keep_deployments))
     protected, recorded_deployments = _protected_image_ids(layout, keep_deployments=keep)
-    dangling = _dangling_docker_images()
-    candidates = [row for row in dangling if str(row.get("id") or "") not in protected]
-    total_bytes = sum(int(row.get("sizeBytes") or 0) for row in candidates)
+    managed = _managed_docker_images(layout)
+    candidates = [row for row in managed if str(row.get("id") or "") not in protected]
+    candidate_ids = {str(row.get("id") or "") for row in candidates if str(row.get("id") or "")}
+    all_image_ids = _docker_all_image_ids() or set(protected)
+    reclaim = _docker_layer_reclaim_estimate(candidate_ids, all_image_ids - candidate_ids)
+    virtual_bytes = sum(int(row.get("sizeBytes") or 0) for row in candidates)
+    reclaim_bytes = reclaim.get("bytes") if isinstance(reclaim.get("bytes"), int) else None
     safe_to_prune = recorded_deployments >= keep + 1
     return {
         "ok": not candidates,
-        "danglingCount": len(dangling),
+        "managedImageCount": len(managed),
         "candidateCount": len(candidates),
-        "candidateBytes": total_bytes,
-        "candidateSize": _format_bytes(total_bytes),
+        "candidateBytes": reclaim_bytes,
+        "candidateSize": reclaim.get("size") or "unknown",
+        "candidateVirtualBytes": virtual_bytes,
+        "candidateVirtualSize": _format_bytes(virtual_bytes),
+        "reclaimEstimate": reclaim,
         "keepDeployments": keep,
         "recordedDeployments": recorded_deployments,
         "safeToPrune": safe_to_prune,
         "message": (
-            f"{len(candidates)} old dangling Docker images can be removed while keeping the current plus last {keep} recorded deployments."
+            f"{len(candidates)} unprotected PacketSafari images can be removed while keeping the current plus last {keep} recorded deployments."
             if candidates and safe_to_prune
             else (
-                f"{len(candidates)} dangling Docker images were found, but packetsafari-ops has only {recorded_deployments} recorded deployment image sets; recording more upgrades before automatic pruning is safer."
+                f"{len(candidates)} unprotected PacketSafari images were found, but packetsafari-ops has only {recorded_deployments} recorded deployment image sets; recording more upgrades before automatic pruning is safer."
                 if candidates
-                else "No old dangling Docker images need cleanup."
+                else "No unprotected PacketSafari images need cleanup."
             )
         ),
         "candidateIds": [str(row.get("id") or "") for row in candidates if str(row.get("id") or "")],
@@ -2561,13 +2684,13 @@ def maybe_offer_docker_image_prune(args, layout: RuntimeLayout) -> dict[str, obj
         return health
     print("", file=sys.stderr)
     print("PacketSafari image cleanup opportunity:", file=sys.stderr)
-    print(f"  {health.get('candidateCount')} old dangling Docker images ({health.get('candidateSize')}) are outside the current + last {keep} deployment keep set.", file=sys.stderr)
+    print(f"  {health.get('candidateCount')} unprotected PacketSafari images ({health.get('candidateSize')} estimated reclaim) are outside the current + last {keep} deployment keep set.", file=sys.stderr)
     print("  These images are not used by running containers and can usually be removed after a healthy update.", file=sys.stderr)
     print("  To run without prompting next time, pass --prune-old-images; to only report, press Enter or answer no.", file=sys.stderr)
     if not sys.stdin.isatty():
         print("  Non-interactive shell detected; leaving images in place.", file=sys.stderr)
         return health
-    answer = input("Remove old dangling PacketSafari images now? [y/N]: ").strip().lower()
+    answer = input("Remove old unprotected PacketSafari images now? [y/N]: ").strip().lower()
     if answer in {"y", "yes"}:
         return prune_old_docker_images(layout, keep_deployments=keep)
     return {"status": "skipped", **health}

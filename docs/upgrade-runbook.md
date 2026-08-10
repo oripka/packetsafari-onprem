@@ -145,8 +145,12 @@ image retention guidance. Successful upgrades record the image ids for each
 deployed release. Cleanup then protects the current deployment plus the last two
 recorded deployment image sets by default.
 
-After `packetsafari-ops update` succeeds, the tool reports old dangling Docker
-images when enough deployment image history exists. In an interactive shell it
+After `packetsafari-ops update` succeeds, the tool reports PacketSafari-managed
+images outside the running-container and current-plus-two-deployment keep set.
+This includes digest-associated images that Docker does not label as dangling.
+On overlay2 hosts, the report calculates reclaimable bytes from the exact layer
+references and Docker layer database instead of summing virtual image sizes.
+In an interactive shell it
 asks whether to remove them; pressing Enter keeps them. Scheduled or
 non-interactive updates never remove images unless `--prune-old-images` is
 passed explicitly.

@@ -136,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     healthcheck.add_argument("--api-base-url")
     healthcheck.add_argument("--json", action="store_true")
     healthcheck.add_argument("--image-retention-keep", type=int, default=2, help="Recorded previous deployment image sets to keep.")
-    healthcheck.add_argument("--prune-old-images", action="store_true", help="Remove safe old dangling images without prompting.")
+    healthcheck.add_argument("--prune-old-images", action="store_true", help="Remove unprotected PacketSafari images without prompting.")
     healthcheck.add_argument("--skip-image-retention-check", action="store_true")
 
     upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest or offline bundle.")
@@ -252,7 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--skip-health-check", action="store_true")
     update.add_argument("--skip-image-pull", action="store_true")
     update.add_argument("--image-retention-keep", type=int, default=2, help="Recorded previous deployment image sets to keep before offering image cleanup.")
-    update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove safe old dangling images without prompting.")
+    update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove unprotected PacketSafari images without prompting.")
     update.add_argument("--skip-image-retention-check", action="store_true")
     update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
     update.add_argument(

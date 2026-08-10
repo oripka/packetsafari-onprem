@@ -282,11 +282,17 @@ def test_image_retention_blocks_prune_until_history_has_keep_set(monkeypatch, tm
     monkeypatch.setattr(operations, "_docker_image_id", lambda ref: "sha256:current" if ref == "repo/backend:3" else "")
     monkeypatch.setattr(
         operations,
-        "_dangling_docker_images",
+        "_managed_docker_images",
         lambda: [
             {"id": "sha256:old", "sizeBytes": 1_500_000_000, "size": "1.5GB", "createdSince": "2 weeks ago"},
         ],
     )
+    monkeypatch.setattr(
+        operations,
+        "_docker_layer_reclaim_estimate",
+        lambda candidate_ids, retained_ids: {"status": "exact", "method": "test", "bytes": 1_500_000_000, "size": "1.5 GB"},
+    )
+    monkeypatch.setattr(operations, "_docker_all_image_ids", lambda: {"sha256:current", "sha256:old"})
 
     health = operations.docker_image_retention_health(layout, keep_deployments=2)
 
@@ -295,7 +301,7 @@ def test_image_retention_blocks_prune_until_history_has_keep_set(monkeypatch, tm
     assert health["recordedDeployments"] == 1
 
 
-def test_image_retention_prunes_only_unprotected_dangling_images(monkeypatch, tmp_path):
+def test_image_retention_prunes_only_unprotected_managed_images(monkeypatch, tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     layout.state_dir.mkdir(parents=True)
     layout.compose_dir.mkdir(parents=True)
@@ -325,11 +331,21 @@ def test_image_retention_prunes_only_unprotected_dangling_images(monkeypatch, tm
     monkeypatch.setattr(operations, "_docker_image_id", lambda ref: "sha256:current" if ref == "repo/backend:3" else "")
     monkeypatch.setattr(
         operations,
-        "_dangling_docker_images",
+        "_managed_docker_images",
         lambda: [
             {"id": "sha256:previous", "sizeBytes": 500_000_000, "size": "500MB"},
             {"id": "sha256:old-unused", "sizeBytes": 700_000_000, "size": "700MB"},
         ],
+    )
+    monkeypatch.setattr(
+        operations,
+        "_docker_layer_reclaim_estimate",
+        lambda candidate_ids, retained_ids: {"status": "exact", "method": "test", "bytes": 700_000_000, "size": "700.0 MB"},
+    )
+    monkeypatch.setattr(
+        operations,
+        "_docker_all_image_ids",
+        lambda: {"sha256:current", "sha256:previous", "sha256:old-unused"},
     )
 
     def fake_run(command, *, check=False):
