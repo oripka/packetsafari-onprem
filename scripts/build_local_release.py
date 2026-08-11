@@ -108,6 +108,10 @@ def git_value(app_root: Path, args: list[str]) -> str:
 def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_cache_bust: str) -> dict[str, str]:
     images: dict[str, str] = {}
     docker_env = {**os.environ, "DOCKER_BUILDKIT": os.environ.get("DOCKER_BUILDKIT", "1")}
+    prepare_args = [sys.executable, str(app_root / "scripts" / "prepare_wireshark_source.py")]
+    if os.getenv("WIRESHARK_SHA"):
+        prepare_args.extend(["--sha", str(os.environ["WIRESHARK_SHA"])])
+    wireshark_sha = capture(prepare_args, cwd=app_root)
     for service, target in APP_SERVICES.items():
         image = f"{IMAGE_REPOSITORY_PREFIX}/{service}:{version}"
         print(f"Building {service} image: {image}")
@@ -123,6 +127,8 @@ def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_c
                 "WIRESHARK_BUILD_REV=1",
                 "--build-arg",
                 f"WIRESHARK_CACHE_BUST={wireshark_cache_bust}",
+                "--build-arg",
+                f"WIRESHARK_SHA={wireshark_sha}",
                 "-t",
                 image,
                 ".",
@@ -184,6 +190,13 @@ def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str,
         },
         "images": images,
     }
+    wireshark_metadata_path = app_root / ".packetsafari-build" / "wireshark-source.json"
+    if wireshark_metadata_path.exists():
+        wireshark_metadata = json.loads(wireshark_metadata_path.read_text(encoding="utf-8"))
+        manifest["wiresharkSource"] = {
+            key: wireshark_metadata.get(key)
+            for key in ("sourceMode", "canonicalRef", "sha", "tree", "archiveSha256")
+        }
     path = output_dir / "release-manifest.json"
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
