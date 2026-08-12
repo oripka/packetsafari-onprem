@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -112,6 +113,13 @@ def build_app_images(app_root: Path, version: str, *, platform: str, wireshark_c
     if os.getenv("WIRESHARK_SHA"):
         prepare_args.extend(["--sha", str(os.environ["WIRESHARK_SHA"])])
     wireshark_sha = capture(prepare_args, cwd=app_root)
+    if os.getenv("KEEP_WIRESHARK_SOURCE_ARCHIVE") != "1":
+        atexit.register(
+            subprocess.run,
+            [sys.executable, str(app_root / "scripts" / "prepare_wireshark_source.py"), "--clean"],
+            cwd=app_root,
+            check=False,
+        )
     for service, target in APP_SERVICES.items():
         image = f"{IMAGE_REPOSITORY_PREFIX}/{service}:{version}"
         print(f"Building {service} image: {image}")
