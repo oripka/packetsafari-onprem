@@ -13,10 +13,14 @@ REQUIRED_LICENSE_CLAIMS = (
     ("schema_version", "schemaVersion"),
     ("agent_enabled", "agentEnabled"),
     ("max_users", "maxUsers"),
-    ("max_agent_runs_per_month", "maxAgentRunsPerMonth"),
     ("customer_id", "customerId"),
     ("deployment_id", "deploymentId", "licenseId"),
     ("support_tier", "supportTier"),
+)
+CANONICAL_AI_LIMIT_CLAIMS = (
+    ("max_analysis_runs_per_month", "maxAnalysisRunsPerMonth"),
+    ("max_quick_questions_per_month", "maxQuickQuestionsPerMonth"),
+    ("max_prompt_coach_requests_per_month", "maxPromptCoachRequestsPerMonth"),
 )
 
 
@@ -36,6 +40,17 @@ def _require_claims(payload: dict) -> None:
     if missing:
         raise SystemExit(f"License token is missing required claims: {', '.join(missing)}.")
 
+    has_canonical_ai_limits = any(
+        not _blank(_claim(payload, *names)) for names in CANONICAL_AI_LIMIT_CLAIMS
+    )
+    if has_canonical_ai_limits:
+        missing_ai_limits = [names[0] for names in CANONICAL_AI_LIMIT_CLAIMS if _blank(_claim(payload, *names))]
+    else:
+        legacy_analysis_limit = _claim(payload, "max_agent_runs_per_month", "maxAgentRunsPerMonth")
+        missing_ai_limits = [] if not _blank(legacy_analysis_limit) else ["max_analysis_runs_per_month"]
+    if missing_ai_limits:
+        raise SystemExit(f"License token is missing required claims: {', '.join(missing_ai_limits)}.")
+
     schema_version = _claim(payload, "schema_version", "schemaVersion")
     try:
         parsed_schema_version = int(schema_version)
@@ -44,10 +59,12 @@ def _require_claims(payload: dict) -> None:
     if parsed_schema_version != LICENSE_CLAIM_SCHEMA_VERSION:
         raise SystemExit(f"Unsupported license schema_version: {parsed_schema_version}.")
 
-    for key, aliases in {
-        "max_users": ("max_users", "maxUsers"),
-        "max_agent_runs_per_month": ("max_agent_runs_per_month", "maxAgentRunsPerMonth"),
-    }.items():
+    limit_claims = {"max_users": ("max_users", "maxUsers")}
+    if has_canonical_ai_limits:
+        limit_claims.update({names[0]: names for names in CANONICAL_AI_LIMIT_CLAIMS})
+    else:
+        limit_claims["max_agent_runs_per_month"] = ("max_agent_runs_per_month", "maxAgentRunsPerMonth")
+    for key, aliases in limit_claims.items():
         try:
             value = int(_claim(payload, *aliases))
         except (TypeError, ValueError):

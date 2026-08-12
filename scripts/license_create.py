@@ -8,7 +8,11 @@ from pathlib import Path
 from license_common import b64url_encode, canonical_bytes, openssl_sign, write_json
 
 
-DEFAULT_MAX_AGENT_UNITS_PER_MONTH = 5000
+def monthly_limit(value: str) -> int:
+    parsed = int(value)
+    if parsed < -1:
+        raise argparse.ArgumentTypeError("monthly limits must be -1 (unlimited), zero, or greater")
+    return parsed
 
 
 def main() -> int:
@@ -21,15 +25,22 @@ def main() -> int:
     parser.add_argument("--support-tier", default="standard")
     parser.add_argument("--max-users", type=int, default=25)
     parser.add_argument(
-        "--max-agent-units-per-month",
-        "--max-agent-runs-per-month",
-        dest="max_agent_units_per_month",
-        type=int,
-        default=DEFAULT_MAX_AGENT_UNITS_PER_MONTH,
-        help=(
-            "Deployment-wide weighted Agent units per calendar month. "
-            "The older --max-agent-runs-per-month spelling remains supported."
-        ),
+        "--max-analysis-runs-per-month",
+        type=monthly_limit,
+        required=True,
+        help="Deployment-wide completed full investigations per calendar month; -1 is unlimited.",
+    )
+    parser.add_argument(
+        "--max-quick-questions-per-month",
+        type=monthly_limit,
+        required=True,
+        help="Deployment-wide Copilot and lightweight Agent-tab questions per calendar month; -1 is unlimited.",
+    )
+    parser.add_argument(
+        "--max-prompt-coach-requests-per-month",
+        type=monthly_limit,
+        required=True,
+        help="Deployment-wide Prompt Coach requests per calendar month; -1 is unlimited.",
     )
     parser.add_argument("--agent-enabled", dest="agent_enabled", action="store_true", default=True)
     parser.add_argument("--no-agent", dest="agent_enabled", action="store_false")
@@ -47,8 +58,9 @@ def main() -> int:
         "schema_version": 1,
         "agent_enabled": bool(args.agent_enabled),
         "max_users": int(args.max_users),
-        # Keep the established claim key for compatibility with deployed runtimes.
-        "max_agent_runs_per_month": int(args.max_agent_units_per_month),
+        "max_analysis_runs_per_month": int(args.max_analysis_runs_per_month),
+        "max_quick_questions_per_month": int(args.max_quick_questions_per_month),
+        "max_prompt_coach_requests_per_month": int(args.max_prompt_coach_requests_per_month),
         "offline_expiry": expires_at,
         "customer_id": args.customer_id,
         "deployment_id": deployment_id,

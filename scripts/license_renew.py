@@ -10,7 +10,7 @@ from pathlib import Path
 from license_common import b64url_decode, read_token
 
 
-DEFAULT_MAX_AGENT_UNITS_PER_MONTH = 5000
+DEFAULT_UNLIMITED_AI_LIMIT = -1
 
 
 def _bool_claim(value) -> bool:
@@ -51,12 +51,30 @@ def main() -> int:
         "--deployment-id", str(_claim(payload, "deployment_id", "deploymentId", "license_id", "licenseId", default="")),
         "--support-tier", str(_claim(payload, "support_tier", "supportTier", default="standard")),
         "--max-users", str(_claim(payload, "max_users", "maxUsers", default=25)),
-        "--max-agent-units-per-month", str(
+        "--max-analysis-runs-per-month", str(
             _claim(
                 payload,
+                "max_analysis_runs_per_month",
+                "maxAnalysisRunsPerMonth",
                 "max_agent_runs_per_month",
                 "maxAgentRunsPerMonth",
-                default=DEFAULT_MAX_AGENT_UNITS_PER_MONTH,
+                default=DEFAULT_UNLIMITED_AI_LIMIT,
+            )
+        ),
+        "--max-quick-questions-per-month", str(
+            _claim(
+                payload,
+                "max_quick_questions_per_month",
+                "maxQuickQuestionsPerMonth",
+                default=DEFAULT_UNLIMITED_AI_LIMIT,
+            )
+        ),
+        "--max-prompt-coach-requests-per-month", str(
+            _claim(
+                payload,
+                "max_prompt_coach_requests_per_month",
+                "maxPromptCoachRequestsPerMonth",
+                default=DEFAULT_UNLIMITED_AI_LIMIT,
             )
         ),
         "--channel", str(_claim(payload, "channel", default="stable")),

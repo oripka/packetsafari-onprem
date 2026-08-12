@@ -32,7 +32,9 @@ def _valid_payload(**overrides) -> dict:
         "schema_version": 1,
         "agent_enabled": True,
         "max_users": 25,
-        "max_agent_runs_per_month": 5000,
+        "max_analysis_runs_per_month": 100,
+        "max_quick_questions_per_month": 100,
+        "max_prompt_coach_requests_per_month": 500,
         "offline_expiry": "2099-01-01T00:00:00+00:00",
         "customer_id": "customer-1",
         "deployment_id": "deployment-1",
@@ -78,6 +80,13 @@ class LicenseVerifyTests(unittest.TestCase):
     def test_verify_accepts_complete_signed_claims(self):
         self.assertEqual(self._run_verify(_token(_valid_payload())), 0)
 
+    def test_verify_accepts_legacy_analysis_only_claim(self):
+        payload = _valid_payload(max_agent_runs_per_month=5000)
+        payload.pop("max_analysis_runs_per_month")
+        payload.pop("max_quick_questions_per_month")
+        payload.pop("max_prompt_coach_requests_per_month")
+        self.assertEqual(self._run_verify(_token(payload)), 0)
+
     def test_verify_rejects_missing_expiry(self):
         payload = _valid_payload()
         payload.pop("offline_expiry")
@@ -86,9 +95,9 @@ class LicenseVerifyTests(unittest.TestCase):
 
     def test_verify_rejects_missing_required_commercial_claim(self):
         payload = _valid_payload()
-        payload.pop("max_agent_runs_per_month")
+        payload.pop("max_quick_questions_per_month")
 
-        self._assert_exits_with(_token(payload), "max_agent_runs_per_month")
+        self._assert_exits_with(_token(payload), "max_quick_questions_per_month")
 
     def test_verify_rejects_wrong_algorithm(self):
         self._assert_exits_with(_token(_valid_payload(), alg="none"), "RS256")

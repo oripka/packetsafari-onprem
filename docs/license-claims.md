@@ -13,7 +13,9 @@ PacketSafari public key.
 | --- | --- |
 | `agent_enabled` | Enables or disables PacketSafari Agent analysis for the deployment. |
 | `max_users` | Maximum enabled named users for the licensed deployment. `-1` means unlimited. |
-| `max_agent_runs_per_month` | Maximum weighted Agent units per licensed deployment and calendar month. `-1` means unlimited. The legacy claim name is retained for runtime compatibility. |
+| `max_analysis_runs_per_month` | Maximum completed full investigations per licensed deployment and calendar month. `-1` means unlimited. |
+| `max_quick_questions_per_month` | Shared maximum for Copilot and lightweight standalone Agent-tab questions per licensed deployment and calendar month. `-1` means unlimited. |
+| `max_prompt_coach_requests_per_month` | Maximum explicit Prompt Coach requests per licensed deployment and calendar month. `-1` means unlimited. |
 | `offline_expiry` | Hard offline expiry timestamp. |
 | `customer_id` | Stable PacketSafari customer identifier. |
 | `deployment_id` | Stable deployment identifier. |
@@ -37,7 +39,9 @@ python3 scripts/license_create.py \
   --deployment-id dep-acme-prod \
   --support-tier enterprise \
   --max-users 25 \
-  --max-agent-units-per-month 5000 \
+  --max-analysis-runs-per-month 100 \
+  --max-quick-questions-per-month 100 \
+  --max-prompt-coach-requests-per-month 500 \
   --agent-enabled \
   --channel stable \
   --allowed-version 10.0.1 \
@@ -45,11 +49,9 @@ python3 scripts/license_create.py \
   --output /tmp/packetsafari-license-token.json
 ```
 
-The unit schedule is Agent = 1, Agent Deep = 2, Agent Max = 2, and Agent Max Deep = 4. The default token allowance is 5,000 units per calendar month for each licensed deployment.
+The values above are examples; issue all three monthly limits from the signed customer contract. Use `--no-agent` to disable Agent analysis and `-1` only for a user or AI category that is contractually unlimited. Uploads, opening captures, same-investigation follow-ups, report stages, resumes, automatic retries, and internal tool/model calls do not consume these limits.
 
-Use `--no-agent` to disable Agent analysis. Use `-1` for unlimited user or Agent-unit limits. The older `--max-agent-runs-per-month` command-line option remains accepted for compatibility, but new operational procedures should use `--max-agent-units-per-month`.
-
-Renewing a token preserves its Agent-unit allowance, including zero, and its exact `allowed_versions` list:
+Renewing a current token preserves all three AI allowances, including zero, and its exact `allowed_versions` list. When renewing an older token, its legacy Agent allowance becomes the Analysis runs allowance; the previously nonexistent Quick questions and Prompt Coach limits become unlimited so renewal does not silently restrict the customer:
 
 ```bash
 python3 scripts/license_renew.py \
