@@ -24,6 +24,7 @@ if __package__ in {None, ""}:
         apply_update,
         check_for_update,
         install_release,
+        operate_security_content,
         rollback_release,
         runtime_layout,
         set_password,
@@ -51,6 +52,7 @@ else:
         apply_update,
         check_for_update,
         install_release,
+        operate_security_content,
         rollback_release,
         runtime_layout,
         set_password,
@@ -262,6 +264,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_download_args(update)
 
+    content = subparsers.add_parser("content", help="Verify and operate the signed data-only security-content channel.")
+    content.add_argument("action", choices=["check", "apply", "import", "status", "rollback"])
+    content.add_argument("--pack", help="Local path or authenticated URL to a signed security-content pack.")
+    content.add_argument("--public-key", help="Release public key. Defaults to the installed PacketSafari release key.")
+    content.add_argument("--allow-downgrade", action="store_true", help="Allow explicit activation of an older sequence.")
+    add_download_args(content)
+
     iam = subparsers.add_parser("iam", help="Host-side IAM helpers.")
     iam.add_argument("action", choices=["show-initial-admin-command", "set-password"])
     iam.add_argument("--email", default="admin@example.com")
@@ -326,6 +335,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(check_for_update(args), indent=2))
         else:
             print(json.dumps(apply_update(args), indent=2))
+        return 0
+    if args.command == "content":
+        print(json.dumps(operate_security_content(args), indent=2))
         return 0
     if args.command == "rollback":
         print(json.dumps(rollback_release(args), indent=2))

@@ -158,6 +158,7 @@ def main() -> int:
     parser.add_argument("--license-public-key", help="Optional license-public.pem to include for local/dev install bundles.")
     parser.add_argument("--release-public-key", help="Optional release-public.pem to include next to signed checksums.")
     parser.add_argument("--tooling-archive", help="Optional prebuilt packetsafari-onprem tooling archive to include.")
+    parser.add_argument("--security-content-pack", help="Optional signed data-only security-content pack for air-gapped import.")
     parser.add_argument("--sign-key", help="Private key used to sign checksums.txt.")
     parser.add_argument("--no-pull", action="store_true", help="Use local Docker image tags without pulling them first.")
     parser.add_argument("--split-size-mb", type=int, default=0)
@@ -188,6 +189,20 @@ def main() -> int:
             shutil.copy2(Path(args.release_public_key).expanduser(), root / "release-public.pem")
         if args.sbom_dir:
             shutil.copytree(Path(args.sbom_dir).expanduser(), root / "sbom", dirs_exist_ok=True)
+        if args.security_content_pack:
+            content_source = Path(args.security_content_pack).expanduser()
+            if not content_source.is_file():
+                parser.error(f"Security-content pack not found: {content_source}")
+            content_dir = root / "security-content"
+            content_dir.mkdir(parents=True, exist_ok=True)
+            content_target = content_dir / content_source.name
+            shutil.copy2(content_source, content_target)
+            manifest["securityContentPack"] = {
+                "path": str(content_target.relative_to(root)),
+                "sha256": sha256(content_target),
+                "activation": "explicit-import",
+            }
+            (root / "release-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
         image_metadata = []
         for service in sorted(images):

@@ -276,6 +276,22 @@ service state. SaaS upgrades run this readiness check after startup and before
 release promotion.
 
 For every profile, doctor also reads intelligence updater state from the backend.
+
+Signed data-only security content is updated independently from container releases:
+
+```bash
+packetsafari-ops content check --pack 'https://authenticated.example/security-content.tar.gz'
+packetsafari-ops content apply --pack 'https://authenticated.example/security-content.tar.gz'
+packetsafari-ops content status
+packetsafari-ops content rollback
+```
+
+For an air-gapped host, transfer the same signed pack and use `content import
+--pack ./security-content.tar.gz`. The installed PacketSafari release public key
+verifies the manifest; each package is size-, digest-, schema-, and compatibility-
+checked again inside the backend before activation. Content activation never scans
+existing captures. Automatic upstream feed updates can remain disabled in an
+air-gapped deployment without making `doctor` fail.
 It reports enabled feeds, active versions, last success, next run, warnings, and
 failures; an overdue scheduler, failed enabled feed, or stale automatically
 managed content makes readiness fail. Intentionally disabled automatic updates
