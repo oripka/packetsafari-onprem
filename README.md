@@ -275,6 +275,12 @@ health/config, checks frontend `runtime-config.json`, and inspects Compose
 service state. SaaS upgrades run this readiness check after startup and before
 release promotion.
 
+For every profile, doctor also reads intelligence updater state from the backend.
+It reports enabled feeds, active versions, last success, next run, warnings, and
+failures; an overdue scheduler, failed enabled feed, or stale automatically
+managed content makes readiness fail. Intentionally disabled automatic updates
+remain valid for air-gapped deployments and are reported as disabled.
+
 Successful updates also record the deployed image ids. When old dangling Docker
 images are detected and enough deployment history exists, `update` explains the
 space impact and asks whether to remove images outside the current plus last two

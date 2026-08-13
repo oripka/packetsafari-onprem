@@ -4003,6 +4003,69 @@ except Exception as exc:
     return {**payload, "ok": bool(payload.get("ok", True))}
 
 
+def _backend_intelligence_probe(layout: RuntimeLayout) -> dict[str, object]:
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+    probe = """
+import json
+import sys
+
+try:
+    from packetsafari.common.intelligence_updates import get_public_state
+
+    state = get_public_state()
+    health = state.get("health") if isinstance(state.get("health"), dict) else {}
+    feeds = state.get("feeds") if isinstance(state.get("feeds"), list) else []
+    print(json.dumps({
+        "ok": bool(health.get("ok", False)),
+        "status": str(health.get("status") or "unknown"),
+        "autoUpdateEnabled": bool(state.get("auto_update_enabled", False)),
+        "lastSuccessAt": str(state.get("last_success_at") or ""),
+        "nextRunAt": str(state.get("next_run_at") or ""),
+        "problems": list(health.get("problems") or []),
+        "warnings": list(health.get("warnings") or []),
+        "feeds": [
+            {
+                "id": str(row.get("id") or ""),
+                "enabled": bool(row.get("enabled", False)),
+                "status": str(row.get("last_status") or "never"),
+                "updatedAt": str(row.get("last_updated_at") or ""),
+                "version": str(row.get("last_version") or ""),
+            }
+            for row in feeds
+            if isinstance(row, dict)
+        ],
+    }))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    sys.exit(1)
+""".strip()
+    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-c", probe]
+    try:
+        result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    raw_output = result.stdout.strip()
+    payload: dict[str, object] = {}
+    if raw_output:
+        try:
+            parsed = json.loads(raw_output.splitlines()[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {"stdout": raw_output}
+    if result.returncode != 0:
+        return {
+            **payload,
+            "ok": False,
+            "error": str(payload.get("error") or result.stderr.strip() or raw_output or f"probe exited {result.returncode}"),
+        }
+    return {**payload, "ok": bool(payload.get("ok", False))}
+
+
 def doctor_deployment(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
@@ -4073,6 +4136,9 @@ def doctor_deployment(args) -> dict:
 
     sharkd = _backend_sharkd_probe(layout)
     add_check("backend_sharkd", bool(sharkd.get("ok")), **sharkd)
+
+    intelligence = _backend_intelligence_probe(layout)
+    add_check("intelligence_updates", bool(intelligence.get("ok")), **intelligence)
 
     ok = all(bool(check.get("ok")) for check in checks)
     return {
