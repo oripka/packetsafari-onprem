@@ -13,6 +13,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -884,7 +885,15 @@ def _copy_s3_source(source: str, destination: Path, partial: Path, label: str) -
         ) from exc
 
 
-def materialize_source(source: str | os.PathLike[str], destination_dir: Path, label: str, args=None, *, default_name: str) -> Path:
+def materialize_source(
+    source: str | os.PathLike[str],
+    destination_dir: Path,
+    label: str,
+    args=None,
+    *,
+    default_name: str,
+    max_bytes: int | None = None,
+) -> Path:
     raw = str(source or "").strip()
     if not raw:
         raise RuntimeError(f"Missing {label} source.")
@@ -896,11 +905,16 @@ def materialize_source(source: str | os.PathLike[str], destination_dir: Path, la
             _copy_s3_source(raw, destination, partial, label)
         finally:
             partial.unlink(missing_ok=True)
+        if max_bytes is not None and destination.stat().st_size > max_bytes:
+            destination.unlink(missing_ok=True)
+            raise RuntimeError(f"Downloaded {label} exceeds the {max_bytes}-byte limit.")
         return destination
     if not _is_url(raw):
         path = Path(raw).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"{label.capitalize()} not found: {path}")
+        if max_bytes is not None and path.stat().st_size > max_bytes:
+            raise RuntimeError(f"{label.capitalize()} exceeds the {max_bytes}-byte limit.")
         return path
 
     destination_dir.mkdir(parents=True, exist_ok=True)
@@ -914,7 +928,15 @@ def materialize_source(source: str | os.PathLike[str], destination_dir: Path, la
         else:
             response = urllib.request.urlopen(request, timeout=_download_timeout(args))
         with response, partial.open("wb") as output:
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+            copied = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if max_bytes is not None and copied > max_bytes:
+                    raise RuntimeError(f"Downloaded {label} exceeds the {max_bytes}-byte limit.")
+                output.write(chunk)
         partial.replace(destination)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Failed to download {label} from {raw}: HTTP {exc.code}") from exc
@@ -2247,6 +2269,137 @@ def verify_detached_signature(public_key: Path, payload_path: Path, signature_pa
         ],
         check=True,
     )
+
+
+def _safe_extract_content_pack(archive_path: Path, destination: Path) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, "r:*") as archive:
+        members = archive.getmembers()
+        if len(members) > 256:
+            raise RuntimeError("Security-content pack contains too many archive members.")
+        total = 0
+        for member in members:
+            member_path = Path(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts or member.issym() or member.islnk() or member.isdev():
+                raise RuntimeError(f"Unsafe security-content archive member: {member.name}")
+            total += max(0, int(member.size))
+            if total > GIB:
+                raise RuntimeError("Security-content pack exceeds the 1 GiB extraction limit.")
+        for member in members:
+            target = destination / member.name
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise RuntimeError(f"Unsupported security-content archive member: {member.name}")
+            source = archive.extractfile(member)
+            if source is None:
+                raise RuntimeError(f"Could not read security-content archive member: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source, target.open("wb") as output:
+                shutil.copyfileobj(source, output, length=MIB)
+    candidates = [path.parent for path in destination.rglob("content-manifest.json")]
+    if len(candidates) != 1:
+        raise RuntimeError("Security-content pack must contain exactly one content-manifest.json.")
+    return candidates[0]
+
+
+def _verify_content_pack(pack_dir: Path, public_key: Path) -> dict:
+    manifest_path = pack_dir / "content-manifest.json"
+    signature_path = pack_dir / "content-manifest.json.sig"
+    if manifest_path.stat().st_size > MIB:
+        raise RuntimeError("Security-content manifest exceeds 1 MiB.")
+    verify_detached_signature(public_key, manifest_path, signature_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != "packetsafari-security-content-v1":
+        raise RuntimeError("Unsupported security-content manifest schema.")
+    packages = manifest.get("packages")
+    if not isinstance(packages, list) or not packages or len(packages) > 64:
+        raise RuntimeError("Security-content manifest must contain 1-64 packages.")
+    total = 0
+    for package in packages:
+        if not isinstance(package, dict):
+            raise RuntimeError("Invalid security-content package entry.")
+        relative = Path(str(package.get("path") or ""))
+        if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("Unsafe security-content package path.")
+        source = pack_dir / relative
+        try:
+            source.resolve(strict=True).relative_to(pack_dir.resolve(strict=True))
+        except (FileNotFoundError, ValueError) as exc:
+            raise RuntimeError(f"Security-content package escapes the pack: {package.get('id')}") from exc
+        declared_size = int(package.get("size") or -1)
+        if not source.is_file() or source.is_symlink() or source.stat().st_size != declared_size:
+            raise RuntimeError(f"Security-content package size mismatch: {package.get('id')}")
+        if _sha256(source) != str(package.get("sha256") or "").lower():
+            raise RuntimeError(f"Security-content package digest mismatch: {package.get('id')}")
+        total += declared_size
+    if total > GIB:
+        raise RuntimeError("Security-content packages exceed the 1 GiB verification limit.")
+    return {
+        "ok": True,
+        "channel": str(manifest.get("channel") or ""),
+        "sequence": int(manifest.get("sequence") or 0),
+        "version": str(manifest.get("version") or ""),
+        "packages": len(packages),
+        "bytes": total,
+        "manifestSha256": _sha256(manifest_path),
+    }
+
+
+def _content_backend_command(layout: RuntimeLayout, args: list[str]) -> dict:
+    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-m", "packetsafari.common.security_content_channel", *args]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=300)
+    output = result.stdout.strip()
+    try:
+        payload = json.loads(output.splitlines()[-1] if output else "{}")
+    except json.JSONDecodeError:
+        payload = {"status": "error", "stdout": output}
+    if result.returncode != 0:
+        raise RuntimeError(str(payload.get("error") or result.stderr.strip() or "Security-content backend command failed."))
+    return payload
+
+
+def operate_security_content(args) -> dict:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    action = str(args.action)
+    if action == "status":
+        return _content_backend_command(layout, ["status"])
+    if action == "rollback":
+        return _content_backend_command(layout, ["rollback"])
+    source = str(getattr(args, "pack", "") or "").strip()
+    if not source:
+        raise RuntimeError("content check/apply/import requires --pack with a local path or authenticated URL.")
+    public_key = _resolve_release_public_key(layout, getattr(args, "public_key", None))
+    if public_key is None:
+        raise RuntimeError("No PacketSafari release public key is installed. Pass --public-key.")
+    with tempfile.TemporaryDirectory(prefix="packetsafari-content-") as tmp:
+        work = Path(tmp)
+        archive = materialize_source(
+            source,
+            work,
+            "security-content pack",
+            args,
+            default_name="security-content-pack.tar.gz",
+            max_bytes=GIB + MIB,
+        )
+        pack_dir = _safe_extract_content_pack(archive, work / "extracted")
+        verified = _verify_content_pack(pack_dir, public_key)
+        if action == "check":
+            return verified
+        container_root = f"/tmp/packetsafari-content-{secrets.token_hex(8)}"
+        compose = _compose_base_command(layout)
+        try:
+            subprocess.run([*compose, "exec", "-T", "backend", "mkdir", "-p", container_root], check=True)
+            subprocess.run([*compose, "cp", f"{pack_dir}/.", f"backend:{container_root}/pack"], check=True)
+            subprocess.run([*compose, "cp", str(public_key), f"backend:{container_root}/release-public.pem"], check=True)
+            command_args = ["apply", "--pack-dir", f"{container_root}/pack", "--public-key", f"{container_root}/release-public.pem"]
+            if bool(getattr(args, "allow_downgrade", False)):
+                command_args.append("--allow-downgrade")
+            activated = _content_backend_command(layout, command_args)
+        finally:
+            subprocess.run([*compose, "exec", "-T", "backend", "rm", "-rf", container_root], check=False)
+        return {"verified": verified, "activated": activated}
 
 
 @contextmanager
@@ -4003,6 +4156,80 @@ except Exception as exc:
     return {**payload, "ok": bool(payload.get("ok", True))}
 
 
+def _backend_intelligence_probe(layout: RuntimeLayout) -> dict[str, object]:
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+    probe = """
+import json
+import sys
+
+try:
+    from packetsafari.common.intelligence_updates import get_public_state
+
+    state = get_public_state()
+    health = state.get("health") if isinstance(state.get("health"), dict) else {}
+    content = state.get("content_channel") if isinstance(state.get("content_channel"), dict) else {}
+    active_content = content.get("active") if isinstance(content.get("active"), dict) else {}
+    feeds = state.get("feeds") if isinstance(state.get("feeds"), list) else []
+    print(json.dumps({
+        "ok": bool(health.get("ok", False)) and str(content.get("status") or "inactive") != "error",
+        "status": str(health.get("status") or "unknown"),
+        "autoUpdateEnabled": bool(state.get("auto_update_enabled", False)),
+        "lastSuccessAt": str(state.get("last_success_at") or ""),
+        "nextRunAt": str(state.get("next_run_at") or ""),
+        "problems": list(health.get("problems") or []),
+        "warnings": list(health.get("warnings") or []),
+        "contentChannel": {
+            "status": str(content.get("status") or "inactive"),
+            "channel": str(active_content.get("channel") or ""),
+            "sequence": int(active_content.get("sequence") or 0),
+            "version": str(active_content.get("version") or ""),
+            "packages": len(active_content.get("packages") or []),
+            "rollbackAvailable": bool(content.get("rollback_available", False)),
+            "lastError": str(content.get("last_error") or ""),
+        },
+        "feeds": [
+            {
+                "id": str(row.get("id") or ""),
+                "enabled": bool(row.get("enabled", False)),
+                "status": str(row.get("last_status") or "never"),
+                "updatedAt": str(row.get("last_updated_at") or ""),
+                "version": str(row.get("last_version") or ""),
+            }
+            for row in feeds
+            if isinstance(row, dict)
+        ],
+    }))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    sys.exit(1)
+""".strip()
+    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-c", probe]
+    try:
+        result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    raw_output = result.stdout.strip()
+    payload: dict[str, object] = {}
+    if raw_output:
+        try:
+            parsed = json.loads(raw_output.splitlines()[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {"stdout": raw_output}
+    if result.returncode != 0:
+        return {
+            **payload,
+            "ok": False,
+            "error": str(payload.get("error") or result.stderr.strip() or raw_output or f"probe exited {result.returncode}"),
+        }
+    return {**payload, "ok": bool(payload.get("ok", False))}
+
+
 def doctor_deployment(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
@@ -4073,6 +4300,9 @@ def doctor_deployment(args) -> dict:
 
     sharkd = _backend_sharkd_probe(layout)
     add_check("backend_sharkd", bool(sharkd.get("ok")), **sharkd)
+
+    intelligence = _backend_intelligence_probe(layout)
+    add_check("intelligence_updates", bool(intelligence.get("ok")), **intelligence)
 
     ok = all(bool(check.get("ok")) for check in checks)
     return {

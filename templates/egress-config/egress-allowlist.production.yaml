@@ -126,6 +126,17 @@
     },
     {
       "classification": "feature-optional",
+      "host": "www.spamhaus.org",
+      "notes": "Opt-in Spamhaus DROP malicious network ranges.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
       "host": "ti.stamus-networks.io",
       "notes": "Opt-in Stamus Lateral Suricata rules and GPL materials.",
       "owners": [

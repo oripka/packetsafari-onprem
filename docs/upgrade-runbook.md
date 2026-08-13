@@ -227,7 +227,9 @@ keys. Upstream `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `PACKETSAFARI_PADDLE_
 `env/ironproxy.env`, which is mounted only into `egress-ironproxy`; the
 backend/worker runtime env should contain the proxy placeholders instead. The
 doctor then probes backend health/config, frontend `runtime-config.json`, and
-Compose service state.
+Compose service state. All deployment profiles also verify intelligence updater
+freshness and scheduling. Automatic updates that are overdue, failed, or stale
+block readiness; explicitly disabled updates remain valid for air-gapped use.
 
 ```json
 {

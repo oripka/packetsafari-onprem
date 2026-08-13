@@ -28,6 +28,7 @@ transforms:
         - "ti.stamus-networks.io"
         - "urlhaus.abuse.ch"
         - "www.openinfosecfoundation.org"
+        - "www.spamhaus.org"
   - name: secrets
     config:
       secrets:
