@@ -1557,6 +1557,17 @@ def write_sizing_profile(layout: RuntimeLayout, *, profile: str) -> dict[str, ob
     return plan
 
 
+def refresh_managed_sizing_profile(layout: RuntimeLayout) -> dict[str, object] | None:
+    """Regenerate an existing managed profile so release defaults reach upgrades."""
+    state = _read_json(layout.sizing_state_path, {})
+    requested_profile = str(
+        state.get("requestedProfile") or state.get("requested_profile") or ""
+    ).strip().lower()
+    if not requested_profile or requested_profile == "none":
+        return None
+    return write_sizing_profile(layout, profile=requested_profile)
+
+
 def resolve_logging_values(args) -> dict[str, str]:
     values = dict(DEFAULT_LOGGING_VALUES)
     def _bool(raw: object, *, default: str) -> str:
@@ -4448,6 +4459,7 @@ def upgrade_release(args) -> dict:
             snapshot_dir = snapshot_runtime(layout)
 
             phase = "compose"
+            sizing_refresh = refresh_managed_sizing_profile(layout)
             render_compose(layout, target_manifest_path, profile=profile)
             render_logging_config(layout)
             maybe_fail_upgrade_simulation(layout, args, "compose")
@@ -4512,7 +4524,8 @@ def upgrade_release(args) -> dict:
             maybe_fail_upgrade_simulation(layout, args, "promote")
             result = _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
             result["hostRequirements"] = host_requirements
-            result["sizingStatus"] = sizing_status
+            result["sizingStatus"] = sizing_state_status(layout) if sizing_refresh is not None else sizing_status
+            result["sizingRefreshed"] = sizing_refresh is not None
             result["generatedRuntimeEnvKeys"] = generated_runtime_env_keys
             return result
         except Exception as exc:
