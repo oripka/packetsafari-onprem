@@ -10,6 +10,7 @@ Customer-facing Python-native installer, operator CLI, and simple interactive me
 - `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
 - `docs/upgrade-runbook.md` - connected and air-gapped upgrade/rollback runbook
 - `docs/ai-model-onboarding.md` - customer-managed AI endpoint, model-profile, parser, qualification, and offline onboarding workflow
+- `docs/passkeys.md` - canonical public URL, automatic WebAuthn configuration, and safe hostname-change procedure
 - `scripts/render_compose.py` - render pinned on-prem compose files from release manifests
 - `scripts/build_offline_bundle.py` - build signed USB/offline install/upgrade bundles from a release manifest
 - `scripts/build_local_release.py` - build a locally hosted on-prem release directory for VM validation
@@ -196,6 +197,7 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - Native onboarding uses the existing local `/api/v2/onprem/onboarding/*` APIs. The menu can show schema output and validate, save, or finalize pasted draft JSON directly from the terminal.
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
+- The public HTTPS URL entered during onboarding automatically owns the WebAuthn origin and relying-party ID; see `docs/passkeys.md` before enrolling passkeys or changing the hostname.
 - `update check` discovers the configured release-channel manifest and reports app and ops tooling availability.
 - `update` downloads the configured release-channel manifest, self-updates `packetsafari-ops` when the manifest advertises newer tooling, re-execs the updated CLI, and then runs the same transaction as `upgrade --manifest`.
 - `healthcheck` runs deployment readiness checks and Docker image-retention guidance without applying a release.
