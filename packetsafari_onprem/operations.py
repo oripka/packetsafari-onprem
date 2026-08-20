@@ -72,6 +72,7 @@ SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
 DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS = 2
 AUTO_GENERATED_UPGRADE_ENV_KEYS = frozenset({
     "AI_AGENT_STREAM_TICKET_SECRET",
+    "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
 })
 
 DEFAULT_LOGGING_VALUES = {
@@ -1919,6 +1920,7 @@ def _generated_env_default(key: str) -> str:
     upper = key.upper()
     if upper in {
         "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
+        "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
         "AI_AGENT_STREAM_TICKET_SECRET",
         "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
         "REDIS_PASSWORD",
@@ -2012,6 +2014,8 @@ def ensure_generated_upgrade_env(
     """
 
     required = set(_merged_required_env_keys(manifest, profile=profile))
+    if profile == "onprem":
+        required.add("PACKETSAFARI_AUTH_MFA_SECRET_KEY")
     values = parse_env_file(layout.runtime_env_path)
     generated: list[str] = []
     for key in sorted(AUTO_GENERATED_UPGRADE_ENV_KEYS & required):
@@ -3157,6 +3161,7 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
     postgres_password = secrets.token_urlsafe(32)
     redis_password = secrets.token_urlsafe(32)
     jwt_secret = secrets.token_urlsafe(64)
+    mfa_secret_key = secrets.token_urlsafe(64)
     agent_stream_ticket_secret = secrets.token_urlsafe(64)
     sharkd_secret = secrets.token_urlsafe(64)
     lines = [
@@ -3203,6 +3208,7 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         'NUXT_PUBLIC_API_BASE="/api/v2/"',
         'NUXT_PUBLIC_SHARKD_WS_URL=""',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
+        f"PACKETSAFARI_AUTH_MFA_SECRET_KEY={quote_env_value(mfa_secret_key)}",
         f"AI_AGENT_STREAM_TICKET_SECRET={quote_env_value(agent_stream_ticket_secret)}",
         'AI_AGENT_STREAM_GATEWAY_INTERNAL_URL="http://agent-stream-gateway:8091"',
         'AI_AGENT_STREAM_TICKET_TTL_SECONDS="30"',
