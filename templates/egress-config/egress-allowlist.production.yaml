@@ -158,6 +158,28 @@
     },
     {
       "classification": "feature-optional",
+      "host": "crt.sh",
+      "notes": "Exact SHA-256 certificate lookup for optional public Certificate Transparency enrichment.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "TLS certificate trust enrichment"
+    },
+    {
+      "classification": "feature-optional",
+      "host": "www.gstatic.com",
+      "notes": "Chrome current and historical CT log catalogs for optional SCT log identification.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "TLS certificate trust enrichment"
+    },
+    {
+      "classification": "feature-optional",
       "host": "oidc.external.test",
       "managed_by": "packetsafari-egress-identity",
       "notes": "Host-approved external identity provider endpoint routed through the egress proxy.",

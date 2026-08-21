@@ -18,6 +18,7 @@ transforms:
         - "api.openai.com"
         - "api.paddle.com"
         - "auth.openai.com"
+        - "crt.sh"
         - "email.eu-central-1.amazonaws.com"
         - "oidc.external.test"
         - "openrouter.ai"
@@ -27,6 +28,7 @@ transforms:
         - "sslbl.abuse.ch"
         - "ti.stamus-networks.io"
         - "urlhaus.abuse.ch"
+        - "www.gstatic.com"
         - "www.openinfosecfoundation.org"
         - "www.spamhaus.org"
   - name: secrets
