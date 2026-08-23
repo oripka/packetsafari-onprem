@@ -85,6 +85,78 @@ def test_security_content_materialization_is_size_bounded(tmp_path: Path) -> Non
         )
 
 
+def test_interrupted_security_content_download_leaves_no_partial_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptedResponse:
+        reads = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                return b"partial-content"
+            raise operations.urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr(operations.urllib.request, "urlopen", lambda *_args, **_kwargs: InterruptedResponse())
+    destination = tmp_path / "downloads"
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        operations.materialize_source(
+            "https://example.test/security-content.tar.gz",
+            destination,
+            "security-content pack",
+            default_name="security-content.tar.gz",
+            max_bytes=operations.GIB + operations.MIB,
+        )
+
+    assert not (destination / "security-content.tar.gz").exists()
+    assert not (destination / "security-content.tar.gz.download").exists()
+
+
+def test_content_backend_command_delegates_to_app_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = operations.runtime_layout(str(tmp_path), "/storage/onprem")
+    captured: list[str] = []
+
+    def run(command, **_kwargs):
+        captured.extend(command)
+        return SimpleNamespace(returncode=0, stdout='{"status":"active"}\n', stderr="")
+
+    monkeypatch.setattr(operations, "_compose_base_command", lambda _layout: ["docker", "compose"])
+    monkeypatch.setattr(operations.subprocess, "run", run)
+
+    result = operations._content_backend_command(
+        layout,
+        ["apply", "--pack-dir", "/tmp/content/pack", "--public-key", "/tmp/content/release-public.pem"],
+    )
+
+    assert result == {"status": "active"}
+    assert captured == [
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "backend",
+        "python3",
+        "-m",
+        "packetsafari.common.security_content_channel",
+        "apply",
+        "--pack-dir",
+        "/tmp/content/pack",
+        "--public-key",
+        "/tmp/content/release-public.pem",
+    ]
+
+
 def test_content_cli_supports_connected_and_air_gapped_actions() -> None:
     parser = cli.build_parser()
     assert parser.parse_args(["content", "check", "--pack", "https://example.test/content.tar.gz"]).action == "check"
