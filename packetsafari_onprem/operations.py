@@ -70,6 +70,10 @@ RECOMMENDED_SMALL_HOST_VCPUS = 4
 RECOMMENDED_SMALL_HOST_MEMORY_BYTES = 16 * GIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
 DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS = 2
+DOCTOR_STARTUP_GRACE_CHECKS = frozenset({
+    "security_queue_consumer",
+    "intelligence_updates",
+})
 AUTO_GENERATED_UPGRADE_ENV_KEYS = frozenset({
     "AI_AGENT_STREAM_TICKET_SECRET",
     "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
@@ -4127,6 +4131,102 @@ def _compose_service_status(layout: RuntimeLayout) -> dict[str, object]:
     return {"ok": not unhealthy and bool(rows), "services": rows, "unhealthy": unhealthy}
 
 
+def _security_queue_consumer_probe(layout: RuntimeLayout) -> dict[str, object]:
+    """Verify that the running worker has a real Celery security consumer."""
+
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+
+    try:
+        worker = subprocess.run(
+            [*_compose_base_command(layout), "ps", "-q", "worker"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "worker_container_probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    container_id = next((line.strip() for line in worker.stdout.splitlines() if line.strip()), "")
+    if worker.returncode != 0 or not container_id:
+        return {
+            "ok": False,
+            "error": worker.stderr.strip() or worker.stdout.strip() or "worker_container_not_running",
+        }
+
+    try:
+        top = subprocess.run(
+            ["docker", "top", container_id, "-eo", "pid,args"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "security_consumer_probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if top.returncode != 0:
+        return {"ok": False, "error": top.stderr.strip() or top.stdout.strip() or f"docker top exited {top.returncode}"}
+
+    queue_pattern = re.compile(r"(?:--queues(?:=|\s+)|-Q\s+)[^\s]*\bsecurity\b")
+    consumers = [
+        line
+        for line in top.stdout.splitlines()
+        if "celery" in line.lower()
+        and queue_pattern.search(line)
+        and "/bin/bash -lc" not in line
+        and "/bin/sh -lc" not in line
+    ]
+    return {
+        "ok": bool(consumers),
+        "container": container_id[:12],
+        "consumerCount": len(consumers),
+        "message": (
+            "Security queue consumer is running."
+            if consumers
+            else "Worker is running without a Celery consumer for the security queue."
+        ),
+    }
+
+
+def validate_rendered_security_consumer(layout: RuntimeLayout) -> None:
+    """Fail before migrations when the target Compose omits the security queue."""
+
+    result = subprocess.run(
+        [*_compose_base_command(layout), "config", "--format", "json"],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"Could not inspect rendered target Compose: exited {result.returncode}"
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except Exception as exc:
+        raise RuntimeError("Rendered target Compose did not produce valid JSON") from exc
+
+    services = payload.get("services") if isinstance(payload, dict) else {}
+    worker = services.get("worker") if isinstance(services, dict) else {}
+    command = worker.get("command") if isinstance(worker, dict) else None
+    if isinstance(command, list):
+        command_text = " ".join(str(part) for part in command)
+    else:
+        command_text = str(command or "")
+    queue_pattern = re.compile(r"(?:--queues(?:=|\s+)|-Q\s+)[^\s]*\bsecurity\b")
+    if not queue_pattern.search(command_text):
+        raise RuntimeError("Rendered target worker does not declare a Celery consumer for the security queue")
+
+
 def _backend_sharkd_probe(layout: RuntimeLayout) -> dict[str, object]:
     if not layout.compose_file.exists():
         return {"ok": False, "error": "compose_file_missing"}
@@ -4250,7 +4350,12 @@ except Exception as exc:
 def doctor_deployment(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
-    manifest_arg = str(getattr(args, "manifest", "") or "").strip()
+    manifest_arg = str(
+        getattr(args, "doctor_manifest", "")
+        or getattr(args, "_doctor_manifest_path", "")
+        or getattr(args, "manifest", "")
+        or ""
+    ).strip()
     manifest = _read_json(Path(manifest_arg), {}) if manifest_arg else _read_json(layout.release_manifest_path, {})
     runtime_env = _effective_required_env_values(layout) if layout.runtime_env_path.exists() else {}
     checks: list[dict[str, object]] = []
@@ -4312,6 +4417,9 @@ def doctor_deployment(args) -> dict:
     compose = _compose_service_status(layout)
     add_check("compose_services", bool(compose.get("ok")), **compose)
 
+    security_consumer = _security_queue_consumer_probe(layout)
+    add_check("security_queue_consumer", bool(security_consumer.get("ok")), **security_consumer)
+
     gateway = _agent_stream_gateway_probe(layout)
     add_check("agent_stream_gateway", bool(gateway.get("ok")), **gateway)
 
@@ -4331,12 +4439,71 @@ def doctor_deployment(args) -> dict:
     }
 
 
+def _doctor_failure_message(payload: dict) -> str:
+    failures: list[str] = []
+    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
+    for check in checks:
+        if not isinstance(check, dict) or check.get("ok"):
+            continue
+        name = str(check.get("name") or "unknown")
+        details: list[str] = []
+        for key in ("error", "message", "status"):
+            value = str(check.get(key) or "").strip()
+            if value and value not in details:
+                details.append(value)
+        problems = check.get("problems") if isinstance(check.get("problems"), list) else []
+        details.extend(str(problem) for problem in problems if str(problem).strip())
+        failures.append(f"{name} ({'; '.join(details)})" if details else name)
+    return f"Deployment readiness checks failed: {', '.join(failures) or 'unknown'}"
+
+
+def assert_upgrade_preflight_doctor(args) -> dict:
+    """Block hard current-release failures while allowing target worker repair."""
+
+    payload = doctor_deployment(args)
+    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
+    blocking = [
+        check
+        for check in checks
+        if isinstance(check, dict)
+        and not check.get("ok")
+        and str(check.get("name") or "unknown") not in DOCTOR_STARTUP_GRACE_CHECKS
+    ]
+    if blocking:
+        raise RuntimeError(_doctor_failure_message({"checks": blocking}))
+    return payload
+
+
 def assert_doctor_ok(args) -> dict:
     payload = doctor_deployment(args)
     if not payload.get("ok"):
-        failed = [str(check.get("name")) for check in payload.get("checks", []) if not check.get("ok")]
-        raise RuntimeError(f"Deployment readiness checks failed: {', '.join(failed)}")
+        raise RuntimeError(_doctor_failure_message(payload))
     return payload
+
+
+def wait_for_doctor_ok(args, *, timeout_seconds: int, poll_seconds: float = 5.0) -> dict:
+    """Allow target startup to recover only checks backed by asynchronous workers."""
+
+    deadline = time.monotonic() + max(1, int(timeout_seconds))
+    last_payload: dict = {}
+    while True:
+        last_payload = doctor_deployment(args)
+        if last_payload.get("ok"):
+            return last_payload
+
+        checks = last_payload.get("checks") if isinstance(last_payload.get("checks"), list) else []
+        failed_names = {
+            str(check.get("name") or "unknown")
+            for check in checks
+            if isinstance(check, dict) and not check.get("ok")
+        }
+        if not failed_names or not failed_names.issubset(DOCTOR_STARTUP_GRACE_CHECKS):
+            raise RuntimeError(_doctor_failure_message(last_payload))
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(_doctor_failure_message(last_payload))
+        time.sleep(min(max(0.0, float(poll_seconds)), remaining))
 
 
 def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, *, source: str, profile: str, backup_mode: str) -> dict:
@@ -4420,6 +4587,9 @@ def upgrade_release(args) -> dict:
                 if not manifest_arg:
                     manifest_arg = str(_download_update_manifest(args, layout))
                 target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
+            if layout.compose_file.exists():
+                setattr(args, "_doctor_manifest_path", str(layout.release_manifest_path))
+                assert_upgrade_preflight_doctor(args)
             setattr(args, "_doctor_manifest_path", str(target_manifest_path))
             maybe_fail_upgrade_simulation(layout, args, "preflight")
 
@@ -4468,6 +4638,7 @@ def upgrade_release(args) -> dict:
             sizing_refresh = refresh_managed_sizing_profile(layout)
             render_compose(layout, target_manifest_path, profile=profile)
             render_logging_config(layout)
+            validate_rendered_security_consumer(layout)
             maybe_fail_upgrade_simulation(layout, args, "compose")
             if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):
                 write_helper_status(layout, status="upgrading", message="Pulling target release images before stopping running services.")
@@ -4523,8 +4694,7 @@ def upgrade_release(args) -> dict:
                 health_timeout = int(getattr(args, "health_timeout", 180) or 180)
                 wait_for_health(timeout_seconds=health_timeout)
                 wait_for_agent_stream_gateway(layout, timeout_seconds=health_timeout)
-                if profile == "saas":
-                    assert_doctor_ok(args)
+                wait_for_doctor_ok(args, timeout_seconds=health_timeout)
 
             phase = "promote"
             maybe_fail_upgrade_simulation(layout, args, "promote")

@@ -231,6 +231,22 @@ Compose service state. All deployment profiles also verify intelligence updater
 freshness and scheduling. Automatic updates that are overdue, failed, or stale
 block readiness; explicitly disabled updates remain valid for air-gapped use.
 
+Both SaaS and on-prem upgrades also verify that the target worker has a live
+Celery consumer for the `security` queue before promotion. Because that
+consumer starts the intelligence scheduler asynchronously, the upgrade grants
+only the security-consumer and intelligence-update checks a bounded startup
+grace period using the configured health timeout. Missing configuration and
+unhealthy backend, gateway, Sharkd, or Compose checks still fail immediately.
+A timeout reports the underlying feed, scheduler, or consumer details instead
+of only the check name.
+
+When an active deployment exists, the upgrade runs its doctor before replacing
+Compose or running migrations. Current hard failures stop there. A missing
+security consumer or overdue intelligence refresh may proceed only because the
+target is required to declare that consumer before services stop and prove it
+live afterward; this lets the first corrected release repair older deployments
+without weakening other preflight checks.
+
 ```json
 {
   "deploymentProfiles": {

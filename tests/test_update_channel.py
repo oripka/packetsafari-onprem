@@ -385,6 +385,8 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     monkeypatch.setattr(operations, "validate_upgrade_path", lambda layout, manifest: None)
     monkeypatch.setattr(operations, "verify_saas_operator_authorization", lambda layout, args, manifest: None)
     monkeypatch.setattr(operations, "validate_required_env", lambda layout, manifest, profile: None)
+    monkeypatch.setattr(operations, "assert_upgrade_preflight_doctor", lambda args: calls.append("preflight_doctor"))
+    monkeypatch.setattr(operations, "validate_rendered_security_consumer", lambda layout: calls.append("validate_security_consumer"))
     monkeypatch.setattr(operations, "ensure_ecr_credential_helper_ready", lambda layout: calls.append("ensure_ecr"))
     monkeypatch.setattr(operations, "render_logging_config", lambda layout: calls.append("render_logging"))
     monkeypatch.setattr(operations, "docker_compose_pull", lambda layout: calls.append("pull"))
@@ -392,7 +394,11 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     monkeypatch.setattr(operations, "run_target_migrations", lambda layout: calls.append("migrate"))
     monkeypatch.setattr(operations, "docker_compose_up", lambda layout, services=None, pull_policy=None: calls.append("up"))
     monkeypatch.setattr(operations, "wait_for_health", lambda timeout_seconds=180: calls.append("health"))
-    monkeypatch.setattr(operations, "assert_doctor_ok", lambda args: calls.append("doctor"))
+    monkeypatch.setattr(
+        operations,
+        "wait_for_doctor_ok",
+        lambda args, timeout_seconds: calls.append(f"doctor:{timeout_seconds}"),
+    )
 
     def fake_render_compose(layout, manifest_path, source_root=None, profile="onprem"):
         calls.append("render")
@@ -425,5 +431,71 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
 
     assert result == {"message": "ok"}
     assert calls.index("pull") < calls.index("stop:backend,worker")
+    assert calls.index("preflight_doctor") < calls.index("render")
     assert calls.index("render") < calls.index("pull")
+    assert calls.index("render") < calls.index("validate_security_consumer")
+    assert calls.index("validate_security_consumer") < calls.index("stop:backend,worker")
     assert calls.index("stop:backend,worker") < calls.index("migrate")
+    assert calls.index("health") < calls.index("doctor:1")
+    assert calls.index("doctor:1") < calls.index("promote")
+
+
+def test_security_queue_consumer_probe_requires_real_celery_process(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.compose_file.write_text("services:\n  worker:\n", encoding="utf-8")
+    responses = iter([
+        SimpleNamespace(returncode=0, stdout="worker-container-id\n", stderr=""),
+        SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "PID ARGS\n"
+                "10 /bin/bash -lc celery --queues=security\n"
+                "11 /venv/bin/python3 /venv/bin/celery -A packetsafari.celery_app worker --queues=index\n"
+            ),
+            stderr="",
+        ),
+    ])
+    monkeypatch.setattr(operations.subprocess, "run", lambda *args, **kwargs: next(responses))
+
+    result = operations._security_queue_consumer_probe(layout)
+
+    assert result["ok"] is False
+    assert result["consumerCount"] == 0
+
+
+def test_wait_for_doctor_ok_allows_intelligence_startup_grace(monkeypatch):
+    payloads = iter([
+        {
+            "ok": False,
+            "checks": [
+                {
+                    "name": "intelligence_updates",
+                    "ok": False,
+                    "status": "unhealthy",
+                    "problems": ["scheduled_update_overdue"],
+                }
+            ],
+        },
+        {"ok": True, "checks": [{"name": "intelligence_updates", "ok": True}]},
+    ])
+    monkeypatch.setattr(operations, "doctor_deployment", lambda args: next(payloads))
+
+    result = operations.wait_for_doctor_ok(SimpleNamespace(), timeout_seconds=1, poll_seconds=0)
+
+    assert result["ok"] is True
+
+
+def test_wait_for_doctor_ok_fails_immediately_for_permanent_check(monkeypatch):
+    payload = {
+        "ok": False,
+        "checks": [{"name": "required_env", "ok": False, "error": "missing API key"}],
+    }
+    monkeypatch.setattr(operations, "doctor_deployment", lambda args: payload)
+
+    try:
+        operations.wait_for_doctor_ok(SimpleNamespace(), timeout_seconds=30, poll_seconds=0)
+    except RuntimeError as exc:
+        assert str(exc) == "Deployment readiness checks failed: required_env (missing API key)"
+    else:
+        raise AssertionError("permanent readiness failure should not be retried")
