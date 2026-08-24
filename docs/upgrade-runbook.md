@@ -67,6 +67,15 @@ runbooks, but new docs and operator habits should use `update`. The tool still
 uses a release manifest internally, but operators do not need to pass one each
 time.
 
+Interactive `update` prints an update plan before mutation with the current and
+target application/backend versions, current and target ops-tool versions,
+changed services, deployment identity, backup policy, sanitized release source,
+and host warnings. After the transaction it prints a concise success, already
+current, or failure readback with installed versions, health verification,
+rollback capability, snapshot, and image-cleanup outcome. The final result
+payload remains JSON in non-interactive use; use `update --json` to request it
+explicitly in a terminal.
+
 `bootstrap.sh` is for first install and recovery. It can launch `update`, but
 the normal post-install command is the installed wrapper:
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import urllib.parse
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -282,6 +284,11 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--skip-image-retention-check", action="store_true")
     update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
     update.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the complete final update payload instead of the interactive terminal summary.",
+    )
+    update.add_argument(
         "--allow-unbacked-upgrade",
         action="store_true",
         help="Allow --backup-mode skip. Intended only for container-only releases or disposable development hosts.",
@@ -311,6 +318,89 @@ def build_parser() -> argparse.ArgumentParser:
     tui = subparsers.add_parser("tui", help="Launch the simple operator menu.")
     tui.add_argument("--api-base-url")
     return parser
+
+
+def _format_update_result(payload: dict) -> str:
+    summary = payload.get("updateSummary") if isinstance(payload.get("updateSummary"), dict) else {}
+    previous_app = str(summary.get("previousApplicationVersion") or payload.get("currentVersion") or "unknown")
+    installed_app = str(summary.get("installedApplicationVersion") or payload.get("version") or payload.get("targetVersion") or "unknown")
+    previous_ops = str(summary.get("previousOpsVersion") or "unknown")
+    installed_ops = str(summary.get("installedOpsVersion") or previous_ops)
+    status_value = str(payload.get("status") or "ok")
+    ops_updated = bool(summary.get("opsUpdated"))
+    app_updated = previous_app != installed_app and status_value != "noop"
+    if status_value == "noop" and ops_updated:
+        title = "✓ OPS TOOL UPDATE SUCCEEDED — APPLICATION ALREADY CURRENT"
+    elif status_value == "noop":
+        title = "✓ PACKETSAFARI IS ALREADY CURRENT"
+    else:
+        title = "✓ PACKETSAFARI UPDATE SUCCEEDED"
+    changed_services = summary.get("changedServices") if isinstance(summary.get("changedServices"), list) else []
+    image_retention = payload.get("imageRetention") if isinstance(payload.get("imageRetention"), dict) else {}
+    candidate_count = int(image_retention.get("candidateCount") or 0)
+    cleanup_status = str(image_retention.get("status") or "")
+    if cleanup_status == "ok":
+        cleanup = f"removed {len(image_retention.get('removedIds') or [])} old PacketSafari image(s)"
+    elif candidate_count:
+        cleanup = f"{candidate_count} removable PacketSafari image(s) kept"
+    elif image_retention.get("skipped"):
+        cleanup = "image-retention check skipped"
+    else:
+        cleanup = "no cleanup needed"
+    lines = [
+        "",
+        "=" * 76,
+        title,
+        "=" * 76,
+        f"Application/backend  {previous_app} -> {installed_app}  [{'updated' if app_updated else 'current'}]",
+        f"Ops tooling          {previous_ops} -> {installed_ops}  [{'updated' if ops_updated else 'current'}]",
+        f"Profile              {payload.get('profile') or 'unknown'}",
+        f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'none'}",
+        f"Health/readiness     {summary.get('verification') or 'unknown'}",
+        f"Rollback             {summary.get('rollback') or 'unchanged'}",
+        f"Image cleanup        {cleanup}",
+    ]
+    if payload.get("snapshot"):
+        lines.append(f"Snapshot             {payload['snapshot']}")
+    warnings = [str(item) for item in summary.get("hostWarnings") or [] if str(item).strip()]
+    if warnings:
+        lines.append("Warnings             " + warnings[0])
+        lines.extend(f"                     {warning}" for warning in warnings[1:])
+    lines.extend(["=" * 76, ""])
+    return "\n".join(lines)
+
+
+def _format_update_failure(exc: Exception) -> str:
+    def sanitize_url(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        suffix = ""
+        while raw and raw[-1] in ").,;":
+            suffix = raw[-1] + suffix
+            raw = raw[:-1]
+        parsed = urllib.parse.urlsplit(raw)
+        hostname = parsed.hostname or ""
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        netloc = f"{hostname}:{port}" if port else hostname
+        return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", "")) + suffix
+
+    reason = re.sub(r"https?://[^\s]+", sanitize_url, str(exc))
+    return "\n".join(
+        [
+            "",
+            "=" * 76,
+            "✗ PACKETSAFARI UPDATE FAILED",
+            "=" * 76,
+            f"Reason: {reason}",
+            "",
+            "The command exited without reporting successful release promotion.",
+            "Inspect `packetsafari-ops status` and run `packetsafari-ops healthcheck` before retrying.",
+            "=" * 76,
+            "",
+        ]
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -369,7 +459,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "check":
             print(json.dumps(check_for_update(args), indent=2))
         else:
-            print(json.dumps(apply_update(args), indent=2))
+            human_output = bool(sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty() and not args.json)
+            setattr(args, "human_output", human_output)
+            try:
+                payload = apply_update(args)
+            except Exception as exc:
+                if human_output:
+                    print(_format_update_failure(exc), file=sys.stderr)
+                    return 1
+                raise
+            if human_output:
+                print(_format_update_result(payload))
+            else:
+                print(json.dumps(payload, indent=2))
         return 0
     if args.command == "content":
         print(json.dumps(operate_security_content(args), indent=2))

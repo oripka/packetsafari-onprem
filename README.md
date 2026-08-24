@@ -228,6 +228,13 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - The public HTTPS URL entered during onboarding automatically owns the WebAuthn origin and relying-party ID; see `docs/passkeys.md` before enrolling passkeys or changing the hostname.
 - `update check` discovers the configured release-channel manifest and reports app and ops tooling availability.
 - `update` downloads the configured release-channel manifest, self-updates `packetsafari-ops` when the manifest advertises newer tooling, re-execs the updated CLI, and then runs the same transaction as `upgrade --manifest`.
+- In an interactive terminal, `update` prints a concise plan before mutation
+  showing the application/backend and ops-tool version transitions, changed
+  services, profile/channel/platform, backup policy, sanitized source, and host
+  warnings. It ends with an explicit succeeded/current/failed summary covering
+  installed versions, health verification, rollback capability, and image
+  cleanup. The final result payload remains JSON in non-interactive use; pass
+  `--json` to request that payload explicitly in a terminal.
 - `healthcheck` runs deployment readiness checks and Docker image-retention guidance without applying a release.
 - `install --license` and bare `upgrade` use the same default release-channel
   manifest discovery. Pass `--manifest` only for a pinned file/URL, staging

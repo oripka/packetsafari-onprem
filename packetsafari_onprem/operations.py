@@ -3643,6 +3643,7 @@ def check_for_update(args) -> dict:
 
 def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> dict:
     manifest = _read_json(manifest_path, {})
+    active_manifest = _read_json(layout.release_manifest_path, {})
     current = _current_release_version(layout)
     target = str(manifest.get("version") or "").strip()
     if not target:
@@ -3668,9 +3669,11 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         **app,
         "channel": str(manifest.get("channel") or ""),
         "profile": _requested_or_active_profile(args, layout),
+        "platform": str(getattr(args, "platform", "") or DEFAULT_UPDATE_PLATFORM),
         "manifest": str(manifest_path),
         "source": _update_manifest_source(args, layout),
         "backupMode": resolve_backup_mode(args, profile=_requested_or_active_profile(args, layout)),
+        "changedServices": _services_with_changed_images(active_manifest, manifest),
         "app": app,
         "ops": ops,
         "tooling": ops,
@@ -3678,17 +3681,121 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
     }
 
 
+_UPDATE_PLAN_PRINTED_ENV = "PACKETSAFARI_OPS_INTERNAL_UPDATE_PLAN_PRINTED"
+_UPDATE_ORIGINAL_OPS_ENV = "PACKETSAFARI_OPS_INTERNAL_UPDATE_ORIGINAL_OPS_VERSION"
+
+
+def _display_release_source(source: object) -> str:
+    raw = str(source or "").strip()
+    if not raw:
+        return "configured release channel"
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme not in {"http", "https"}:
+        return raw
+    hostname = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port else hostname
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def format_update_plan(payload: dict, host_requirements: dict[str, object]) -> str:
+    app = payload.get("app") if isinstance(payload.get("app"), dict) else payload
+    ops = payload.get("ops") if isinstance(payload.get("ops"), dict) else {}
+    changed_services = payload.get("changedServices") if isinstance(payload.get("changedServices"), list) else []
+    backup_mode = str(payload.get("backupMode") or "profile default")
+    backup_note = {
+        "inline": "local PostgreSQL and /storage backup",
+        "require-recent": "verified recent external backup required",
+        "skip": "UNBACKED — no PacketSafari data backup",
+    }.get(backup_mode, "profile default")
+    ops_target = str(ops.get("targetVersion") or ops.get("requiredVersion") or ops.get("currentVersion") or "unknown")
+    ops_marker = "upgrade" if ops.get("available") else "current"
+    app_marker = "upgrade" if app.get("available") else "current"
+    lines = [
+        "",
+        "=" * 76,
+        "PACKETSAFARI UPDATE PLAN",
+        "=" * 76,
+        f"Application/backend  {app.get('currentVersion') or 'not installed'} -> {app.get('targetVersion') or 'unknown'}  [{app_marker}]",
+        f"Ops tooling          {ops.get('currentVersion') or version()} -> {ops_target}  [{ops_marker}]",
+        f"Deployment           {payload.get('profile') or 'unknown'} / {payload.get('channel') or 'stable'} / {payload.get('platform') or DEFAULT_UPDATE_PLATFORM}",
+        f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'no image changes detected'}",
+        f"Backup policy        {backup_mode} ({backup_note})",
+        f"Release source       {_display_release_source(payload.get('source'))}",
+    ]
+    warnings = [str(item) for item in host_requirements.get("warnings") or [] if str(item).strip()]
+    sizing = payload.get("sizingStatus") if isinstance(payload.get("sizingStatus"), dict) else {}
+    if sizing.get("stale"):
+        warnings.extend(str(item) for item in sizing.get("warnings") or [] if str(item).strip())
+    if warnings:
+        lines.append("Warnings             " + warnings[0])
+        lines.extend(f"                     {warning}" for warning in warnings[1:])
+    else:
+        lines.append("Preflight            host requirements and sizing look ready")
+    lines.extend(["=" * 76, ""])
+    return "\n".join(lines)
+
+
+def _attach_update_summary(
+    result: dict,
+    check_payload: dict,
+    host_requirements: dict[str, object],
+    args,
+) -> dict:
+    app = check_payload.get("app") if isinstance(check_payload.get("app"), dict) else check_payload
+    original_ops = str(os.getenv(_UPDATE_ORIGINAL_OPS_ENV) or ((check_payload.get("ops") or {}).get("currentVersion")) or version())
+    installed_ops = version()
+    backup_mode = str(result.get("backupMode") or check_payload.get("backupMode") or "")
+    if result.get("status") == "noop":
+        installed_app = str(app.get("currentVersion") or "")
+        verification = "not needed"
+        rollback = "unchanged"
+    elif bool(getattr(args, "skip_health_check", False)):
+        installed_app = str(result.get("version") or app.get("targetVersion") or "")
+        verification = "skipped by operator"
+        rollback = "full local restore available" if backup_mode == "inline" else "metadata restore only"
+    else:
+        installed_app = str(result.get("version") or app.get("targetVersion") or "")
+        verification = "passed"
+        rollback = "full local restore available" if backup_mode == "inline" else "metadata restore only"
+    if backup_mode == "require-recent":
+        rollback += "; data restore uses the verified external backup"
+    elif backup_mode == "skip":
+        rollback += "; no PacketSafari data backup was captured"
+    result["updateSummary"] = {
+        "previousApplicationVersion": str(app.get("currentVersion") or ""),
+        "installedApplicationVersion": installed_app,
+        "previousOpsVersion": original_ops,
+        "installedOpsVersion": installed_ops,
+        "opsUpdated": _version_key(original_ops) < _version_key(installed_ops),
+        "changedServices": check_payload.get("changedServices") or [],
+        "verification": verification,
+        "rollback": rollback,
+        "hostWarnings": host_requirements.get("warnings") or [],
+    }
+    return result
+
+
 def apply_update(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     ensure_runtime_dirs(layout)
-    host_requirements = warn_if_host_below_requirements(layout)
-    sizing_status = warn_if_sizing_state_stale(layout)
+    human_output = bool(getattr(args, "human_output", False))
+    host_requirements = host_requirements_report(layout) if human_output else warn_if_host_below_requirements(layout)
+    sizing_status = sizing_state_status(layout) if human_output else warn_if_sizing_state_stale(layout)
     manifest_path = _download_update_manifest(args, layout)
     check_payload = _update_check_payload(args, layout, manifest_path)
+    ops_status = check_payload.get("ops") if isinstance(check_payload.get("ops"), dict) else {}
+    os.environ.setdefault(_UPDATE_ORIGINAL_OPS_ENV, str(ops_status.get("currentVersion") or version()))
+    if human_output and not _truthy(os.getenv(_UPDATE_PLAN_PRINTED_ENV)):
+        print(format_update_plan(check_payload, host_requirements), file=sys.stderr, flush=True)
+        os.environ[_UPDATE_PLAN_PRINTED_ENV] = "true"
     manifest = _read_json(manifest_path, {})
     maybe_self_update_tooling(args, layout, manifest)
     if not check_payload["available"] and not bool(getattr(args, "force", False)):
-        return {"status": "noop", **check_payload}
+        return _attach_update_summary({"status": "noop", **check_payload}, check_payload, host_requirements, args)
     setattr(args, "manifest", str(manifest_path))
     setattr(args, "bundle", None)
     setattr(args, "_host_requirements_report", host_requirements)
@@ -3699,7 +3806,7 @@ def apply_update(args) -> dict:
     result["hostRequirements"] = host_requirements
     result["sizingStatus"] = sizing_status
     result["imageRetention"] = maybe_offer_docker_image_prune(args, layout)
-    return result
+    return _attach_update_summary(result, check_payload, host_requirements, args)
 
 
 def write_deployment_state(layout: RuntimeLayout, *, mode: str, action_type: str, action_status: str, action_message: str) -> None:
@@ -4851,11 +4958,18 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
         "message": f"Applied release {deployment['installedVersion']}.",
         "updatedAt": utc_now(),
     }
-    rollback_note = (
-        "If migrations ran, rollback restores the saved Postgres and storage backup before restarting the previous release."
-        if backup_mode == "inline"
-        else "This upgrade used an external backup proof. Automatic rollback restores runtime metadata only; restore data from the external backup if migrations must be undone."
-    )
+    if backup_mode == "inline":
+        rollback_note = "If migrations ran, rollback restores the saved Postgres and storage backup before restarting the previous release."
+    elif backup_mode == "require-recent":
+        rollback_note = (
+            "This upgrade used an external backup proof. Automatic rollback restores runtime metadata only; "
+            "restore data from the external backup if migrations must be undone."
+        )
+    else:
+        rollback_note = (
+            "This upgrade did not capture a PacketSafari data backup. Automatic rollback restores runtime metadata only; "
+            "restore Postgres and /storage from a separately managed backup if migrations must be undone."
+        )
     state["rollback"] = {
         "latestSnapshot": str(snapshot_dir),
         "rollbackMode": "restore" if backup_mode == "inline" else "external-data-restore",
