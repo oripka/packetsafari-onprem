@@ -21,6 +21,7 @@ if __package__ in {None, ""}:
         healthcheck_deployment,
         configure_required_env,
         configure_upstream_proxy,
+        operate_intelligence_egress,
         apply_update,
         check_for_update,
         install_release,
@@ -49,6 +50,7 @@ else:
         healthcheck_deployment,
         configure_required_env,
         configure_upstream_proxy,
+        operate_intelligence_egress,
         apply_update,
         check_for_update,
         install_release,
@@ -223,6 +225,19 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--restart", action="store_true", help="Restart egress-ironproxy after writing ironproxy.env.")
     add_download_args(config)
 
+    egress = subparsers.add_parser("egress", help="Manage purpose-scoped deployment egress approvals.")
+    egress.add_argument(
+        "action",
+        choices=[
+            "approve-intelligence-host",
+            "remove-intelligence-host",
+            "list-intelligence-hosts",
+        ],
+    )
+    egress.add_argument("--url", help="HTTPS feed URL or origin to approve or remove.")
+    egress.add_argument("--approved-by", default="", help="Operator identity recorded with an approval.")
+    egress.add_argument("--notes", default="", help="Optional approval rationale or change reference.")
+
     update = subparsers.add_parser("update", help="Check or apply the configured release channel update.")
     update.add_argument(
         "action",
@@ -376,6 +391,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(configure_upstream_proxy(args), indent=2))
         else:
             print(json.dumps(configure_required_env(args), indent=2))
+        return 0
+    if args.command == "egress":
+        if args.action != "list-intelligence-hosts" and not str(args.url or "").strip():
+            parser.error(f"egress {args.action} requires --url")
+        print(json.dumps(operate_intelligence_egress(args), indent=2))
         return 0
     if args.command == "iam":
         if args.action == "show-initial-admin-command":

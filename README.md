@@ -187,6 +187,8 @@ packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 packetsafari-ops onboard schema
 packetsafari-ops config show
+packetsafari-ops egress list-intelligence-hosts
+packetsafari-ops egress approve-intelligence-host --url https://feeds.example.com
 packetsafari-ops iam show-initial-admin-command --email admin@example.com
 packetsafari-ops diagnostics restart
 ```

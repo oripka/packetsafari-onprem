@@ -5,11 +5,13 @@ import base64
 import getpass
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -78,6 +80,23 @@ AUTO_GENERATED_UPGRADE_ENV_KEYS = frozenset({
     "AI_AGENT_STREAM_TICKET_SECRET",
     "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
 })
+INTELLIGENCE_EGRESS_REGISTRY_NAME = "approved-intelligence-egress-hosts.json"
+INTELLIGENCE_EGRESS_MANAGED_BY = "packetsafari-egress-intelligence"
+INTELLIGENCE_EGRESS_METADATA_ADDRESSES = {
+    ipaddress.ip_address("100.100.100.200"),
+    ipaddress.ip_address("169.254.169.254"),
+    ipaddress.ip_address("fd00:ec2::254"),
+}
+INTELLIGENCE_EGRESS_CUSTOMER_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in (
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    )
+)
 
 DEFAULT_LOGGING_VALUES = {
     "AUDIT_LOG_ENABLED": "true",
@@ -169,6 +188,18 @@ class RuntimeLayout:
     @property
     def ironproxy_env_path(self) -> Path:
         return self.env_dir / "ironproxy.env"
+
+    @property
+    def intelligence_egress_registry_path(self) -> Path:
+        return self.configuration_dir / INTELLIGENCE_EGRESS_REGISTRY_NAME
+
+    @property
+    def production_egress_allowlist_path(self) -> Path:
+        return self.configuration_dir / "egress-allowlist.production.yaml"
+
+    @property
+    def production_ironproxy_config_path(self) -> Path:
+        return self.configuration_dir / "iron-proxy" / "proxy.production.generated.yaml"
 
     @property
     def deployment_state_path(self) -> Path:
@@ -1742,8 +1773,16 @@ def write_helper_status(layout: RuntimeLayout, *, status: str = "ok", message: s
 def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> None:
     root = source_root or layout.tooling_root
     config_source = root / "templates" / "egress-config"
+    preserved_intelligence_registry = (
+        _read_json(layout.intelligence_egress_registry_path, {"approved_hosts": [], "version": 1})
+        if layout.intelligence_egress_registry_path.exists()
+        else None
+    )
     if config_source.exists():
         shutil.copytree(config_source, layout.configuration_dir, dirs_exist_ok=True)
+    if isinstance(preserved_intelligence_registry, dict):
+        _write_json(layout.intelligence_egress_registry_path, preserved_intelligence_registry)
+        _sync_intelligence_egress_config(layout)
     _run_script(
         root,
         "render_compose.py",
@@ -2255,6 +2294,246 @@ def configure_upstream_proxy(args) -> dict:
             "HTTPS_PROXY": values.get("HTTPS_PROXY", ""),
             "NO_PROXY": values.get("NO_PROXY", ""),
         },
+    }
+
+
+def _parse_intelligence_egress_url(value: str, *, resolve_dns: bool) -> dict[str, object]:
+    raw = str(value or "").strip()
+    if not raw:
+        raise RuntimeError("--url is required.")
+    if len(raw) > 4096 or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in raw):
+        raise RuntimeError("--url must be a bounded URL without whitespace or control characters.")
+    parsed = urllib.parse.urlsplit(raw)
+    if str(parsed.scheme or "").lower() != "https":
+        raise RuntimeError("Intelligence feed hosts must use HTTPS.")
+    if parsed.username or parsed.password:
+        raise RuntimeError("Intelligence feed URLs must not embed credentials.")
+    if parsed.fragment:
+        raise RuntimeError("Intelligence feed URLs must not include a fragment.")
+    host = str(parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise RuntimeError("Intelligence feed URL must include a hostname.")
+    if not host.isascii():
+        raise RuntimeError("Intelligence feed URL must use an ASCII hostname or IP address.")
+    try:
+        port = int(parsed.port or 443)
+    except Exception as exc:
+        raise RuntimeError("Intelligence feed URL contains an invalid port.") from exc
+    if port < 1 or port > 65535:
+        raise RuntimeError("Intelligence feed URL port must be between 1 and 65535.")
+
+    def unsafe(address: str) -> bool:
+        ip = ipaddress.ip_address(address)
+        if ip not in INTELLIGENCE_EGRESS_METADATA_ADDRESSES and any(
+            ip in network for network in INTELLIGENCE_EGRESS_CUSTOMER_PRIVATE_NETWORKS
+        ):
+            return False
+        return ip in INTELLIGENCE_EGRESS_METADATA_ADDRESSES or any(
+            (
+                not ip.is_global,
+                ip.is_loopback,
+                ip.is_link_local,
+                ip.is_multicast,
+                ip.is_reserved,
+                ip.is_unspecified,
+            )
+        )
+
+    if resolve_dns:
+        try:
+            literal = ipaddress.ip_address(host.strip("[]"))
+            addresses = {str(literal)}
+        except ValueError:
+            original_timeout = socket.getdefaulttimeout()
+            try:
+                socket.setdefaulttimeout(2.0)
+                addresses = {
+                    str(row[4][0])
+                    for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                    if row and row[4]
+                }
+            except OSError as exc:
+                raise RuntimeError(f"Intelligence feed hostname did not resolve: {host}") from exc
+            finally:
+                socket.setdefaulttimeout(original_timeout)
+        if not addresses:
+            raise RuntimeError(f"Intelligence feed hostname did not resolve: {host}")
+        blocked = sorted(address for address in addresses if unsafe(address))
+        if blocked:
+            raise RuntimeError(
+                "Intelligence feed host resolves to a forbidden loopback, link-local, reserved, or metadata address: "
+                + ", ".join(blocked)
+            )
+
+    display_host = f"[{host}]" if ":" in host else host
+    return {
+        "host": host,
+        "port": port,
+        "scheme": "https",
+        "origin": urllib.parse.urlunsplit(("https", display_host if port == 443 else f"{display_host}:{port}", "", "", "")),
+    }
+
+
+def _load_intelligence_egress_registry(layout: RuntimeLayout) -> dict[str, object]:
+    payload = _read_json(layout.intelligence_egress_registry_path, {"approved_hosts": [], "version": 1})
+    approved_hosts = payload.get("approved_hosts") if isinstance(payload, dict) else []
+    return {
+        "approved_hosts": [entry for entry in approved_hosts if isinstance(entry, dict)] if isinstance(approved_hosts, list) else [],
+        "version": 1,
+    }
+
+
+def _replace_ironproxy_domains(path: Path, hosts: list[str]) -> None:
+    if not path.exists():
+        raise RuntimeError(f"Iron proxy configuration is missing: {path}")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        marker = next(index for index, line in enumerate(lines) if line.strip() == "domains:")
+    except StopIteration as exc:
+        raise RuntimeError(f"Iron proxy allowlist transform is missing from {path}") from exc
+    end = marker + 1
+    while end < len(lines) and lines[end].startswith("        - "):
+        end += 1
+    rendered = [*lines[: marker + 1], *(f'        - "{host}"' for host in hosts), *lines[end:]]
+    path.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+
+
+def _sync_intelligence_egress_config(layout: RuntimeLayout) -> dict[str, object]:
+    allowlist_path = layout.production_egress_allowlist_path
+    if not allowlist_path.exists():
+        raise RuntimeError(f"Egress allowlist is missing: {allowlist_path}")
+    allowlist = _read_json(allowlist_path, {"destinations": [], "version": 1})
+    if not isinstance(allowlist, dict):
+        raise RuntimeError(f"Egress allowlist is not an object: {allowlist_path}")
+    destinations = allowlist.get("destinations")
+    if not isinstance(destinations, list):
+        destinations = []
+    retained = [
+        item
+        for item in destinations
+        if not (isinstance(item, dict) and str(item.get("managed_by") or "") == INTELLIGENCE_EGRESS_MANAGED_BY)
+    ]
+    registry = _load_intelligence_egress_registry(layout)
+    for entry in registry["approved_hosts"]:
+        host = str(entry.get("host") or "").strip().lower()
+        if not host:
+            continue
+        retained.append(
+            {
+                "classification": "feature-optional",
+                "host": host,
+                "managed_by": INTELLIGENCE_EGRESS_MANAGED_BY,
+                "notes": "Host-approved custom intelligence feed routed through the egress proxy.",
+                "owners": ["backend", "worker"],
+                "port": int(entry.get("port") or 443),
+                "purpose": "Security intelligence",
+            }
+        )
+    allowlist["destinations"] = retained
+    allowlist["version"] = 1
+    _write_json(allowlist_path, allowlist)
+    hosts = sorted(
+        {
+            str(item.get("host") or "").strip().lower()
+            for item in retained
+            if isinstance(item, dict) and str(item.get("host") or "").strip()
+        }
+    )
+    _replace_ironproxy_domains(layout.production_ironproxy_config_path, hosts)
+    return {
+        "allowlistPath": str(allowlist_path),
+        "proxyConfigPath": str(layout.production_ironproxy_config_path),
+        "approvedHosts": registry["approved_hosts"],
+    }
+
+
+def _restart_ironproxy_if_running(layout: RuntimeLayout) -> bool:
+    result = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    running = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    if not {"packetsafari-egress-ironproxy", "egress-ironproxy"}.intersection(running):
+        return False
+    docker_compose_restart(layout, services=["egress-ironproxy"])
+    return True
+
+
+def operate_intelligence_egress(args) -> dict[str, object]:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    action = str(getattr(args, "action", "") or "").strip()
+    registry = _load_intelligence_egress_registry(layout)
+    if action == "list-intelligence-hosts":
+        return {
+            "ok": True,
+            "registryPath": str(layout.intelligence_egress_registry_path),
+            "approvedHosts": registry["approved_hosts"],
+        }
+
+    parsed = _parse_intelligence_egress_url(
+        str(getattr(args, "url", "") or ""),
+        resolve_dns=action == "approve-intelligence-host",
+    )
+    target = (parsed["host"], parsed["port"], parsed["scheme"])
+    approved_hosts = list(registry["approved_hosts"])
+    retained = []
+    matched = False
+    for entry in approved_hosts:
+        key = (
+            str(entry.get("host") or "").strip().lower(),
+            int(entry.get("port") or 443),
+            str(entry.get("scheme") or "https").strip().lower(),
+        )
+        if key == target:
+            matched = True
+            if action == "remove-intelligence-host":
+                continue
+        retained.append(entry)
+
+    if action == "approve-intelligence-host":
+        approved_by = str(getattr(args, "approved_by", "") or getpass.getuser()).strip()
+        notes = str(getattr(args, "notes", "") or "").strip()
+        entry = {
+            "approved_at": utc_now(),
+            "approved_by": approved_by,
+            "host": parsed["host"],
+            "notes": notes,
+            "port": parsed["port"],
+            "scheme": parsed["scheme"],
+        }
+        if matched:
+            retained = [
+                entry if (
+                    str(item.get("host") or "").strip().lower(),
+                    int(item.get("port") or 443),
+                    str(item.get("scheme") or "https").strip().lower(),
+                ) == target else item
+                for item in retained
+            ]
+        else:
+            retained.append(entry)
+    elif action != "remove-intelligence-host":
+        raise RuntimeError(f"Unsupported egress action: {action}")
+
+    retained.sort(key=lambda item: (str(item.get("host") or ""), int(item.get("port") or 443)))
+    _write_json(
+        layout.intelligence_egress_registry_path,
+        {"approved_hosts": retained, "version": 1},
+    )
+    synced = _sync_intelligence_egress_config(layout)
+    changed = action == "approve-intelligence-host" or matched
+    restarted = _restart_ironproxy_if_running(layout) if changed else False
+    return {
+        "ok": True,
+        "action": action,
+        "target": parsed,
+        "changed": changed,
+        "removed": action == "remove-intelligence-host" and matched,
+        "restarted": restarted,
+        "registryPath": str(layout.intelligence_egress_registry_path),
+        **synced,
     }
 
 

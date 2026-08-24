@@ -235,6 +235,7 @@ services:
       - "{{ host_runtime_root }}/configuration/egress-allowlist.production.yaml:/app/configuration/egress-allowlist.production.yaml"
       - "{{ host_runtime_root }}/configuration/approved-ai-egress-hosts.json:/app/configuration/approved-ai-egress-hosts.json"
       - "{{ host_runtime_root }}/configuration/approved-identity-egress-hosts.json:/app/configuration/approved-identity-egress-hosts.json"
+      - "{{ host_runtime_root }}/configuration/approved-intelligence-egress-hosts.json:/app/configuration/approved-intelligence-egress-hosts.json"
       - packetsafari-egress-proxy-certs:/etc/packetsafari/egress-proxy:ro
     depends_on:
       storage-init:
@@ -388,6 +389,7 @@ services:
       - "{{ host_runtime_root }}/configuration/egress-allowlist.production.yaml:/app/configuration/egress-allowlist.production.yaml"
       - "{{ host_runtime_root }}/configuration/approved-ai-egress-hosts.json:/app/configuration/approved-ai-egress-hosts.json"
       - "{{ host_runtime_root }}/configuration/approved-identity-egress-hosts.json:/app/configuration/approved-identity-egress-hosts.json"
+      - "{{ host_runtime_root }}/configuration/approved-intelligence-egress-hosts.json:/app/configuration/approved-intelligence-egress-hosts.json"
       - packetsafari-egress-proxy-certs:/etc/packetsafari/egress-proxy:ro
     depends_on:
       storage-init:
