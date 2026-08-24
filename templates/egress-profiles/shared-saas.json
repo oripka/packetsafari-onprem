@@ -1,0 +1,16 @@
+{
+  "deploymentMode": "shared_saas",
+  "deploymentProfile": "saas",
+  "destinations": [
+    {
+      "classification": "feature-optional",
+      "host": "eu.i.posthog.com",
+      "notes": "Personless lead and free-evaluation events for PacketSafari-operated shared SaaS.",
+      "owners": [
+        "backend"
+      ],
+      "port": 443,
+      "purpose": "Shared SaaS product analytics"
+    }
+  ]
+}

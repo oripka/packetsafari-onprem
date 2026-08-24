@@ -82,6 +82,8 @@ AUTO_GENERATED_UPGRADE_ENV_KEYS = frozenset({
 })
 INTELLIGENCE_EGRESS_REGISTRY_NAME = "approved-intelligence-egress-hosts.json"
 INTELLIGENCE_EGRESS_MANAGED_BY = "packetsafari-egress-intelligence"
+SHARED_SAAS_EGRESS_OVERLAY = "shared-saas.json"
+SHARED_SAAS_DEPLOYMENT_MODE = "shared_saas"
 INTELLIGENCE_EGRESS_METADATA_ADDRESSES = {
     ipaddress.ip_address("100.100.100.200"),
     ipaddress.ip_address("169.254.169.254"),
@@ -1770,6 +1772,48 @@ def write_helper_status(layout: RuntimeLayout, *, status: str = "ok", message: s
     )
 
 
+def _apply_profile_egress_overlay(layout: RuntimeLayout, source_root: Path, *, profile: str) -> None:
+    if profile != "saas":
+        return
+
+    runtime_env = parse_env_file(layout.runtime_env_path)
+    deployment_mode = str(runtime_env.get("PACKETSAFARI_DEPLOYMENT_MODE") or "").strip().lower()
+    if deployment_mode and deployment_mode != SHARED_SAAS_DEPLOYMENT_MODE:
+        return
+
+    overlay_path = source_root / "templates" / "egress-profiles" / SHARED_SAAS_EGRESS_OVERLAY
+    overlay = _read_json(overlay_path, {})
+    if (
+        overlay.get("deploymentProfile") != "saas"
+        or overlay.get("deploymentMode") != SHARED_SAAS_DEPLOYMENT_MODE
+        or not isinstance(overlay.get("destinations"), list)
+    ):
+        raise RuntimeError(f"Invalid shared-SaaS egress overlay: {overlay_path}")
+
+    allowlist_path = layout.production_egress_allowlist_path
+    allowlist = _read_json(allowlist_path, {})
+    destinations = allowlist.get("destinations") if isinstance(allowlist, dict) else None
+    if not isinstance(destinations, list):
+        raise RuntimeError(f"Invalid egress allowlist: {allowlist_path}")
+
+    overlay_destinations = overlay["destinations"]
+    overlay_hosts = {
+        (str(item.get("host") or "").strip().lower(), int(item.get("port") or 443))
+        for item in overlay_destinations
+        if isinstance(item, dict) and str(item.get("host") or "").strip()
+    }
+    retained = [
+        item
+        for item in destinations
+        if not (
+            isinstance(item, dict)
+            and (str(item.get("host") or "").strip().lower(), int(item.get("port") or 443)) in overlay_hosts
+        )
+    ]
+    allowlist["destinations"] = [*retained, *overlay_destinations]
+    _write_json(allowlist_path, allowlist)
+
+
 def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> None:
     root = source_root or layout.tooling_root
     config_source = root / "templates" / "egress-config"
@@ -1782,7 +1826,8 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
         shutil.copytree(config_source, layout.configuration_dir, dirs_exist_ok=True)
     if isinstance(preserved_intelligence_registry, dict):
         _write_json(layout.intelligence_egress_registry_path, preserved_intelligence_registry)
-        _sync_intelligence_egress_config(layout)
+    _apply_profile_egress_overlay(layout, root, profile=profile)
+    _sync_intelligence_egress_config(layout)
     _run_script(
         root,
         "render_compose.py",
