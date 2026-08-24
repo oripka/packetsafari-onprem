@@ -26,6 +26,7 @@ if __package__ in {None, ""}:
         operate_intelligence_egress,
         apply_update,
         check_for_update,
+        configuration_overview,
         install_release,
         operate_security_content,
         rollback_release,
@@ -55,6 +56,7 @@ else:
         operate_intelligence_egress,
         apply_update,
         check_for_update,
+        configuration_overview,
         install_release,
         operate_security_content,
         rollback_release,
@@ -223,7 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
     onboard.add_argument("--draft-json", default="{}")
 
     config = subparsers.add_parser("config", help="Inspect or update managed deployment config.")
-    config.add_argument("action", choices=["show", "check-env", "prompt-env", "upstream-proxy"])
+    config.add_argument("action", choices=["overview", "show", "check-env", "prompt-env", "upstream-proxy"])
     config.add_argument("--manifest", help="Release manifest path or URL used to derive required env keys.")
     config.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
     config.add_argument("--output", help="Env file to update for prompt-env. Defaults to the managed runtime env.")
@@ -496,7 +498,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0
     if args.command == "config":
-        if args.action == "show":
+        if args.action == "overview":
+            print(json.dumps(configuration_overview(runtime_layout(args.runtime_root, args.container_runtime_root)), indent=2))
+        elif args.action == "show":
             print(show_runtime_env(runtime_layout(args.runtime_root, args.container_runtime_root)))
         elif args.action == "upstream-proxy":
             print(json.dumps(configure_upstream_proxy(args), indent=2))

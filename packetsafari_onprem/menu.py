@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from .operations import (
     DEFAULT_API_BASE_URL,
     DEFAULT_CONTAINER_RUNTIME_ROOT,
     check_for_update,
+    configuration_overview,
     configure_required_env,
     configure_upstream_proxy,
     detect_runtime_root,
@@ -708,6 +710,121 @@ def _show_config_status(ctx: MenuContext) -> None:
     )
 
 
+def _page_lines(title: str, lines: list[str], ctx: MenuContext) -> None:
+    page_size = max(8, shutil.get_terminal_size((100, 30)).lines - 9)
+    page_count = max(1, (len(lines) + page_size - 1) // page_size)
+    page = 0
+    while True:
+        _clear()
+        _terminal_header(title, ctx)
+        start = page * page_size
+        print("\n".join(lines[start : start + page_size]))
+        if page_count == 1:
+            _pause()
+            return
+        prompt = f"\n{DIM}Page {page + 1}/{page_count} · Enter/n next · p previous · q return:{RESET} "
+        choice = input(prompt).strip().lower()
+        if choice in {"q", "quit"}:
+            return
+        if choice in {"p", "prev", "previous"}:
+            page = max(0, page - 1)
+            continue
+        if page >= page_count - 1:
+            return
+        page += 1
+
+
+def _show_configuration_overview(ctx: MenuContext) -> None:
+    payload = configuration_overview(ctx.layout)
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    catalog = payload.get("catalog") if isinstance(payload.get("catalog"), dict) else {}
+    egress = payload.get("egress") if isinstance(payload.get("egress"), dict) else {}
+    inventory = payload.get("inventory") if isinstance(payload.get("inventory"), list) else []
+    feature_flags = [item for item in inventory if str(item.get("type") or "").lower() == "bool"]
+    enabled_flags = [item for item in feature_flags if str(item.get("value") or "").strip().lower() in {"1", "true", "yes", "on"}]
+    disabled_flags = [item for item in feature_flags if str(item.get("value") or "").strip().lower() in {"0", "false", "no", "off"}]
+    secret_items = [item for item in inventory if item.get("secret")]
+    configured_secrets = [item for item in secret_items if item.get("state") == "configured"]
+    lines = [
+        f"{BOLD}Deployment identity{RESET}",
+        f"  Ops profile          {payload.get('profile') or ctx.profile}",
+        f"  Application mode     {payload.get('deploymentMode') or 'unset'}",
+        f"  Configuration catalog {catalog.get('status') or 'partial'}"
+        + (f" · v{catalog.get('version')}" if catalog.get("version") is not None else ""),
+        f"  Variables            {summary.get('total', 0)} available · "
+        f"{summary.get('configured', 0)} configured · {summary.get('defaulted', 0)} defaulted · "
+        f"{summary.get('unset', 0)} unset",
+        f"  Feature flags        {len(enabled_flags)} enabled · {len(disabled_flags)} disabled · "
+        f"{len(feature_flags) - len(enabled_flags) - len(disabled_flags)} unset",
+        f"  Secrets              {len(configured_secrets)} configured · values always hidden",
+    ]
+    missing_required = int(summary.get("missingRequired") or 0)
+    if missing_required:
+        lines.append(f"  {RED}{BOLD}Required missing      {missing_required}{RESET}")
+    if catalog.get("message"):
+        lines.append(f"  {DIM}{catalog['message']}{RESET}")
+    if enabled_flags:
+        lines.extend(["", f"{BOLD}Enabled feature flags{RESET}"])
+        lines.extend(f"  {GREEN}✓{RESET} {item.get('key')}" for item in enabled_flags)
+
+    destinations = egress.get("destinations") if isinstance(egress.get("destinations"), list) else []
+    proxy_state = "configured" if egress.get("ironProxyConfigured") else "missing"
+    upstream_state = "configured" if egress.get("upstreamProxyConfigured") else "not configured · IronProxy connects directly"
+    lines.extend(
+        [
+            "",
+            f"{BOLD}Egress and IronProxy{RESET}",
+            f"  IronProxy            {proxy_state}",
+            f"  Upstream proxy       {upstream_state}",
+            f"  Proxy secrets        {egress.get('secretVariablesConfigured', 0)} configured · values hidden",
+            f"  Allowlist             {len(destinations)} destinations · "
+            f"monitor mode {'enabled' if egress.get('monitorMode') else 'disabled'}",
+        ]
+    )
+    service_modes = egress.get("serviceModes") if isinstance(egress.get("serviceModes"), dict) else {}
+    for service, settings in sorted(service_modes.items()):
+        mode = settings.get("egress_mode") if isinstance(settings, dict) else settings
+        lines.append(f"    {service:<20} {mode or 'unspecified'}")
+
+    lines.extend(["", f"{BOLD}Allowed destinations{RESET}"])
+    if destinations:
+        current_purpose = ""
+        for item in destinations:
+            purpose = str(item.get("purpose") or "Other")
+            if purpose != current_purpose:
+                lines.append(f"  {CYAN}{purpose}{RESET}")
+                current_purpose = purpose
+            port = f":{item.get('port')}" if item.get("port") else ""
+            managed = " · host-approved" if item.get("managed") else ""
+            lines.append(f"    {item.get('target')}{port} · {item.get('classification')}{managed}")
+    else:
+        lines.append(f"  {YELLOW}No installed egress destinations were found.{RESET}")
+
+    lines.extend(["", f"{BOLD}Complete environment inventory{RESET}"])
+    current_domain = ""
+    for item in inventory:
+        domain = str(item.get("domain") or "other")
+        if domain != current_domain:
+            lines.extend(["", f"{CYAN}{domain.upper()}{RESET}"])
+            current_domain = domain
+        state = str(item.get("state") or "unset")
+        if state == "missing-required":
+            marker = f"{RED}! REQUIRED{RESET}"
+        elif state == "configured":
+            marker = f"{GREEN}✓ SET{RESET}"
+        elif state == "defaulted":
+            marker = f"{DIM}• DEFAULT{RESET}"
+        else:
+            marker = f"{YELLOW}○ UNSET{RESET}"
+        source = f" · {item.get('source')}" if item.get("source") else ""
+        secret = " · secret" if item.get("secret") else ""
+        lines.append(f"  {marker:<23} {item.get('key')} = {item.get('value')}{source}{secret}")
+        description = textwrap.shorten(str(item.get("description") or ""), width=100, placeholder="…")
+        if description:
+            lines.append(f"      {DIM}{description}{RESET}")
+    _page_lines("Configuration Overview", lines, ctx)
+
+
 def _prompt_required_config(ctx: MenuContext) -> None:
     _clear()
     _terminal_header("Required Configuration", ctx)
@@ -973,6 +1090,7 @@ def _health_items(_ctx: MenuContext) -> list[MenuItem]:
 
 def _configuration_items(_ctx: MenuContext) -> list[MenuItem]:
     return [
+        MenuItem("Configuration overview", "Deployment mode, features, configured/defaulted/unset variables, masked secrets and effective egress.", action=_show_configuration_overview),
         MenuItem("Configuration status", "Show configured key names and presence without printing secret values.", action=_show_config_status),
         MenuItem("Complete required configuration", "Prompt for missing manifest-required values using the canonical config workflow.", action=_prompt_required_config),
         MenuItem("Run deployment readiness", "Validate required values and the running deployment without revealing secrets.", action=_run_doctor),

@@ -178,6 +178,26 @@ The cockpit exposes this as **Update without backup** under **Updates &
 recovery**. It displays the target release and rollback limitation and requires
 the operator to type `UNBACKED`; it never selects this mode by default.
 
+## Configuration overview
+
+Open **Configuration → Configuration overview** to inspect the effective host
+configuration without revealing secrets. The paginated view reports deployment
+identity, enabled feature flags, configured/defaulted/unset variables, missing
+required values, IronProxy and upstream-proxy state, service egress modes, and
+the installed purpose-scoped destination allowlist. Secret variables and
+variables absent from the signed release catalog are masked as `********`.
+
+For automation-friendly inspection, use:
+
+```bash
+packetsafari-ops config overview
+```
+
+New release manifests embed a value-free configuration catalog generated from
+PacketSafari's canonical environment registry. Older manifests are reported as
+partial and show only manifest-required and locally configured variables; the
+cockpit never implies that such a fallback is a complete inventory.
+
 ## Host Hygiene Checks
 
 `packetsafari-ops healthcheck` runs deployment readiness checks and adds Docker

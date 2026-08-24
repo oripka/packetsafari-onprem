@@ -3961,6 +3961,162 @@ def status(layout: RuntimeLayout) -> dict:
     }
 
 
+def _configuration_display_value(value: object, *, secret: bool) -> str:
+    if secret:
+        return "********"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, separators=(",", ":"), sort_keys=True)
+    else:
+        text = str(value)
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        netloc = f"{parsed.hostname}:{port}" if port else parsed.hostname
+        text = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
+def configuration_overview(layout: RuntimeLayout) -> dict[str, object]:
+    """Return a read-only, fail-closed view of effective host configuration."""
+    manifest = _read_json(layout.release_manifest_path, {})
+    profile = _active_deployment_profile(layout)
+    runtime_values = parse_env_file(layout.runtime_env_path)
+    sizing_values = parse_env_file(layout.runtime_sizing_env_path)
+    ironproxy_values = parse_env_file(layout.ironproxy_env_path)
+    configured_values = dict(runtime_values)
+    configured_sources = {key: "runtime.env" for key in runtime_values}
+    for key, value in sizing_values.items():
+        configured_values[key] = value
+        configured_sources[key] = "runtime-sizing.env"
+    for key, value in ironproxy_values.items():
+        configured_values[key] = value
+        configured_sources[key] = "ironproxy.env"
+
+    catalog = manifest.get("configurationCatalog") if isinstance(manifest.get("configurationCatalog"), dict) else {}
+    source_entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
+    required = set(_merged_required_env_keys(manifest, profile=profile))
+    entries_by_key: dict[str, dict[str, object]] = {}
+    for source in source_entries:
+        if not isinstance(source, dict):
+            continue
+        key = str(source.get("key") or "").strip()
+        if key:
+            entries_by_key[key] = source
+
+    catalog_complete = bool(entries_by_key)
+    for key in sorted(required | set(configured_values)):
+        if key not in entries_by_key:
+            entries_by_key[key] = {
+                "key": key,
+                "domain": "required" if key in required else "uncatalogued",
+                "type": "string",
+                "default": "",
+                "secret": True,
+                "required": key in required,
+                "description": "Not described by this release manifest; value is masked by default.",
+            }
+
+    inventory: list[dict[str, object]] = []
+    counts = {"configured": 0, "defaulted": 0, "unset": 0, "missingRequired": 0}
+    for key, entry in entries_by_key.items():
+        aliases = [str(item).strip() for item in entry.get("aliases") or [] if str(item).strip()]
+        configured_key = next((candidate for candidate in [key, *aliases] if str(configured_values.get(candidate) or "").strip()), "")
+        configured_value = configured_values.get(configured_key, "") if configured_key else ""
+        is_required = key in required
+        secret = entry.get("secret") is True or _secret_env_key(key)
+        default = entry.get("default", "")
+        has_default = default is not None and default != ""
+        valid = bool(configured_key) and _required_env_value_is_valid(key, str(configured_value))
+        if is_required and not valid:
+            state = "missing-required"
+            display_value = "<unset>"
+            counts["missingRequired"] += 1
+        elif configured_key:
+            state = "configured"
+            display_value = _configuration_display_value(configured_value, secret=secret)
+            counts["configured"] += 1
+        elif has_default:
+            state = "defaulted"
+            display_value = _configuration_display_value(default, secret=secret)
+            counts["defaulted"] += 1
+        else:
+            state = "unset"
+            display_value = "<unset>"
+            counts["unset"] += 1
+        inventory.append(
+            {
+                "key": key,
+                "label": str(entry.get("label") or key),
+                "domain": str(entry.get("domain") or "other"),
+                "type": str(entry.get("type") or "string"),
+                "lifecycle": str(entry.get("lifecycle") or ""),
+                "required": is_required,
+                "secret": secret,
+                "state": state,
+                "value": display_value,
+                "source": configured_sources.get(configured_key, "default" if state == "defaulted" else ""),
+                "configuredKey": configured_key,
+                "description": str(entry.get("description") or ""),
+            }
+        )
+    inventory.sort(key=lambda item: (str(item.get("domain") or "other"), str(item.get("key") or "")))
+
+    allowlist = _read_json(layout.production_egress_allowlist_path, {})
+    raw_destinations = allowlist.get("destinations") if isinstance(allowlist.get("destinations"), list) else []
+    destinations: list[dict[str, object]] = []
+    for item in raw_destinations:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("host") or item.get("dynamic_config") or "").strip()
+        if not target:
+            continue
+        destinations.append(
+            {
+                "target": target,
+                "port": item.get("port"),
+                "purpose": str(item.get("purpose") or "Other"),
+                "classification": str(item.get("classification") or "unknown"),
+                "managed": bool(item.get("managed_by")),
+            }
+        )
+    destinations.sort(key=lambda item: (str(item["purpose"]), str(item["target"])))
+    service_modes = allowlist.get("services") if isinstance(allowlist.get("services"), dict) else {}
+    upstream_proxy_keys = [key for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY") if str(ironproxy_values.get(key) or "").strip()]
+    return {
+        "profile": profile,
+        "deploymentMode": str(runtime_values.get("PACKETSAFARI_DEPLOYMENT_MODE") or "unset"),
+        "catalog": {
+            "status": "complete" if catalog_complete else "partial",
+            "version": catalog.get("version") if catalog_complete else None,
+            "message": "Canonical release catalog loaded." if catalog_complete else "This older release has no configuration catalog; only required and configured variables are shown.",
+        },
+        "summary": {**counts, "total": len(inventory)},
+        "inventory": inventory,
+        "egress": {
+            "allowlistLoaded": bool(allowlist),
+            "monitorMode": bool(allowlist.get("monitor_mode")),
+            "ironProxyConfigured": layout.production_ironproxy_config_path.exists(),
+            "upstreamProxyConfigured": bool(upstream_proxy_keys),
+            "upstreamProxyKeys": upstream_proxy_keys,
+            "secretVariablesConfigured": sum(
+                1 for key, value in ironproxy_values.items() if str(value).strip() and _secret_env_key(key)
+            ),
+            "serviceModes": service_modes,
+            "destinations": destinations,
+        },
+        "paths": {
+            "runtimeEnv": str(layout.runtime_env_path),
+            "ironProxyEnv": str(layout.ironproxy_env_path),
+            "egressAllowlist": str(layout.production_egress_allowlist_path),
+        },
+    }
+
+
 def _manifest_images(manifest: dict) -> dict:
     images = manifest.get("images") or {}
     return images if isinstance(images, dict) else {}

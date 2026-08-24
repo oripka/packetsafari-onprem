@@ -99,6 +99,38 @@ def required_onprem_env(app_root: Path) -> list[str]:
     return required or fallback
 
 
+def configuration_catalog(app_root: Path) -> dict[str, object]:
+    registry_path = app_root / "configuration" / "env-registry.json"
+    if not registry_path.exists():
+        return {"version": 1, "entries": []}
+    payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    source_entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    entries: list[dict[str, object]] = []
+    for source in source_entries:
+        if not isinstance(source, dict):
+            continue
+        key = str(source.get("key") or "").strip()
+        if not key:
+            continue
+        onprem = source.get("onPrem") if isinstance(source.get("onPrem"), dict) else {}
+        secret = source.get("secret") is True
+        entries.append(
+            {
+                "key": key,
+                "aliases": [str(item) for item in source.get("aliases") or []],
+                "domain": str(source.get("domain") or "other"),
+                "type": str(source.get("type") or "string"),
+                "default": "" if secret else source.get("default", ""),
+                "secret": secret,
+                "required": source.get("required") is True,
+                "lifecycle": str(source.get("lifecycle") or ""),
+                "label": str(onprem.get("label") or key),
+                "description": str(source.get("description") or ""),
+            }
+        )
+    return {"version": int(payload.get("version") or 1), "entries": entries}
+
+
 def git_value(app_root: Path, args: list[str]) -> str:
     try:
         return capture(["git", *args], cwd=app_root)
@@ -191,6 +223,7 @@ def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str,
         "builtAt": datetime.now(timezone.utc).isoformat(),
         "configSchemaVersion": 1,
         "platform": platform,
+        "configurationCatalog": configuration_catalog(app_root),
         "requiredEnv": required_onprem_env(app_root),
         "tooling": {
             "version": tooling_version,

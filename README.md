@@ -228,6 +228,13 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
   secret values. Password entry is masked, signed URL query strings are
   removed from rendered summaries, and the unbacked update and rollback
   actions require explicit typed acknowledgements.
+- **Configuration → Configuration overview** shows the effective deployment
+  profile and application mode, enabled feature flags, configured/defaulted/
+  unset variables, missing required values, IronProxy state, and the effective
+  purpose-scoped egress allowlist. It is generated from the release's canonical
+  environment catalog; secrets and uncatalogued values are always rendered as
+  `********`. Use `packetsafari-ops config overview` for the same secret-safe
+  data as JSON.
 - Managed update completion screens report application and ops-tool before/after
   versions, changed services, verification outcome, and rollback capability.
   Failures retain the latest helper/recovery state instead of only displaying a
