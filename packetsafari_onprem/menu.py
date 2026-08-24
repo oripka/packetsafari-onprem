@@ -433,6 +433,9 @@ def _update_review(payload: dict, ctx: MenuContext, *, title: str = "Update Revi
     source = _sanitize_source(payload.get("source"))
     if source:
         print(f"Release source   {source}")
+    signature = payload.get("releaseSignature") if isinstance(payload.get("releaseSignature"), dict) else {}
+    if signature.get("status") == "verified":
+        print(f"Release signature verified · {signature.get('algorithm') or 'signed manifest'}")
     sizing = payload.get("sizingStatus")
     if isinstance(sizing, dict) and sizing.get("stale"):
         print(f"{YELLOW}Sizing warning    {sizing.get('message') or 'Host sizing should be refreshed.'}{RESET}")

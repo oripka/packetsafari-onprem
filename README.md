@@ -249,7 +249,9 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - In an interactive terminal, `update` prints a concise plan before mutation
   showing the application/backend and ops-tool version transitions, changed
   services, profile/channel/platform, backup policy, sanitized source, and host
-  warnings. It ends with an explicit succeeded/current/failed summary covering
+  warnings. Successful OpenSSL verification is folded into one release-
+  signature row instead of leaking duplicate subprocess chatter. It ends with
+  an explicit succeeded/current/failed summary covering
   installed versions, health verification, rollback capability, and image
   cleanup. The final result payload remains JSON in non-interactive use; pass
   `--json` to request that payload explicitly in a terminal.

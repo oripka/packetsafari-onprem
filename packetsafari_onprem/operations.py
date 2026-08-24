@@ -2619,6 +2619,8 @@ def verify_detached_signature(public_key: Path, payload_path: Path, signature_pa
             str(payload_path),
         ],
         check=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -3676,7 +3678,9 @@ def _update_manifest_source(args, layout: RuntimeLayout) -> str:
 
 def _download_update_manifest(args, layout: RuntimeLayout) -> Path:
     source = _update_manifest_source(args, layout)
-    return materialize_verified_release_manifest(layout, source, args)
+    manifest_path = materialize_verified_release_manifest(layout, source, args)
+    setattr(args, "_release_signature_verified", True)
+    return manifest_path
 
 
 def check_for_update(args) -> dict:
@@ -3718,6 +3722,10 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         "manifest": str(manifest_path),
         "source": _update_manifest_source(args, layout),
         "backupMode": resolve_backup_mode(args, profile=_requested_or_active_profile(args, layout)),
+        "releaseSignature": {
+            "status": "verified" if bool(getattr(args, "_release_signature_verified", False)) else "unknown",
+            "algorithm": "RSA-SHA256",
+        },
         "changedServices": _services_with_changed_images(active_manifest, manifest),
         "app": app,
         "ops": ops,
@@ -3759,6 +3767,8 @@ def format_update_plan(payload: dict, host_requirements: dict[str, object]) -> s
     ops_target = str(ops.get("targetVersion") or ops.get("requiredVersion") or ops.get("currentVersion") or "unknown")
     ops_marker = "upgrade" if ops.get("available") else "current"
     app_marker = "upgrade" if app.get("available") else "current"
+    signature = payload.get("releaseSignature") if isinstance(payload.get("releaseSignature"), dict) else {}
+    signature_status = "verified" if signature.get("status") == "verified" else "not reported"
     lines = [
         "",
         "=" * 76,
@@ -3770,6 +3780,7 @@ def format_update_plan(payload: dict, host_requirements: dict[str, object]) -> s
         f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'no image changes detected'}",
         f"Backup policy        {backup_mode} ({backup_note})",
         f"Release source       {_display_release_source(payload.get('source'))}",
+        f"Release signature    {signature_status} ({signature.get('algorithm') or 'RSA-SHA256'})",
     ]
     warnings = [str(item) for item in host_requirements.get("warnings") or [] if str(item).strip()]
     sizing = payload.get("sizingStatus") if isinstance(payload.get("sizingStatus"), dict) else {}
