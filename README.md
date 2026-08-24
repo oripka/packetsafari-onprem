@@ -209,9 +209,16 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
   unbacked updates, signed offline bundles, rollback, readiness checks,
   bounded logs, service operations, sizing, signed security content,
   configuration, onboarding, and access helpers.
-- Opening the cockpit reads local state only. It does not contact a release
-  channel until the operator explicitly checks for updates or starts a
-  connected update, preserving the air-gapped deployment boundary.
+- Opening the cockpit never contacts a release channel automatically for
+  customer on-prem or air-gapped profiles, preserving that deployment
+  boundary. A detected PacketSafari-operated SaaS profile checks its private
+  signed release channel and local deployment health in the background so the
+  opening dashboard can show application and ops-tool targets without blocking
+  navigation.
+- External backup proofs are reported as ready or stale against the same
+  180-minute default enforced by the SaaS update workflow. Restore verification
+  and freshness are shown separately; an old `verifiedRestore` flag never
+  appears as current update readiness.
 - Mutating cockpit actions run through the existing `packetsafari-ops`
   transaction path. Tooling self-update/re-exec, manifest and bundle
   verification, entitlement, backup policy, migrations, health checks,
@@ -221,6 +228,10 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
   secret values. Password entry is masked, signed URL query strings are
   removed from rendered summaries, and the unbacked update and rollback
   actions require explicit typed acknowledgements.
+- Managed update completion screens report application and ops-tool before/after
+  versions, changed services, verification outcome, and rollback capability.
+  Failures retain the latest helper/recovery state instead of only displaying a
+  generic command failure.
 - When `PACKETSAFARI_DATA_ROOT` or `~/packetsafari-data` exists, the menu defaults to that local dev layout. Otherwise it defaults to `/opt/packetsafari`.
 - Native onboarding uses the existing local `/api/v2/onprem/onboarding/*` APIs. The menu can show schema output and validate, save, or finalize pasted draft JSON directly from the terminal.
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.

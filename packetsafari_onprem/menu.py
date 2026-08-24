@@ -4,13 +4,16 @@ import curses
 import getpass
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 from argparse import Namespace
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -73,6 +76,10 @@ def _sanitize_source(value: object) -> str:
     return source
 
 
+def _sanitize_text_urls(value: object) -> str:
+    return re.sub(r"https?://[^\s]+", lambda match: _sanitize_source(match.group(0)), str(value or ""))
+
+
 def _redact_payload(value: object, *, key: str = "") -> object:
     normalized = key.lower().replace("-", "_")
     if key and any(part in normalized for part in SENSITIVE_KEY_PARTS):
@@ -99,7 +106,10 @@ class MenuContext:
     active_manifest: dict = field(default_factory=dict)
     update_status: dict | None = None
     health_status: dict | None = None
-    notice: str = "Local deployment state loaded. Release channel has not been checked."
+    update_check_state: str = "not_checked"
+    health_check_state: str = "not_checked"
+    check_generation: int = 0
+    notice: str = "Loading local deployment state…"
 
     @property
     def layout(self):
@@ -223,6 +233,7 @@ def _operation_args(ctx: MenuContext, **overrides: object) -> Namespace:
         "platform": ctx.platform,
         "manifest": None,
         "manifest_url": None,
+        "manifest_signature": None,
         "backup_mode": None,
         "backup_proof": None,
         "max_backup_age_minutes": 180,
@@ -255,6 +266,21 @@ def _cli_command(ctx: MenuContext, *arguments: str) -> list[str]:
 
 
 def _format_command_result(payload: dict) -> list[str]:
+    update_summary = payload.get("updateSummary")
+    if isinstance(update_summary, dict):
+        previous_app = str(update_summary.get("previousApplicationVersion") or "unknown")
+        installed_app = str(update_summary.get("installedApplicationVersion") or payload.get("version") or "unknown")
+        previous_ops = str(update_summary.get("previousOpsVersion") or "unknown")
+        installed_ops = str(update_summary.get("installedOpsVersion") or "unknown")
+        changed_services = update_summary.get("changedServices")
+        changed_label = ", ".join(str(item) for item in changed_services) if isinstance(changed_services, list) and changed_services else "none"
+        return [
+            f"Application    {previous_app} → {installed_app}",
+            f"Ops tool       {previous_ops} → {installed_ops}",
+            f"Services       {changed_label}",
+            f"Verification   {update_summary.get('verification') or 'unknown'}",
+            f"Rollback       {update_summary.get('rollback') or 'unknown'}",
+        ]
     lines: list[str] = []
     status_value = payload.get("status")
     if status_value:
@@ -281,6 +307,11 @@ def _run_cli_action(
     *,
     restart_ui: bool = False,
 ) -> bool:
+    previous_application = ctx.installed_version
+    previous_ops = ctx.ops_version
+    managed_arguments = list(arguments)
+    if managed_arguments and managed_arguments[0] == "update" and "--json" not in managed_arguments:
+        managed_arguments.append("--json")
     _clear()
     _terminal_header(title, ctx)
     print(f"{CYAN}Starting managed operation…{RESET}")
@@ -289,7 +320,7 @@ def _run_cli_action(
         mode="w+t", encoding="utf-8"
     ) as stderr_file:
         process = subprocess.Popen(
-            _cli_command(ctx, *arguments),
+            _cli_command(ctx, *managed_arguments),
             stdout=stdout_file,
             stderr=stderr_file,
             text=True,
@@ -306,14 +337,33 @@ def _run_cli_action(
         stderr_file.seek(0)
         stdout = stdout_file.read()
         stderr = stderr_file.read()
+    ctx.refresh_local()
     success = process.returncode == 0
+    is_update = bool(arguments and arguments[0] in {"update", "upgrade"})
     print()
     if success:
-        print(f"{GREEN}{BOLD}Operation completed{RESET}")
+        success_title = "UPDATE SUCCEEDED" if is_update else "OPERATION SUCCEEDED"
+        print(f"{GREEN}{BOLD}{success_title}{RESET}")
         try:
             parsed = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError:
             parsed = None
+        if is_update and isinstance(parsed, dict) and not isinstance(parsed.get("updateSummary"), dict):
+            try:
+                installed_ops = (ctx.layout.tooling_root / "VERSION").read_text(encoding="utf-8").strip()
+            except (FileNotFoundError, OSError):
+                installed_ops = ctx.ops_version
+            rollback_state = (ctx.local_status.get("state") or {}).get("rollback") or {}
+            changed_services = (ctx.update_status or {}).get("changedServices") or []
+            parsed["updateSummary"] = {
+                "previousApplicationVersion": previous_application,
+                "installedApplicationVersion": ctx.installed_version,
+                "previousOpsVersion": previous_ops,
+                "installedOpsVersion": installed_ops,
+                "changedServices": changed_services,
+                "verification": "not needed" if parsed.get("status") == "noop" else "passed",
+                "rollback": rollback_state.get("note") or rollback_state.get("rollbackMode") or "unchanged",
+            }
         if isinstance(parsed, dict):
             for line in _format_command_result(parsed):
                 print(line)
@@ -322,11 +372,26 @@ def _run_cli_action(
         if stderr.strip():
             print(f"\n{DIM}Operation notes:{RESET}")
             print(stderr.strip())
+        ctx.notice = f"{title} completed successfully."
     else:
-        print(f"{RED}{BOLD}Operation failed{RESET}")
+        failure_title = "UPDATE FAILED" if is_update else "OPERATION FAILED"
+        print(f"{RED}{BOLD}{failure_title}{RESET}")
         output = stderr.strip() or stdout.strip() or f"Command exited with status {process.returncode}."
-        print(output)
-    ctx.refresh_local()
+        if is_update:
+            output_lines = [line.strip() for line in output.splitlines() if line.strip()]
+            reason = output_lines[-1] if output_lines else output
+            if ": " in reason and ("Error:" in reason or "Exception:" in reason):
+                reason = reason.split(": ", 1)[1]
+            reason = _sanitize_text_urls(reason)
+            print(f"Reason: {reason}")
+            print("The command exited without reporting successful release promotion.")
+        else:
+            print(output)
+        helper = ctx.local_status.get("helper") if isinstance(ctx.local_status.get("helper"), dict) else {}
+        helper_message = str(helper.get("message") or "").strip()
+        if helper_message and helper_message not in output:
+            print(f"\nLatest recovery state: {helper_message}")
+        ctx.notice = f"{title} failed; inspect Recent activity for recovery state."
     if success and restart_ui:
         _pause("Press Enter to reload the operator UI")
         os.execv(sys.executable, _cli_command(ctx))
@@ -347,8 +412,22 @@ def _update_review(payload: dict, ctx: MenuContext, *, title: str = "Update Revi
         f"{ops.get('targetVersion') or ops.get('requiredVersion') or 'current'}"
         f"  {GREEN + 'AVAILABLE' + RESET if ops.get('available') else ''}"
     )
-    print(f"Deployment       {payload.get('profile') or ctx.profile} · {payload.get('channel') or ctx.channel} · {ctx.platform}")
+    print(
+        f"Deployment       {payload.get('profile') or ctx.profile} · "
+        f"{payload.get('channel') or ctx.channel} · {payload.get('platform') or ctx.platform}"
+    )
+    changed_services = payload.get("changedServices")
+    if isinstance(changed_services, list):
+        changed_label = ", ".join(str(item) for item in changed_services) if changed_services else "no image changes detected"
+    else:
+        changed_label = "resolved during the managed update"
+    print(f"Changed services {changed_label}")
     print(f"Backup policy    {payload.get('backupMode') or 'profile default'}")
+    backup_label, _backup_attr, backup_ready = _backup_status(ctx)
+    if payload.get("backupMode") == "require-recent" and backup_ready is False:
+        print(f"{RED}Backup readiness {backup_label}{RESET}")
+    else:
+        print(f"Backup readiness {backup_label}")
     source = _sanitize_source(payload.get("source"))
     if source:
         print(f"Release source   {source}")
@@ -360,16 +439,25 @@ def _update_review(payload: dict, ctx: MenuContext, *, title: str = "Update Revi
 
 
 def _check_update(ctx: MenuContext, *, pause: bool = True) -> dict | None:
+    if ctx.update_check_state == "checking":
+        _clear()
+        _terminal_header("Check Release Channel", ctx)
+        print("The automatic signed release-channel check is still running in the background.")
+        _pause()
+        return None
     _clear()
     _terminal_header("Check Release Channel", ctx)
     print("Resolving and verifying the configured release manifest…")
     try:
+        ctx.update_check_state = "checking"
         payload = check_for_update(_operation_args(ctx))
     except Exception as exc:
+        ctx.update_check_state = "failed"
         ctx.notice = f"Release check failed: {exc}"
         _print_error("Check Release Channel", exc, ctx)
         return None
     ctx.update_status = payload
+    ctx.update_check_state = "complete"
     app = payload.get("app") if isinstance(payload.get("app"), dict) else payload
     ops = payload.get("ops") if isinstance(payload.get("ops"), dict) else {}
     if app.get("available"):
@@ -398,6 +486,12 @@ def _apply_connected_update(ctx: MenuContext, *, backup_mode: str | None = None,
         _pause()
         return
     target = str(app.get("targetVersion") or "target release")
+    _backup_label, _backup_attr, backup_ready = _backup_status(ctx)
+    if selected_backup_mode == "require-recent" and backup_ready is False:
+        print(f"\n{RED}A fresh, restore-verified external backup is required before this update can run.{RESET}")
+        print("Create or verify the backup proof, or deliberately choose the inline-backup workflow.")
+        _pause()
+        return
     if unbacked:
         print()
         print(f"{RED}{BOLD}No PacketSafari PostgreSQL or /storage backup will be captured.{RESET}")
@@ -501,10 +595,17 @@ def _refresh_local(ctx: MenuContext) -> None:
 
 
 def _run_healthcheck(ctx: MenuContext) -> None:
+    if ctx.health_check_state == "checking":
+        _clear()
+        _terminal_header("Healthcheck", ctx)
+        print("The automatic deployment-health check is still running in the background.")
+        _pause()
+        return
     _clear()
     _terminal_header("Healthcheck", ctx)
     print("Checking product readiness, services, gateway, sharkd, intelligence updates and image retention…")
     try:
+        ctx.health_check_state = "checking"
         doctor = doctor_deployment(_operation_args(ctx))
         image_retention = docker_image_retention_health(ctx.layout, keep_deployments=2)
         payload = {
@@ -515,9 +616,11 @@ def _run_healthcheck(ctx: MenuContext) -> None:
             "imageRetention": image_retention,
         }
     except Exception as exc:
+        ctx.health_check_state = "failed"
         _print_error("Healthcheck", exc, ctx)
         return
     ctx.health_status = payload
+    ctx.health_check_state = "complete"
     ctx.notice = "Healthcheck passed." if payload.get("ok") else "Healthcheck needs attention."
     _clear()
     _terminal_header("Healthcheck", ctx)
@@ -831,7 +934,7 @@ def _change_runtime_root(ctx: MenuContext) -> None:
     ctx.update_status = None
     ctx.health_status = None
     ctx.refresh_local()
-    ctx.notice = f"Runtime root changed to {ctx.runtime_root}."
+    _start_background_checks(ctx)
 
 
 def _overview_items(_ctx: MenuContext) -> list[MenuItem]:
@@ -935,32 +1038,151 @@ def _init_colors() -> None:
     curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)
 
 
-def _backup_summary(ctx: MenuContext) -> str:
+def _human_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s old"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m old"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h old"
+    return f"{hours // 24}d old"
+
+
+def _backup_status(ctx: MenuContext) -> tuple[str, str, bool | None]:
     proof = _read_json_file(ctx.layout.state_dir / "latest-backup.json")
     if proof:
         provider = str(proof.get("provider") or "external")
-        verified = "verified" if proof.get("verifiedRestore") else "not restore-verified"
-        completed = str(proof.get("completedAt") or "time unknown")
-        return f"{provider} · {verified} · {completed}"
+        completed = str(proof.get("completedAt") or "").strip()
+        verified = bool(proof.get("verifiedRestore"))
+        age_seconds: float | None = None
+        if completed:
+            try:
+                completed_at = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                if completed_at.tzinfo is None:
+                    completed_at = completed_at.replace(tzinfo=timezone.utc)
+                age_seconds = (datetime.now(timezone.utc) - completed_at.astimezone(timezone.utc)).total_seconds()
+            except ValueError:
+                age_seconds = None
+        max_age_seconds = 180 * 60
+        fresh = verified and age_seconds is not None and 0 <= age_seconds <= max_age_seconds
+        if fresh:
+            return f"READY · {provider} · {_human_age(age_seconds)}", "good", True
+        if age_seconds is not None:
+            reason = _human_age(age_seconds)
+        elif not completed:
+            reason = "completion time missing"
+        else:
+            reason = "invalid completion time"
+        verification = "verified but stale" if verified else "not restore-verified"
+        return f"STALE · {provider} · {verification} · {reason}", "bad", False
     state = ctx.local_status.get("state") if isinstance(ctx.local_status.get("state"), dict) else {}
     rollback = state.get("rollback") if isinstance(state.get("rollback"), dict) else {}
     mode = str(rollback.get("rollbackMode") or "")
     backups = ctx.local_status.get("backups") if isinstance(ctx.local_status.get("backups"), list) else []
     if mode:
-        return f"{mode} · {len(backups)} local snapshot(s)"
+        return f"{mode} · {len(backups)} local snapshot(s)", "neutral", None
     if backups:
-        return f"{len(backups)} local snapshot(s)"
-    return "no recorded backup"
+        return f"{len(backups)} local snapshot(s)", "neutral", None
+    state = "bad" if ctx.profile == "saas" else "neutral"
+    return "no recorded backup", state, False if ctx.profile == "saas" else None
+
+
+def _recommended_notice(ctx: MenuContext) -> str:
+    update = ctx.update_status or {}
+    app = update.get("app") if isinstance(update.get("app"), dict) else update
+    ops = update.get("ops") if isinstance(update.get("ops"), dict) else {}
+    update_available = bool(app.get("available") or ops.get("available"))
+    _backup_label, _backup_attr, backup_ready = _backup_status(ctx)
+    if update_available and update.get("backupMode") == "require-recent" and backup_ready is False:
+        return "Update available, but the recent external-backup requirement is not satisfied."
+    if update_available and ctx.health_status is not None and not ctx.health_status.get("ok"):
+        return "Update available, but deployment health needs attention before applying it."
+    if update_available:
+        return "Update available. Open Updates & recovery to review the exact application and ops changes."
+    if ctx.update_check_state == "failed":
+        return "Release-channel check failed. Open Overview to retry and inspect the error."
+    if ctx.health_check_state == "failed":
+        return "Automatic deployment-health check failed. Open Health & services to retry."
+    if ctx.update_check_state == "checking" or ctx.health_check_state == "checking":
+        return "Checking release availability and deployment health…"
+    if ctx.profile != "saas" and ctx.update_check_state == "not_checked":
+        return "Local health loaded. Release-channel access remains explicit for on-prem and air-gapped hosts."
+    return "Application and ops tooling are current; no update action is required."
+
+
+def _start_background_checks(ctx: MenuContext) -> None:
+    ctx.check_generation += 1
+    generation = ctx.check_generation
+    profile = ctx.profile
+    update_args = _operation_args(ctx)
+    health_args = _operation_args(ctx)
+    if profile == "saas":
+        ctx.update_check_state = "checking"
+    else:
+        ctx.update_check_state = "not_checked"
+    ctx.health_check_state = "checking"
+    ctx.notice = _recommended_notice(ctx)
+
+    def _worker() -> None:
+        update_payload: dict | None = None
+        update_failed = False
+        if profile == "saas":
+            try:
+                update_payload = check_for_update(update_args)
+            except Exception:
+                update_failed = True
+        try:
+            doctor = doctor_deployment(health_args)
+            health_payload: dict | None = {
+                "ok": bool(doctor.get("ok")),
+                "profile": profile,
+                "runtimeRoot": str(getattr(health_args, "runtime_root", "")),
+                "doctor": doctor,
+            }
+            health_failed = False
+        except Exception:
+            health_payload = None
+            health_failed = True
+        if ctx.check_generation != generation:
+            return
+        if profile == "saas":
+            ctx.update_status = update_payload
+            ctx.update_check_state = "failed" if update_failed else "complete"
+        ctx.health_status = health_payload
+        ctx.health_check_state = "failed" if health_failed else "complete"
+        ctx.notice = _recommended_notice(ctx)
+
+    threading.Thread(target=_worker, name="packetsafari-ops-startup-checks", daemon=True).start()
 
 
 def _dashboard_lines(ctx: MenuContext) -> list[tuple[str, int]]:
     update = ctx.update_status or {}
     app = update.get("app") if isinstance(update.get("app"), dict) else update
     ops = update.get("ops") if isinstance(update.get("ops"), dict) else {}
-    target = str(app.get("targetVersion") or "not checked")
-    app_marker = "update available" if app.get("available") else ("current" if ctx.update_status else "channel not checked")
-    target_ops = str(ops.get("targetVersion") or ops.get("requiredVersion") or "not checked")
-    health_label = "not checked this session"
+    if ctx.update_check_state == "checking":
+        target = "checking…"
+        target_ops = "checking…"
+        app_marker = "release channel"
+        ops_marker = "release channel"
+    elif ctx.update_check_state == "failed":
+        target = "check failed"
+        target_ops = "check failed"
+        app_marker = "retry available"
+        ops_marker = "retry available"
+    elif ctx.update_status:
+        target = str(app.get("targetVersion") or "unknown")
+        target_ops = str(ops.get("targetVersion") or ops.get("requiredVersion") or ctx.ops_version)
+        app_marker = "update available" if app.get("available") else "current"
+        ops_marker = "update available" if ops.get("available") else "current"
+    else:
+        target = "manual check"
+        target_ops = "manual check"
+        app_marker = "offline-safe"
+        ops_marker = "offline-safe"
+    health_label = "checking…" if ctx.health_check_state == "checking" else "not checked"
     health_attr = curses.A_DIM
     if ctx.health_status is not None:
         if ctx.health_status.get("ok"):
@@ -969,12 +1191,21 @@ def _dashboard_lines(ctx: MenuContext) -> list[tuple[str, int]]:
         else:
             health_label = "needs attention"
             health_attr = curses.color_pair(4) | curses.A_BOLD
+    elif ctx.health_check_state == "failed":
+        health_label = "check failed"
+        health_attr = curses.color_pair(4) | curses.A_BOLD
+    backup_label, backup_state, _backup_ready = _backup_status(ctx)
+    backup_attr = {
+        "good": curses.color_pair(5) | curses.A_BOLD,
+        "bad": curses.color_pair(4) | curses.A_BOLD,
+    }.get(backup_state, curses.A_DIM)
+    ops_attr = curses.color_pair(5) | curses.A_BOLD if ops.get("available") else 0
     return [
         (f"Host        {ctx.profile} · {ctx.channel} · {ctx.platform} · {ctx.runtime_root}", curses.A_BOLD),
         (f"Application {ctx.installed_version} → {target}  [{app_marker}]", curses.color_pair(5) if app.get("available") else 0),
-        (f"Ops tool    {ctx.ops_version} → {target_ops}", 0),
+        (f"Ops tool    {ctx.ops_version} → {target_ops}  [{ops_marker}]", ops_attr),
         (f"Health      {health_label}", health_attr),
-        (f"Backup      {_backup_summary(ctx)}", 0),
+        (f"Backup      {backup_label}", backup_attr),
     ]
 
 
@@ -1112,6 +1343,8 @@ def run_menu(
     ctx.refresh_local()
     if not supports_onprem_host_actions(ctx.layout):
         ctx.notice = "Local development layout detected. Host mutations remain guarded by packetsafari-ops."
+    else:
+        _start_background_checks(ctx)
 
     def _main(stdscr) -> None:
         try:
@@ -1119,6 +1352,7 @@ def run_menu(
         except curses.error:
             pass
         stdscr.keypad(True)
+        stdscr.timeout(250)
         _init_colors()
         _walk_menu(stdscr, ["Operator cockpit"], _main_items(ctx), ctx, allow_back=False, allow_quit=True)
 

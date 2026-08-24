@@ -56,10 +56,17 @@ packetsafari-ops rollback
 ```
 
 On an interactive terminal, bare `packetsafari-ops` opens the operator
-cockpit. The cockpit loads local state without accessing a release channel,
-then offers the same connected check/update, signed offline bundle, backup,
-healthcheck, rollback, and image-retention workflows as the commands below.
-Use the explicit commands for automation and recovery shells.
+cockpit. It loads local state immediately and offers the same connected
+check/update, signed offline bundle, backup, healthcheck, rollback, and
+image-retention workflows as the commands below. Use the explicit commands for
+automation and recovery shells.
+
+For a detected PacketSafari-operated SaaS profile, the cockpit checks the
+private signed release channel and local deployment health in the background.
+Customer on-prem and air-gapped profiles never perform that automatic release
+check. The dashboard evaluates external backup proof freshness against the
+normal 180-minute limit and shows the exact application and ops-tool targets
+before an update is confirmed.
 
 `update check`, `update`, `install --license`, and bare `upgrade` are the
 normal connected operator flow. `update apply` remains accepted for older
