@@ -59,6 +59,30 @@ def test_connected_manifest_rejects_tampering(signed_manifest):
     assert not layout.target_release_manifest_path.exists()
 
 
+def test_connected_manifest_rejects_profile_mismatch_before_copy(tmp_path, monkeypatch):
+    layout = operations.runtime_layout(str(tmp_path / "runtime"), str(tmp_path / "runtime"))
+    operations.ensure_runtime_dirs(layout)
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text('{"version":"10.0.1","targetProfile":"saas"}\n', encoding="utf-8")
+    verified: list[str] = []
+
+    def fake_verify(layout, manifest_source, args=None, destination=None):
+        verified.append(str(manifest_source))
+        return manifest
+
+    monkeypatch.setattr(operations, "materialize_verified_release_manifest", fake_verify)
+
+    with pytest.raises(RuntimeError, match="targets profile 'saas'"):
+        operations.prepare_connected_manifest(
+            layout,
+            str(manifest),
+            SimpleNamespace(profile="onprem"),
+        )
+
+    assert verified == [str(manifest)]
+    assert not layout.target_release_manifest_path.exists()
+
+
 def test_signed_url_with_query_requires_explicit_signature_source():
     args = SimpleNamespace(manifest_signature="")
     with pytest.raises(RuntimeError, match="--manifest-signature"):

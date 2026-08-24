@@ -38,6 +38,68 @@ def test_onprem_update_keeps_public_https_channel(tmp_path):
     assert source == "https://releases.packetsafari.com/channels/onprem/stable/linux-arm64/release-manifest.json"
 
 
+def test_installed_profile_wins_and_capability_metadata_does_not_select_saas(tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.deployment_state_path.write_text(
+        json.dumps({"deployment": {"mode": "normal", "profile": "onprem"}}),
+        encoding="utf-8",
+    )
+    layout.release_manifest_path.write_text(
+        json.dumps({"deploymentProfiles": {"onprem": {}, "saas": {}}}),
+        encoding="utf-8",
+    )
+
+    assert operations._active_deployment_profile(layout) == "onprem"
+
+
+def test_airgapped_connectivity_policy_requires_local_ai_or_ai_disabled():
+    rejected = operations.connectivity_policy_check(
+        {
+            "PACKETSAFARI_CONNECTIVITY_POLICY": "airgapped",
+            "PACKETSAFARI_AI_PROVIDER_TYPE": "openai",
+            "PACKETSAFARI_AI_PROVIDER_AUTH_MODE": "chatgpt_login",
+        },
+        profile="onprem",
+    )
+    accepted = operations.connectivity_policy_check(
+        {
+            "PACKETSAFARI_CONNECTIVITY_POLICY": "airgapped",
+            "PACKETSAFARI_AI_PROVIDER_TYPE": "ollama",
+            "PACKETSAFARI_AI_PROVIDER_AUTH_MODE": "none",
+        },
+        profile="onprem",
+    )
+
+    assert rejected["ok"] is False
+    assert {item["key"] for item in rejected["violations"]} == {
+        "PACKETSAFARI_AI_PROVIDER_TYPE",
+        "PACKETSAFARI_AI_PROVIDER_AUTH_MODE",
+    }
+    assert accepted == {"ok": True, "policy": "airgapped", "violations": []}
+
+
+def test_install_parser_and_runtime_env_activate_airgap_before_start(tmp_path):
+    from packetsafari_onprem import cli
+
+    args = cli.build_parser().parse_args(
+        ["install", "--bundle", "/media/release.tar.zst", "--connectivity-policy", "airgapped"]
+    )
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+
+    operations.write_runtime_env(
+        layout,
+        {},
+        onboarding_mode=True,
+        connectivity_policy=args.connectivity_policy,
+    )
+
+    runtime_env = operations.parse_env_file(layout.runtime_env_path)
+    assert args.connectivity_policy == "airgapped"
+    assert runtime_env["PACKETSAFARI_CONNECTIVITY_POLICY"] == "airgapped"
+
+
 def test_ensure_journald_retention_config_writes_bounded_policy(tmp_path, monkeypatch):
     config_path = tmp_path / "journald.conf.d" / "packetsafari.conf"
     calls: list[list[str]] = []

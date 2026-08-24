@@ -135,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--audit-retention-days")
     install.add_argument("--audit-forwarding-mode")
     install.add_argument("--audit-forwarder-type")
+    install.add_argument(
+        "--connectivity-policy",
+        choices=["connected", "restricted", "airgapped"],
+        default="connected",
+        help="Initial runtime connectivity contract. Use airgapped before starting an offline-isolated deployment.",
+    )
     install.add_argument("--size", choices=["auto", "small", "medium", "large", "none"], default="auto")
 
     status_parser = subparsers.add_parser("status", help="Show installer/runtime status.")

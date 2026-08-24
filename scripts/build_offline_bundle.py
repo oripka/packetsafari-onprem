@@ -167,6 +167,10 @@ def main() -> int:
     manifest_path = Path(args.manifest).expanduser()
     output = Path(args.output).expanduser()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_profile = str(manifest.get("targetProfile") or "").strip().lower()
+    if source_profile and source_profile != "onprem":
+        parser.error(f"Offline bundles require an onprem manifest, got targetProfile={source_profile!r}.")
+    manifest["targetProfile"] = "onprem"
     images = manifest.get("images") or {}
     version = str(manifest.get("version") or "release")
 

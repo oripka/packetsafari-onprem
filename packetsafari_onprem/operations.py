@@ -34,6 +34,16 @@ DEFAULT_CONTAINER_RUNTIME_ROOT = "/storage/onprem"
 DEFAULT_API_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_DATA_ROOT = str(Path.home() / "packetsafari-data")
 DEPLOYMENT_PROFILES = {"onprem", "saas"}
+CONNECTIVITY_POLICIES = {"connected", "restricted", "airgapped"}
+AIRGAPPED_LOCAL_AI_PROVIDERS = {"lm_studio", "llmster", "ollama", "openai_compatible"}
+AIRGAPPED_FORBIDDEN_TRUE_SETTINGS = {
+    "PACKETSAFARI_FEATURE_BYO_OPENAI_API_KEY_ENABLED": "User-supplied OpenAI keys require public AI egress.",
+    "PACKETSAFARI_FEATURE_CODEX_CHATGPT_LOGIN_ENABLED": "ChatGPT browser login requires public identity and AI egress.",
+    "PACKETSAFARI_FEATURE_SOCIAL_LOGIN_OAUTH_ENABLED": "Social login requires public identity-provider egress.",
+    "PACKETSAFARI_INTELLIGENCE_AUTO_UPDATE_ENABLED": "Automatic intelligence updates require Internet egress.",
+    "PACKETSAFARI_INTELLIGENCE_SPAMHAUS_DROP_ENABLED": "Spamhaus DROP refreshes require Internet egress.",
+    "PACKETSAFARI_TLS_CERTIFICATE_PUBLIC_CT_ENRICHMENT_ENABLED": "Public CT enrichment requires Internet egress.",
+}
 SAAS_REQUIRED_ENV_KEYS = [
     "PACKETSAFARI_PUBLIC_BASE_URL",
     "OPENAI_API_KEY",
@@ -527,6 +537,23 @@ def deployment_profile(args) -> str:
     if profile not in DEPLOYMENT_PROFILES:
         raise RuntimeError(f"Unsupported deployment profile: {profile}")
     return profile
+
+
+def validate_manifest_profile(manifest: dict, *, expected_profile: str) -> str:
+    if expected_profile not in DEPLOYMENT_PROFILES:
+        raise RuntimeError(f"Unsupported deployment profile: {expected_profile}")
+    target_profile = str(manifest.get("targetProfile") or "").strip().lower()
+    if not target_profile:
+        # Compatibility for manifests published before the profile contract.
+        # Existing license/operator authorization remains the trust boundary.
+        return expected_profile
+    if target_profile not in DEPLOYMENT_PROFILES:
+        raise RuntimeError(f"Release manifest has unsupported targetProfile: {target_profile}")
+    if target_profile != expected_profile:
+        raise RuntimeError(
+            f"Release manifest targets profile {target_profile!r}, but this operation targets {expected_profile!r}."
+        )
+    return target_profile
 
 
 def supports_upgrade_host_actions(layout: RuntimeLayout, *, profile: str) -> bool:
@@ -3562,7 +3589,16 @@ def docker_exec_backend(layout: RuntimeLayout, args: list[str]) -> None:
     subprocess.run(["docker", "exec", "-i", "packetsafari-backend", *args], check=True)
 
 
-def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, onboarding_mode: bool) -> None:
+def write_runtime_env(
+    layout: RuntimeLayout,
+    logging_values: dict[str, str],
+    *,
+    onboarding_mode: bool,
+    connectivity_policy: str = "connected",
+) -> None:
+    connectivity_policy = str(connectivity_policy or "connected").strip().lower()
+    if connectivity_policy not in CONNECTIVITY_POLICIES:
+        raise RuntimeError(f"Unsupported connectivity policy: {connectivity_policy}")
     onboarding_value = quote_env_value("true" if onboarding_mode else "false")
     postgres_db = "packetsafari"
     postgres_user = "packetsafari"
@@ -3628,6 +3664,7 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
     lines.extend(
         [
         'PACKETSAFARI_FEATURE_SAAS_PAYWALL_ENABLED="false"',
+        f"PACKETSAFARI_CONNECTIVITY_POLICY={quote_env_value(connectivity_policy)}",
     ]
     )
     layout.runtime_env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -3640,15 +3677,21 @@ def _release_version(manifest_path: Path) -> str:
 
 def _active_deployment_profile(layout: RuntimeLayout) -> str:
     state = _read_json(layout.deployment_state_path, {})
-    mode = str(((state.get("deployment") or {}).get("mode") or "")).strip().lower()
+    deployment = state.get("deployment") if isinstance(state.get("deployment"), dict) else {}
+    installed_profile = str(deployment.get("profile") or "").strip().lower()
+    if installed_profile in DEPLOYMENT_PROFILES:
+        return installed_profile
+    mode = str(deployment.get("mode") or "").strip().lower()
     if mode == "saas":
         return "saas"
+    if mode in {"normal", "onboarding", "onprem"}:
+        return "onprem"
     if (layout.secrets_dir / "saas-operator-token").exists():
         return "saas"
     active_manifest = _read_json(layout.release_manifest_path, {})
-    profiles = active_manifest.get("deploymentProfiles")
-    if isinstance(profiles, dict) and isinstance(profiles.get("saas"), dict):
-        return "saas"
+    manifest_profile = str(active_manifest.get("targetProfile") or "").strip().lower()
+    if manifest_profile in DEPLOYMENT_PROFILES:
+        return manifest_profile
     return "onprem"
 
 
@@ -3704,6 +3747,8 @@ def check_for_update(args) -> dict:
 def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> dict:
     manifest = _read_json(manifest_path, {})
     active_manifest = _read_json(layout.release_manifest_path, {})
+    profile = _requested_or_active_profile(args, layout)
+    validate_manifest_profile(manifest, expected_profile=profile)
     current = _current_release_version(layout)
     target = str(manifest.get("version") or "").strip()
     if not target:
@@ -3728,11 +3773,11 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
     return {
         **app,
         "channel": str(manifest.get("channel") or ""),
-        "profile": _requested_or_active_profile(args, layout),
+        "profile": profile,
         "platform": str(getattr(args, "platform", "") or DEFAULT_UPDATE_PLATFORM),
         "manifest": str(manifest_path),
         "source": _update_manifest_source(args, layout),
-        "backupMode": resolve_backup_mode(args, profile=_requested_or_active_profile(args, layout)),
+        "backupMode": resolve_backup_mode(args, profile=profile),
         "releaseSignature": {
             "status": "verified" if bool(getattr(args, "_release_signature_verified", False)) else "unknown",
             "algorithm": "RSA-SHA256",
@@ -3877,11 +3922,20 @@ def apply_update(args) -> dict:
     return _attach_update_summary(result, check_payload, host_requirements, args)
 
 
-def write_deployment_state(layout: RuntimeLayout, *, mode: str, action_type: str, action_status: str, action_message: str) -> None:
+def write_deployment_state(
+    layout: RuntimeLayout,
+    *,
+    mode: str,
+    action_type: str,
+    action_status: str,
+    action_message: str,
+    profile: str = "onprem",
+) -> None:
     payload = {
         "schemaVersion": 1,
         "deployment": {
             "mode": mode,
+            "profile": profile,
             "installedVersion": _release_version(layout.release_manifest_path) if layout.release_manifest_path.exists() else "",
             "installedBuild": "",
             "installedAt": "",
@@ -3934,7 +3988,12 @@ def install_release(args) -> dict:
             shutil.copy2(release_public_key_path, layout.release_public_key_path)
 
         logging_values = resolve_logging_values(args)
-        write_runtime_env(layout, logging_values, onboarding_mode=True)
+        write_runtime_env(
+            layout,
+            logging_values,
+            onboarding_mode=True,
+            connectivity_policy=str(getattr(args, "connectivity_policy", "connected") or "connected"),
+        )
         sizing = write_sizing_profile(layout, profile=str(getattr(args, "size", "auto") or "auto"))
         render_compose(layout, layout.release_manifest_path, source_root=bundle_root(), profile="onprem")
         render_logging_config(layout, source_root=bundle_root())
@@ -4564,6 +4623,7 @@ def prepare_offline_bundle(
         verify_bundle_checksums(bundle_dir)
 
         manifest = _read_json(bundle_dir / "release-manifest.json", {})
+        validate_manifest_profile(manifest, expected_profile=deployment_profile(args))
         maybe_self_update_tooling(args, layout, manifest, bundle_dir=bundle_dir)
         images = _manifest_images(manifest)
         version_value = str(manifest.get("version") or "release")
@@ -4652,7 +4712,13 @@ def prepare_offline_bundle(
 
 def prepare_connected_manifest(layout: RuntimeLayout, manifest_arg: str, args=None, *, destination: Path | None = None) -> Path:
     target = destination or layout.target_release_manifest_path
-    return materialize_verified_release_manifest(layout, manifest_arg, args, destination=target)
+    manifest_path = materialize_verified_release_manifest(layout, manifest_arg, args)
+    manifest = _read_json(manifest_path, {})
+    validate_manifest_profile(manifest, expected_profile=deployment_profile(args))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if manifest_path.resolve() != target.resolve():
+        shutil.copy2(manifest_path, target)
+    return target
 
 
 def run_target_migrations(layout: RuntimeLayout) -> None:
@@ -5014,6 +5080,44 @@ except Exception as exc:
     return {**payload, "ok": bool(payload.get("ok", False))}
 
 
+def connectivity_policy_check(runtime_env: dict[str, str], *, profile: str) -> dict[str, object]:
+    policy = str(runtime_env.get("PACKETSAFARI_CONNECTIVITY_POLICY") or "connected").strip().lower()
+    violations: list[dict[str, str]] = []
+    if policy not in CONNECTIVITY_POLICIES:
+        violations.append({
+            "key": "PACKETSAFARI_CONNECTIVITY_POLICY",
+            "reason": "Connectivity policy must be connected, restricted, or airgapped.",
+        })
+    elif policy == "airgapped":
+        if profile != "onprem":
+            violations.append({
+                "key": "PACKETSAFARI_CONNECTIVITY_POLICY",
+                "reason": "The SaaS deployment profile cannot declare an air-gapped runtime.",
+            })
+        ai_disabled = _truthy(runtime_env.get("PACKETSAFARI_FEATURE_DISABLE_ALL_AI"))
+        if not ai_disabled:
+            provider_type = str(runtime_env.get("PACKETSAFARI_AI_PROVIDER_TYPE") or "openai").strip().lower()
+            auth_mode = str(runtime_env.get("PACKETSAFARI_AI_PROVIDER_AUTH_MODE") or "environment").strip().lower()
+            if provider_type not in AIRGAPPED_LOCAL_AI_PROVIDERS:
+                violations.append({
+                    "key": "PACKETSAFARI_AI_PROVIDER_TYPE",
+                    "reason": "Air-gapped deployments require a local AI provider or all AI disabled.",
+                })
+            if auth_mode in {"bring_your_own", "chatgpt_login"}:
+                violations.append({
+                    "key": "PACKETSAFARI_AI_PROVIDER_AUTH_MODE",
+                    "reason": "Air-gapped deployments cannot use browser or user-supplied public AI authentication.",
+                })
+        for key, reason in AIRGAPPED_FORBIDDEN_TRUE_SETTINGS.items():
+            if _truthy(runtime_env.get(key)):
+                violations.append({"key": key, "reason": reason})
+    return {
+        "ok": not violations,
+        "policy": policy,
+        "violations": violations,
+    }
+
+
 def doctor_deployment(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
@@ -5038,6 +5142,15 @@ def doctor_deployment(args) -> dict:
         **host_requirements,
         warning=not bool(host_requirements.get("ok")),
     )
+
+    try:
+        validate_manifest_profile(manifest, expected_profile=profile)
+        add_check("manifest_profile", True, targetProfile=str(manifest.get("targetProfile") or "legacy"))
+    except Exception as exc:
+        add_check("manifest_profile", False, error=str(exc))
+
+    connectivity = connectivity_policy_check(runtime_env, profile=profile)
+    add_check("connectivity_policy", bool(connectivity.get("ok")), **connectivity)
 
     try:
         required = _merged_required_env_keys(manifest, profile=profile)
@@ -5179,6 +5292,7 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
     deployment = state.setdefault("deployment", {})
     deployment["installedVersion"] = str(manifest.get("version") or "")
     deployment["mode"] = "normal" if profile == "onprem" else "saas"
+    deployment["profile"] = profile
     deployment["installedAt"] = utc_now()
     state["lastAction"] = {
         "type": "upgrade",
@@ -5268,6 +5382,7 @@ def upgrade_release(args) -> dict:
             maybe_fail_upgrade_simulation(layout, args, "preflight")
 
             manifest = _read_json(target_manifest_path, {})
+            validate_manifest_profile(manifest, expected_profile=profile)
             maybe_self_update_tooling(args, layout, manifest)
             validate_tooling_requirement(manifest)
             validate_upgrade_path(layout, manifest)

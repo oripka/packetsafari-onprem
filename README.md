@@ -20,6 +20,12 @@ Customer-facing Python-native installer, operator CLI, and interactive operation
 
 ## Bootstrap And Updates
 
+Release manifests may declare `targetProfile=onprem` or `targetProfile=saas`.
+The CLI persists the installed profile and rejects a declared mismatch before
+self-updating tooling, loading bundle images, or changing the stack. Manifests
+from before this contract remain compatible and retain the signed license or
+SaaS operator-token authorization boundary.
+
 Bootstrap is for first install and recovery. Once `/usr/local/bin/packetsafari-ops`
 exists, normal connected and SaaS updates should use `packetsafari-ops update`;
 that command can now update the ops tooling first and then continue the app
@@ -179,7 +185,7 @@ Primary commands:
 ```bash
 sudo env HOME=/root packetsafari-ops
 packetsafari-ops install --license /path/to/license-token.json --non-interactive
-packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
+packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst --connectivity-policy airgapped
 packetsafari-ops status --json
 packetsafari-ops tui
 packetsafari-ops upgrade
@@ -260,6 +266,9 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
   cleanup. The final result payload remains JSON in non-interactive use; pass
   `--json` to request that payload explicitly in a terminal.
 - `healthcheck` runs deployment readiness checks and Docker image-retention guidance without applying a release.
+- `doctor` validates the manifest profile and the declared
+  `PACKETSAFARI_CONNECTIVITY_POLICY`. Air-gapped deployments require local AI
+  or all AI disabled and reject known Internet-backed runtime features.
 - `install --license` and bare `upgrade` use the same default release-channel
   manifest discovery. Pass `--manifest` only for a pinned file/URL, staging
   channel, or customer-specific manifest.
