@@ -358,6 +358,7 @@ def _format_update_result(payload: dict) -> str:
         f"Ops tooling          {previous_ops} -> {installed_ops}  [{'updated' if ops_updated else 'current'}]",
         f"Profile              {payload.get('profile') or 'unknown'}",
         f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'none'}",
+        f"Config reloads       {', '.join(str(item) for item in payload.get('configurationReloadedServices') or []) or 'none'}",
         f"Health/readiness     {summary.get('verification') or 'unknown'}",
         f"Rollback             {summary.get('rollback') or 'unchanged'}",
         f"Image cleanup        {cleanup}",

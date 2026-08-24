@@ -1814,8 +1814,13 @@ def _apply_profile_egress_overlay(layout: RuntimeLayout, source_root: Path, *, p
     _write_json(allowlist_path, allowlist)
 
 
-def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> None:
+def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> dict[str, bool]:
     root = source_root or layout.tooling_root
+    ironproxy_config_before = (
+        layout.production_ironproxy_config_path.read_bytes()
+        if layout.production_ironproxy_config_path.exists()
+        else None
+    )
     config_source = root / "templates" / "egress-config"
     preserved_intelligence_registry = (
         _read_json(layout.intelligence_egress_registry_path, {"approved_hosts": [], "version": 1})
@@ -1850,6 +1855,12 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
             str(layout.compose_file),
         ],
     )
+    ironproxy_config_after = (
+        layout.production_ironproxy_config_path.read_bytes()
+        if layout.production_ironproxy_config_path.exists()
+        else None
+    )
+    return {"ironProxyConfigChanged": ironproxy_config_before != ironproxy_config_after}
 
 
 def render_logging_config(layout: RuntimeLayout, *, source_root: Path | None = None) -> None:
@@ -3828,6 +3839,7 @@ def _attach_update_summary(
         "installedOpsVersion": installed_ops,
         "opsUpdated": _version_key(original_ops) < _version_key(installed_ops),
         "changedServices": check_payload.get("changedServices") or [],
+        "configurationReloadedServices": result.get("configurationReloadedServices") or [],
         "verification": verification,
         "rollback": rollback,
         "hostWarnings": host_requirements.get("warnings") or [],
@@ -4193,6 +4205,8 @@ def snapshot_runtime(layout: RuntimeLayout) -> Path:
         (layout.runtime_sizing_env_path, "runtime-sizing", ".env"),
         (layout.sizing_state_path, "sizing", ".json"),
         (layout.compose_sizing_file, "docker-compose-sizing", ".yml"),
+        (layout.production_egress_allowlist_path, "egress-allowlist", ".json"),
+        (layout.production_ironproxy_config_path, "ironproxy-config", ".yaml"),
     ):
         if src.exists():
             shutil.copy2(src, snapshot_dir / f"{prefix}{suffix}")
@@ -4331,6 +4345,8 @@ def _restore_metadata_snapshot(layout: RuntimeLayout, snapshot_dir: Path) -> Non
         "runtime-sizing.env": layout.runtime_sizing_env_path,
         "sizing.json": layout.sizing_state_path,
         "docker-compose-sizing.yml": layout.compose_sizing_file,
+        "egress-allowlist.json": layout.production_egress_allowlist_path,
+        "ironproxy-config.yaml": layout.production_ironproxy_config_path,
     }
     for name, dest in mapping.items():
         src = snapshot_dir / name
@@ -5294,7 +5310,15 @@ def upgrade_release(args) -> dict:
 
             phase = "compose"
             sizing_refresh = refresh_managed_sizing_profile(layout)
-            render_compose(layout, target_manifest_path, profile=profile)
+            render_result = render_compose(layout, target_manifest_path, profile=profile) or {}
+            ironproxy_config_changed = bool(render_result.get("ironProxyConfigChanged"))
+            ironproxy_config_reload_required = (
+                had_active_compose
+                and ironproxy_config_changed
+                and "egress-ironproxy" in _rendered_compose_services(layout)
+            )
+            if ironproxy_config_reload_required and "egress-ironproxy" not in services_to_recreate:
+                services_to_recreate.append("egress-ironproxy")
             render_logging_config(layout)
             validate_rendered_security_consumer(layout)
             maybe_fail_upgrade_simulation(layout, args, "compose")
@@ -5312,7 +5336,8 @@ def upgrade_release(args) -> dict:
                         layout,
                         status="upgrading",
                         message=(
-                            f"Stopping services with changed images ({', '.join(services_to_recreate)}) and "
+                            f"Stopping services with changed images or startup configuration "
+                            f"({', '.join(services_to_recreate)}) and "
                             f"{backup_message}."
                         ),
                     )
@@ -5361,6 +5386,7 @@ def upgrade_release(args) -> dict:
             result["sizingStatus"] = sizing_state_status(layout) if sizing_refresh is not None else sizing_status
             result["sizingRefreshed"] = sizing_refresh is not None
             result["generatedRuntimeEnvKeys"] = generated_runtime_env_keys
+            result["configurationReloadedServices"] = ["egress-ironproxy"] if ironproxy_config_reload_required else []
             return result
         except Exception as exc:
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")

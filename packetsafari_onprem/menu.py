@@ -276,10 +276,13 @@ def _format_command_result(payload: dict) -> list[str]:
         installed_ops = str(update_summary.get("installedOpsVersion") or "unknown")
         changed_services = update_summary.get("changedServices")
         changed_label = ", ".join(str(item) for item in changed_services) if isinstance(changed_services, list) and changed_services else "none"
+        reloaded_services = update_summary.get("configurationReloadedServices")
+        reloaded_label = ", ".join(str(item) for item in reloaded_services) if isinstance(reloaded_services, list) and reloaded_services else "none"
         return [
             f"Application    {previous_app} → {installed_app}",
             f"Ops tool       {previous_ops} → {installed_ops}",
             f"Services       {changed_label}",
+            f"Config reloads {reloaded_label}",
             f"Verification   {update_summary.get('verification') or 'unknown'}",
             f"Rollback       {update_summary.get('rollback') or 'unknown'}",
         ]
@@ -363,6 +366,7 @@ def _run_cli_action(
                 "previousOpsVersion": previous_ops,
                 "installedOpsVersion": installed_ops,
                 "changedServices": changed_services,
+                "configurationReloadedServices": parsed.get("configurationReloadedServices") or [],
                 "verification": "not needed" if parsed.get("status") == "noop" else "passed",
                 "rollback": rollback_state.get("note") or rollback_state.get("rollbackMode") or "unchanged",
             }

@@ -224,6 +224,10 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
   verification, entitlement, backup policy, migrations, health checks,
   promotion, rollback, and image-retention rules therefore remain identical
   to their command-line equivalents.
+- Deployment rendering fingerprints IronProxy's generated startup policy. If
+  the effective allowlist changes, the transaction stops and starts
+  `egress-ironproxy` so the running in-memory policy matches the promoted file;
+  the final update receipt reports the configuration reload.
 - Cockpit configuration and onboarding views never print managed runtime
   secret values. Password entry is masked, signed URL query strings are
   removed from rendered summaries, and the unbacked update and rollback
