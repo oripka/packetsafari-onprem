@@ -1,11 +1,11 @@
 # PacketSafari On-Prem
 
-Customer-facing Python-native installer, operator CLI, and simple interactive menu for PacketSafari on-prem.
+Customer-facing Python-native installer, operator CLI, and interactive operations cockpit for PacketSafari on-prem.
 
 ## Layout
 
 - `bootstrap.sh` - pinned/download-host bootstrap shim that downloads the bundle and launches the Python CLI
-- `packetsafari_onprem/` - Python control plane for install, status, onboarding, upgrade, rollback, diagnostics, and the interactive operator menu
+- `packetsafari_onprem/` - Python control plane for install, status, onboarding, upgrade, rollback, diagnostics, and the interactive operator cockpit
 - `scripts/license_*.py` - offline entitlement token tooling
 - `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
 - `docs/upgrade-runbook.md` - connected and air-gapped upgrade/rollback runbook
@@ -33,6 +33,10 @@ curl -fsSL "https://<portal-presigned-url>/bootstrap.sh" | bash -s -- install --
 
 ```bash
 curl -fsSL "https://<portal-presigned-url>/bootstrap.sh" | bash -s -- install --bundle ./packetsafari-10.0.1-offline.tar.zst
+```
+
+```bash
+sudo env HOME=/root packetsafari-ops
 ```
 
 ```bash
@@ -173,6 +177,7 @@ That host runtime root is bind-mounted into the app containers at `/storage/onpr
 Primary commands:
 
 ```bash
+sudo env HOME=/root packetsafari-ops
 packetsafari-ops install --license /path/to/license-token.json --non-interactive
 packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops status --json
@@ -192,7 +197,28 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 
 - `install` validates the signed license token, writes runtime state under the managed root, installs the Python bundle, renders compose and logging config, and starts PacketSafari in onboarding mode.
 - `install --bundle` performs a fresh air-gapped install from a signed bundle, loads image archives locally, and starts Compose with `--pull never`.
-- `tui` is the primary operator interface. It is a simple menu runner with back navigation.
+- A bare `packetsafari-ops` invocation in an interactive terminal opens the
+  operator cockpit. `packetsafari-ops tui` remains an explicit alias. Bare
+  non-interactive invocations print command help and exit instead of waiting
+  for terminal input.
+- The cockpit summarizes the detected profile, installed application and ops
+  versions, backup/rollback state, and session health. It exposes connected
+  update checks, profile-safe updates, explicit inline backups, guarded
+  unbacked updates, signed offline bundles, rollback, readiness checks,
+  bounded logs, service operations, sizing, signed security content,
+  configuration, onboarding, and access helpers.
+- Opening the cockpit reads local state only. It does not contact a release
+  channel until the operator explicitly checks for updates or starts a
+  connected update, preserving the air-gapped deployment boundary.
+- Mutating cockpit actions run through the existing `packetsafari-ops`
+  transaction path. Tooling self-update/re-exec, manifest and bundle
+  verification, entitlement, backup policy, migrations, health checks,
+  promotion, rollback, and image-retention rules therefore remain identical
+  to their command-line equivalents.
+- Cockpit configuration and onboarding views never print managed runtime
+  secret values. Password entry is masked, signed URL query strings are
+  removed from rendered summaries, and the unbacked update and rollback
+  actions require explicit typed acknowledgements.
 - When `PACKETSAFARI_DATA_ROOT` or `~/packetsafari-data` exists, the menu defaults to that local dev layout. Otherwise it defaults to `/opt/packetsafari`.
 - Native onboarding uses the existing local `/api/v2/onprem/onboarding/*` APIs. The menu can show schema output and validate, save, or finalize pasted draft JSON directly from the terminal.
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.

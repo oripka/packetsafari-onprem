@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="packetsafari-ops")
     parser.add_argument("--runtime-root")
     parser.add_argument("--container-runtime-root", default=DEFAULT_CONTAINER_RUNTIME_ROOT)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     def add_download_args(command_parser: argparse.ArgumentParser) -> None:
         command_parser.add_argument(
@@ -295,6 +295,17 @@ def main(argv: list[str] | None = None) -> int:
     args.runtime_root = detect_runtime_root(getattr(args, "runtime_root", None))
     if hasattr(args, "api_base_url"):
         args.api_base_url = detect_api_base_url(getattr(args, "api_base_url", None))
+
+    if args.command is None:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            parser.print_help()
+            return 2
+        run_menu(
+            runtime_root=args.runtime_root,
+            container_runtime_root=args.container_runtime_root,
+            api_base_url=detect_api_base_url(None),
+        )
+        return 0
 
     if args.command == "install":
         print(json.dumps(install_release(args), indent=2))

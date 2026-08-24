@@ -43,6 +43,7 @@ The frontend intentionally connects directly to sharkd for low-latency packet vi
 ## Customer Commands
 
 ```bash
+sudo env HOME=/root packetsafari-ops
 packetsafari-ops status
 packetsafari-ops update check
 packetsafari-ops update
@@ -53,6 +54,12 @@ packetsafari-ops upgrade --manifest ./release-manifest.json
 packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 ```
+
+On an interactive terminal, bare `packetsafari-ops` opens the operator
+cockpit. The cockpit loads local state without accessing a release channel,
+then offers the same connected check/update, signed offline bundle, backup,
+healthcheck, rollback, and image-retention workflows as the commands below.
+Use the explicit commands for automation and recovery shells.
 
 `update check`, `update`, `install --license`, and bare `upgrade` are the
 normal connected operator flow. `update apply` remains accepted for older
@@ -137,6 +144,10 @@ Only use unbacked updates for releases that are known not to require schema or
 storage migrations, or on disposable development hosts. If migrations run,
 rollback may require restoring PostgreSQL and `/storage` from an external
 backup.
+
+The cockpit exposes this as **Update without backup** under **Updates &
+recovery**. It displays the target release and rollback limitation and requires
+the operator to type `UNBACKED`; it never selects this mode by default.
 
 ## Host Hygiene Checks
 
