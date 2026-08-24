@@ -2577,6 +2577,65 @@ def verify_detached_signature(public_key: Path, payload_path: Path, signature_pa
     )
 
 
+def _manifest_signature_source(manifest_source: str, args=None) -> str:
+    explicit = str(getattr(args, "manifest_signature", "") or "").strip()
+    if explicit:
+        return explicit
+
+    source = str(manifest_source or "").strip()
+    parsed = urllib.parse.urlsplit(source)
+    if parsed.scheme in {"http", "https"} and parsed.query:
+        raise RuntimeError(
+            "Cannot derive a detached signature URL from a manifest URL with a query string. "
+            "Pass --manifest-signature explicitly."
+        )
+    if parsed.scheme in {"http", "https", "s3"}:
+        return urllib.parse.urlunsplit(parsed._replace(path=f"{parsed.path}.sig"))
+    return f"{Path(source).expanduser()}.sig"
+
+
+def materialize_verified_release_manifest(
+    layout: RuntimeLayout,
+    manifest_source: str,
+    args=None,
+    *,
+    destination: Path | None = None,
+) -> Path:
+    downloads = layout.tmp_dir / "downloads"
+    manifest_path = materialize_source(
+        manifest_source,
+        downloads,
+        "release manifest",
+        args,
+        default_name="release-manifest.json",
+        max_bytes=MIB,
+    )
+    signature_path = materialize_source(
+        _manifest_signature_source(manifest_source, args),
+        downloads,
+        "release manifest signature",
+        args,
+        default_name="release-manifest.json.sig",
+        max_bytes=64 * 1024,
+    )
+    public_key = _resolve_release_public_key(layout)
+    if public_key is None:
+        raise RuntimeError(
+            "PacketSafari release public key is unavailable; refusing to trust the connected release manifest."
+        )
+    try:
+        verify_detached_signature(public_key, manifest_path, signature_path)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("PacketSafari release manifest signature verification failed.") from exc
+
+    if destination is None:
+        return manifest_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if manifest_path.resolve() != destination.resolve():
+        shutil.copy2(manifest_path, destination)
+    return destination
+
+
 def _safe_extract_content_pack(archive_path: Path, destination: Path) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive_path, "r:*") as archive:
@@ -3572,13 +3631,7 @@ def _update_manifest_source(args, layout: RuntimeLayout) -> str:
 
 def _download_update_manifest(args, layout: RuntimeLayout) -> Path:
     source = _update_manifest_source(args, layout)
-    return materialize_source(
-        source,
-        layout.tmp_dir / "downloads",
-        "update manifest",
-        args,
-        default_name="release-manifest.json",
-    )
+    return materialize_verified_release_manifest(layout, source, args)
 
 
 def check_for_update(args) -> dict:
@@ -4263,16 +4316,8 @@ def prepare_offline_bundle(
 
 
 def prepare_connected_manifest(layout: RuntimeLayout, manifest_arg: str, args=None, *, destination: Path | None = None) -> Path:
-    manifest_path = materialize_source(
-        manifest_arg,
-        layout.tmp_dir / "downloads",
-        "release manifest",
-        args,
-        default_name="release-manifest.json",
-    )
     target = destination or layout.target_release_manifest_path
-    shutil.copy2(manifest_path, target)
-    return target
+    return materialize_verified_release_manifest(layout, manifest_arg, args, destination=target)
 
 
 def run_target_migrations(layout: RuntimeLayout) -> None:

@@ -99,6 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
             help="Development only: allow an unsigned offline bundle.",
         )
 
+    def add_manifest_signature_arg(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--manifest-signature",
+            help="Detached manifest signature path or URL. Defaults to the manifest source plus '.sig'.",
+        )
+
     install = subparsers.add_parser("install", help="Install PacketSafari on-prem into onboarding mode.")
     install_source = install.add_mutually_exclusive_group()
     install_source.add_argument("--manifest", help="Connected install release manifest path or URL.")
@@ -110,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-url",
         help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
     )
+    add_manifest_signature_arg(install)
     install.add_argument("--license-public-key", help="License public key path or URL. Defaults to the PacketSafari key bundled with the ops tool.")
     install.add_argument(
         "--allow-bundled-license-public-key",
@@ -166,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-url",
         help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
     )
+    add_manifest_signature_arg(upgrade)
     upgrade.add_argument(
         "--backup-proof",
         help="Path to the most recent external backup proof JSON/text file. Defaults to state/latest-backup.json in require-recent mode.",
@@ -257,6 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-url",
         help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
     )
+    add_manifest_signature_arg(update)
     update.add_argument(
         "--backup-mode",
         choices=["inline", "require-recent", "skip"],

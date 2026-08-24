@@ -100,10 +100,23 @@ Docker still needs the ECR credential helper for image pulls. Do not use
 workstation AWS keys, public SaaS manifests, or copied CloudFront signing
 material to simplify this path.
 
-The manifest also advertises the matching ops tooling archive. When the host is
-running an older `packetsafari-ops`, `update` downloads that archive, verifies
-its checksum, swaps `/opt/packetsafari/tooling/onprem`, re-execs the updated
-CLI, and then continues the app release.
+The manifest also advertises the matching ops tooling archive. From ops version
+`0.2.21`, `update` verifies the detached manifest signature before trusting that
+archive URL or checksum. During the one-time upgrade from an older ops version,
+the existing HTTPS/private-S3 plus checksum path installs and re-execs `0.2.21`;
+the new CLI then verifies the manifest before any application release action.
+Subsequent tooling self-updates are protected before download.
+
+Every connected manifest must have an adjacent `release-manifest.json.sig`.
+Local paths, S3 URIs, and HTTP(S) URLs without query strings derive that sibling
+automatically. For an object-specific signed URL, pass the independently signed
+signature URL explicitly:
+
+```bash
+packetsafari-ops update \
+  --manifest-url 'https://downloads.example/release-manifest.json?manifest-token' \
+  --manifest-signature 'https://downloads.example/release-manifest.json.sig?signature-token'
+```
 
 Use these environment variables only when testing a private/staged channel or a
 customer-specific manifest:

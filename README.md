@@ -264,10 +264,11 @@ sudo env HOME=/root packetsafari-ops update
 On a SaaS host, the command infers `profile=saas`, downloads the private release
 manifest from
 `s3://packetsafari-release-channels-166826692770/channels/saas/stable/linux-arm64/release-manifest.json`
-with the EC2 instance role, updates `packetsafari-ops` from the manifest's
-`tooling.archiveUrl` when needed, pulls ECR images through root Docker's ECR
-credential helper, applies migrations, restarts services, health-checks, and
-promotes.
+and its adjacent `.sig` with the EC2 instance role, verifies the manifest with
+the public release key bundled into `packetsafari-ops`, then updates the tool
+from the verified `tooling.archiveUrl` and checksum when needed. Only after that
+does it pull ECR images, apply migrations, restart services, health-check, and
+promote.
 
 SaaS-specific safety rules:
 
@@ -294,6 +295,11 @@ https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/releas
 
 Override `PACKETSAFARI_UPDATE_MANIFEST_URL` or `PACKETSAFARI_UPDATE_BASE_URL`
 only for staged/private/customer-specific manifests.
+
+All connected manifest sources require a detached signature. The normal source
+is the manifest path or URL plus `.sig`. If a private manifest URL has a query
+string whose authorization does not cover the sibling object, also pass its
+separately authorized URL with `--manifest-signature`.
 
 `doctor --profile saas` checks product readiness, not just Docker liveness. It
 verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL` and
