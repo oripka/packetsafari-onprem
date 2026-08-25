@@ -353,6 +353,12 @@ packetsafari-ops content status
 packetsafari-ops content rollback
 ```
 
+Release images also contain a verified complete baseline for disconnected
+startup. On fresh storage it is activated automatically. On an upgrade, startup
+activates the embedded baseline only when it is a strictly newer sequence on the
+same signed channel; it never downgrades or replaces a newer/operator-selected
+channel. The previous generation remains available for rollback.
+
 For an air-gapped host, transfer the same signed pack and use `content import
 --pack ./security-content.tar.gz`. The installed PacketSafari release public key
 verifies the manifest; each package is size-, digest-, schema-, and compatibility-
