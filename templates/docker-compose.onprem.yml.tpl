@@ -109,6 +109,7 @@ services:
         set -euo pipefail
         /usr/local/bin/setvolumepermissions.sh /
         PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex PACKETSAFARI_STORAGE_SUBDIRS="sqlite" PACKETSAFARI_STORAGE_REPAIR_SUBDIRS="." /usr/local/bin/setvolumepermissions.sh /
+        PACKETSAFARI_SKIP_SERVICE_INIT=true python3 /app/scripts/bootstrap_embedded_security_content.py
     volumes:
       - packetsafari-storage:/storage
       - packetsafari-codexruntime:/var/lib/packetsafari/codex
