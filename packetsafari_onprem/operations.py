@@ -3328,7 +3328,11 @@ def format_healthcheck_report(payload: dict[str, object]) -> str:
     for check in checks:
         if not isinstance(check, dict):
             continue
-        marker = "ok" if check.get("ok") else "fail"
+        marker = (
+            "fail"
+            if not check.get("ok")
+            else ("warn" if check.get("warning") else "ok")
+        )
         detail = str(check.get("message") or check.get("error") or "").strip()
         suffix = f" - {detail}" if detail else ""
         lines.append(f"  [{marker}] {check.get('name')}{suffix}")
@@ -4039,7 +4043,143 @@ def status(layout: RuntimeLayout) -> dict:
         "composeFiles": compose_files,
         "sizing": _read_json(layout.sizing_state_path, {}),
         "sizingStatus": sizing_state_status(layout),
+        "storageMaintenance": storage_maintenance_health(layout),
         "backups": [path.name for path in sorted(layout.backup_dir.glob("*"), reverse=True) if path.is_dir()][:10],
+    }
+
+
+def storage_maintenance_health(layout: RuntimeLayout) -> dict[str, object]:
+    """Read the bounded application maintenance receipt through Compose."""
+
+    if not layout.compose_file.exists() or not layout.runtime_env_path.exists():
+        return {
+            "healthy": False,
+            "status": "unavailable",
+            "warning": True,
+            "message": "Storage maintenance is unavailable before the runtime is installed.",
+        }
+
+    script = """import json
+import os
+from pathlib import Path
+state_path = Path(os.environ.get(
+    'PACKETSAFARI_ONPREM_STATE_PATH',
+    '/storage/onprem/state/deployment-state.json',
+))
+p = state_path.parent / 'last-maintenance.json'
+if not p.is_file():
+    print(json.dumps({'status': 'missing'}))
+else:
+    d = json.loads(p.read_text(encoding='utf-8'))
+    print(json.dumps({
+        'status': d.get('status'),
+        'apply': d.get('apply'),
+        'startedAt': d.get('started_at'),
+        'finishedAt': d.get('finished_at'),
+        'deleted': d.get('deleted'),
+        'bytesReclaimed': d.get('bytes_reclaimed'),
+        'failedRules': d.get('failed_rules') or [],
+        'partialRules': d.get('partial_rules') or [],
+    }))
+"""
+    try:
+        result = subprocess.run(
+            [
+                *_compose_base_command(layout),
+                "exec",
+                "-T",
+                "backend",
+                "python3",
+                "-c",
+                script,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "healthy": False,
+            "status": "unavailable",
+            "warning": True,
+            "message": f"Storage maintenance receipt could not be read: {exc}",
+        }
+    if result.returncode != 0:
+        return {
+            "healthy": False,
+            "status": "unavailable",
+            "warning": True,
+            "message": "Storage maintenance receipt could not be read from the backend container.",
+        }
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {
+            "healthy": False,
+            "status": "invalid",
+            "warning": True,
+            "message": "Storage maintenance receipt is not valid JSON.",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "healthy": False,
+            "status": "invalid",
+            "warning": True,
+            "message": "Storage maintenance receipt is not a JSON object.",
+        }
+
+    runtime_env = parse_env_file(layout.runtime_env_path)
+    sizing_env = parse_env_file(layout.runtime_sizing_env_path)
+    configured_interval = sizing_env.get(
+        "PACKETSAFARI_MAINTENANCE_STORAGE_CLEANUP_INTERVAL_SECONDS",
+        runtime_env.get("PACKETSAFARI_MAINTENANCE_STORAGE_CLEANUP_INTERVAL_SECONDS", "21600"),
+    )
+    try:
+        interval_seconds = max(300, int(configured_interval or 21600))
+    except (TypeError, ValueError):
+        interval_seconds = 21600
+    stale_after_seconds = max(18 * 60 * 60, interval_seconds * 3)
+    finished_at = str(payload.get("finishedAt") or "").strip()
+    age_seconds: int | None = None
+    if finished_at:
+        try:
+            finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+            if finished.tzinfo is None:
+                finished = finished.replace(tzinfo=timezone.utc)
+            age_seconds = max(
+                0,
+                int((datetime.now(timezone.utc) - finished.astimezone(timezone.utc)).total_seconds()),
+            )
+        except ValueError:
+            age_seconds = None
+
+    receipt_status = str(payload.get("status") or "missing").strip().lower()
+    failed_rules = list(payload.get("failedRules") or [])
+    partial_rules = list(payload.get("partialRules") or [])
+    stale = age_seconds is None or age_seconds > stale_after_seconds
+    healthy = bool(
+        receipt_status in {"ok", "success"}
+        and payload.get("apply") is True
+        and not failed_rules
+        and not partial_rules
+        and not stale
+    )
+    if receipt_status == "missing":
+        message = "No applied storage-maintenance receipt has been observed yet."
+    elif stale:
+        message = "The last storage-maintenance receipt is stale."
+    elif failed_rules or partial_rules or receipt_status not in {"ok", "success"}:
+        message = "Storage maintenance needs operator attention."
+    else:
+        message = "Storage maintenance is current and all recorded rules succeeded."
+    return {
+        **payload,
+        "healthy": healthy,
+        "warning": not healthy,
+        "ageSeconds": age_seconds,
+        "staleAfterSeconds": stale_after_seconds,
+        "message": message,
     }
 
 
@@ -5196,6 +5336,16 @@ def doctor_deployment(args) -> dict:
 
     compose = _compose_service_status(layout)
     add_check("compose_services", bool(compose.get("ok")), **compose)
+
+    maintenance = storage_maintenance_health(layout)
+    add_check(
+        "storage_maintenance",
+        True,
+        **{
+            **maintenance,
+            "warning": not bool(maintenance.get("healthy")),
+        },
+    )
 
     security_consumer = _security_queue_consumer_probe(layout)
     add_check("security_queue_consumer", bool(security_consumer.get("ok")), **security_consumer)
