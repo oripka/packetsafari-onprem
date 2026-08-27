@@ -386,6 +386,14 @@ recorded deployment image sets. Pressing Enter keeps them. Non-interactive runs
 only report the condition unless `--prune-old-images` is passed. Use
 `packetsafari-ops healthcheck --json` for automation-friendly reporting.
 
+Successful on-prem updates also bound local full-backup growth. After release
+promotion, the tool keeps the newest two verified inline PostgreSQL plus
+`/storage` backups and always preserves the snapshot named by current rollback
+state. It does not prune before promotion, after a failed upgrade, or based on
+an incomplete backup. Configure the keep count (2–20) with
+`PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL`, or disable this cleanup with
+`PACKETSAFARI_BACKUP_RETENTION_ENABLED=false`.
+
 Install the operator token at `/opt/packetsafari/secrets/saas-operator-token`
 and set the expected SHA-256 digest in the manifest at
 `deploymentProfiles.saas.operatorTokenSha256`, or in

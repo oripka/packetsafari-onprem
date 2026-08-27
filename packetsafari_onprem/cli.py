@@ -345,6 +345,7 @@ def _format_update_result(payload: dict) -> str:
         title = "✓ PACKETSAFARI UPDATE SUCCEEDED"
     changed_services = summary.get("changedServices") if isinstance(summary.get("changedServices"), list) else []
     image_retention = payload.get("imageRetention") if isinstance(payload.get("imageRetention"), dict) else {}
+    backup_retention = payload.get("backupRetention") if isinstance(payload.get("backupRetention"), dict) else {}
     candidate_count = int(image_retention.get("candidateCount") or 0)
     cleanup_status = str(image_retention.get("status") or "")
     if cleanup_status == "ok":
@@ -355,6 +356,13 @@ def _format_update_result(payload: dict) -> str:
         cleanup = "image-retention check skipped"
     else:
         cleanup = "no cleanup needed"
+    backup_cleanup_status = str(backup_retention.get("status") or "not run")
+    backup_removed = int(backup_retention.get("removedCount") or 0)
+    backup_cleanup = (
+        f"{backup_cleanup_status}; removed {backup_removed} old verified full backup(s)"
+        if backup_removed
+        else backup_cleanup_status
+    )
     lines = [
         "",
         "=" * 76,
@@ -368,6 +376,7 @@ def _format_update_result(payload: dict) -> str:
         f"Health/readiness     {summary.get('verification') or 'unknown'}",
         f"Rollback             {summary.get('rollback') or 'unchanged'}",
         f"Image cleanup        {cleanup}",
+        f"Backup cleanup       {backup_cleanup}",
     ]
     if payload.get("snapshot"):
         lines.append(f"Snapshot             {payload['snapshot']}")

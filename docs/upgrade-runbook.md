@@ -413,6 +413,22 @@ For `--profile saas --backup-mode require-recent`, step 6 records the verified
 external backup proof instead of taking a local PostgreSQL and `/storage` dump.
 The migration and promotion gates stay the same.
 
+After a healthy on-prem release is promoted, `packetsafari-ops` retains the two
+newest completed inline backups by default. A backup qualifies only when its
+snapshot metadata records completion and its non-empty `postgres.dump` and
+`storage.tar` are both present. The snapshot referenced by the current rollback
+state is always protected, even when it falls outside the count-based keep set.
+Failed, incomplete, external-proof, and unbacked metadata snapshots are never
+treated as verified full backups and are not deleted by this rule. Retention is
+not run during a failed upgrade or before promotion.
+
+Set `PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL` in the managed runtime env to a
+value from 2 through 20 to keep more verified full backups. Set
+`PACKETSAFARI_BACKUP_RETENTION_ENABLED=false` to disable automatic full-backup
+retention. Invalid settings block cleanup without failing or rolling back an
+otherwise successful release; the latest outcome is recorded in deployment
+state under `backupRetention` and returned by the upgrade command.
+
 ## Failure Behavior
 
 - Before migration: restore manifest, env, state, and Compose files, then

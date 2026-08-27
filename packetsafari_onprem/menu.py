@@ -278,6 +278,10 @@ def _format_command_result(payload: dict) -> list[str]:
         changed_label = ", ".join(str(item) for item in changed_services) if isinstance(changed_services, list) and changed_services else "none"
         reloaded_services = update_summary.get("configurationReloadedServices")
         reloaded_label = ", ".join(str(item) for item in reloaded_services) if isinstance(reloaded_services, list) and reloaded_services else "none"
+        backup_retention = payload.get("backupRetention") if isinstance(payload.get("backupRetention"), dict) else {}
+        backup_cleanup = str(backup_retention.get("status") or "not run")
+        if int(backup_retention.get("removedCount") or 0):
+            backup_cleanup += f"; removed {int(backup_retention['removedCount'])} old full backup(s)"
         return [
             f"Application    {previous_app} → {installed_app}",
             f"Ops tool       {previous_ops} → {installed_ops}",
@@ -285,6 +289,7 @@ def _format_command_result(payload: dict) -> list[str]:
             f"Config reloads {reloaded_label}",
             f"Verification   {update_summary.get('verification') or 'unknown'}",
             f"Rollback       {update_summary.get('rollback') or 'unknown'}",
+            f"Backup cleanup {backup_cleanup}",
         ]
     lines: list[str] = []
     status_value = payload.get("status")

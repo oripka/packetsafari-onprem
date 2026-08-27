@@ -82,6 +82,8 @@ RECOMMENDED_SMALL_HOST_VCPUS = 4
 RECOMMENDED_SMALL_HOST_MEMORY_BYTES = 16 * GIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
 DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS = 2
+DEFAULT_FULL_BACKUP_RETENTION_KEEP = 2
+BACKUP_SNAPSHOT_NAME = re.compile(r"[0-9]{8}-[0-9]{6}")
 DOCTOR_STARTUP_GRACE_CHECKS = frozenset({
     "security_queue_consumer",
     "intelligence_updates",
@@ -4516,6 +4518,7 @@ def complete_full_backup(layout: RuntimeLayout, snapshot_dir: Path) -> None:
         snapshot_dir / "snapshot.json",
         {
             **_read_json(snapshot_dir / "snapshot.json", {}),
+            "backupMode": "inline",
             "postgresBackup": "postgres.dump",
             "storageBackup": "storage.tar",
             "completedAt": utc_now(),
@@ -4533,6 +4536,165 @@ def record_external_backup_proof(snapshot_dir: Path, proof: dict[str, object]) -
             "completedAt": utc_now(),
         },
     )
+
+
+def _verified_full_backup(snapshot_dir: Path) -> bool:
+    if snapshot_dir.is_symlink() or not snapshot_dir.is_dir():
+        return False
+    manifest_path = snapshot_dir / "snapshot.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return False
+    snapshot = _read_json(manifest_path, {})
+    if (
+        not snapshot.get("completedAt")
+        or str(snapshot.get("postgresBackup") or "") != "postgres.dump"
+        or str(snapshot.get("storageBackup") or "") != "storage.tar"
+    ):
+        return False
+    for name in ("postgres.dump", "storage.tar"):
+        artifact = snapshot_dir / name
+        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size <= 0:
+            return False
+    return True
+
+
+def _full_backup_retention_keep(layout: RuntimeLayout) -> tuple[bool, int, str | None]:
+    runtime_env = parse_env_file(layout.runtime_env_path)
+    raw_enabled = str(
+        runtime_env.get("PACKETSAFARI_BACKUP_RETENTION_ENABLED", "true")
+    ).strip().lower()
+    if raw_enabled not in {"1", "true", "yes", "y", "on", "0", "false", "no", "n", "off"}:
+        return False, DEFAULT_FULL_BACKUP_RETENTION_KEEP, (
+            "PACKETSAFARI_BACKUP_RETENTION_ENABLED must be a boolean"
+        )
+    enabled = raw_enabled in {"1", "true", "yes", "y", "on"}
+    raw_keep = str(
+        runtime_env.get(
+            "PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL",
+            DEFAULT_FULL_BACKUP_RETENTION_KEEP,
+        )
+    ).strip()
+    if not re.fullmatch(r"[0-9]+", raw_keep):
+        return enabled, DEFAULT_FULL_BACKUP_RETENTION_KEEP, (
+            "PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL must be an integer"
+        )
+    keep = int(raw_keep)
+    if keep < 2 or keep > 20:
+        return enabled, DEFAULT_FULL_BACKUP_RETENTION_KEEP, (
+            "PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL must be between 2 and 20"
+        )
+    return enabled, keep, None
+
+
+def prune_verified_full_backups(layout: RuntimeLayout) -> dict[str, object]:
+    """Bound completed inline backups after promotion without touching evidence."""
+
+    enabled, keep, configuration_error = _full_backup_retention_keep(layout)
+    if configuration_error:
+        return {
+            "status": "blocked",
+            "enabled": enabled,
+            "keepFullBackups": keep,
+            "reason": "invalid_configuration",
+            "message": configuration_error,
+            "removed": [],
+        }
+    if not enabled:
+        return {
+            "status": "disabled",
+            "enabled": False,
+            "keepFullBackups": keep,
+            "removed": [],
+        }
+
+    backup_root = layout.backup_dir.resolve()
+    state = _read_json(layout.deployment_state_path, {})
+    rollback = state.get("rollback") if isinstance(state.get("rollback"), dict) else {}
+    rollback_snapshot = str(rollback.get("latestSnapshot") or "")
+    protected_rollback = Path(rollback_snapshot).resolve() if rollback_snapshot else None
+    verified = sorted(
+        (
+            path
+            for path in layout.backup_dir.iterdir()
+            if BACKUP_SNAPSHOT_NAME.fullmatch(path.name)
+            and path.parent.resolve() == backup_root
+            and _verified_full_backup(path)
+        ),
+        reverse=True,
+    )
+    protected = {path.resolve() for path in verified[:keep]}
+    if protected_rollback is not None:
+        protected.add(protected_rollback)
+
+    removed: list[str] = []
+    failures: list[dict[str, str]] = []
+    metadata_names = (
+        ("release-manifest", ".json"),
+        ("runtime", ".env"),
+        ("deployment-state", ".json"),
+        ("docker-compose", ".yml"),
+        ("runtime-sizing", ".env"),
+        ("sizing", ".json"),
+        ("docker-compose-sizing", ".yml"),
+        ("egress-allowlist", ".json"),
+        ("ironproxy-config", ".yaml"),
+    )
+    for snapshot_dir in verified[keep:]:
+        resolved = snapshot_dir.resolve()
+        if resolved in protected:
+            continue
+        try:
+            if (
+                snapshot_dir.is_symlink()
+                or snapshot_dir.parent.resolve() != backup_root
+                or not BACKUP_SNAPSHOT_NAME.fullmatch(snapshot_dir.name)
+                or not _verified_full_backup(snapshot_dir)
+            ):
+                raise RuntimeError("backup changed after retention planning")
+            stamp = snapshot_dir.name
+            shutil.rmtree(snapshot_dir)
+            for prefix, suffix in metadata_names:
+                duplicate = layout.backup_dir / f"{prefix}-{stamp}{suffix}"
+                if duplicate.is_symlink():
+                    failures.append(
+                        {"snapshot": stamp, "error": f"refused symlink {duplicate.name}"}
+                    )
+                elif duplicate.is_file():
+                    duplicate.unlink()
+            removed.append(str(resolved))
+        except Exception as exc:
+            failures.append(
+                {"snapshot": snapshot_dir.name, "error": f"{type(exc).__name__}: {exc}"}
+            )
+    return {
+        "status": "partial" if failures else ("ok" if removed else "noop"),
+        "enabled": True,
+        "keepFullBackups": keep,
+        "verifiedFullBackups": len(verified),
+        "protectedRollbackSnapshot": str(protected_rollback or ""),
+        "removed": removed,
+        "removedCount": len(removed),
+        "failures": failures,
+    }
+
+
+def record_backup_retention_outcome(
+    layout: RuntimeLayout, outcome: dict[str, object]
+) -> None:
+    state = _read_json(layout.deployment_state_path, {})
+    state["backupRetention"] = {
+        "status": str(outcome.get("status") or "unknown"),
+        "enabled": bool(outcome.get("enabled")),
+        "keepFullBackups": int(
+            outcome.get("keepFullBackups") or DEFAULT_FULL_BACKUP_RETENTION_KEEP
+        ),
+        "verifiedFullBackups": int(outcome.get("verifiedFullBackups") or 0),
+        "removedCount": int(outcome.get("removedCount") or 0),
+        "failureCount": len(outcome.get("failures") or []),
+        "message": str(outcome.get("message") or ""),
+        "updatedAt": utc_now(),
+    }
+    _write_json(layout.deployment_state_path, state)
 
 
 def _restore_metadata_snapshot(layout: RuntimeLayout, snapshot_dir: Path) -> None:
@@ -5647,6 +5809,33 @@ def upgrade_release(args) -> dict:
             phase = "promote"
             maybe_fail_upgrade_simulation(layout, args, "promote")
             result = _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
+            if profile == "onprem" and backup_mode == "inline":
+                try:
+                    backup_retention = prune_verified_full_backups(layout)
+                except Exception as cleanup_exc:
+                    backup_retention = {
+                        "status": "failed",
+                        "enabled": True,
+                        "keepFullBackups": DEFAULT_FULL_BACKUP_RETENTION_KEEP,
+                        "message": f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                        "removed": [],
+                        "failures": [],
+                    }
+                    print(
+                        f"PacketSafari backup retention failed after successful promotion: {cleanup_exc}",
+                        file=sys.stderr,
+                    )
+                try:
+                    record_backup_retention_outcome(layout, backup_retention)
+                except Exception as state_exc:
+                    backup_retention["stateRecordError"] = (
+                        f"{type(state_exc).__name__}: {state_exc}"
+                    )
+                    print(
+                        f"PacketSafari could not record backup retention health: {state_exc}",
+                        file=sys.stderr,
+                    )
+                result["backupRetention"] = backup_retention
             result["hostRequirements"] = host_requirements
             result["sizingStatus"] = sizing_state_status(layout) if sizing_refresh is not None else sizing_status
             result["sizingRefreshed"] = sizing_refresh is not None
