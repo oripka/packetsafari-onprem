@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import urllib.parse
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -21,9 +23,12 @@ if __package__ in {None, ""}:
         healthcheck_deployment,
         configure_required_env,
         configure_upstream_proxy,
+        operate_intelligence_egress,
         apply_update,
         check_for_update,
+        configuration_overview,
         install_release,
+        operate_security_content,
         rollback_release,
         runtime_layout,
         set_password,
@@ -48,9 +53,12 @@ else:
         healthcheck_deployment,
         configure_required_env,
         configure_upstream_proxy,
+        operate_intelligence_egress,
         apply_update,
         check_for_update,
+        configuration_overview,
         install_release,
+        operate_security_content,
         rollback_release,
         runtime_layout,
         set_password,
@@ -66,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="packetsafari-ops")
     parser.add_argument("--runtime-root")
     parser.add_argument("--container-runtime-root", default=DEFAULT_CONTAINER_RUNTIME_ROOT)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     def add_download_args(command_parser: argparse.ArgumentParser) -> None:
         command_parser.add_argument(
@@ -95,6 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
             help="Development only: allow an unsigned offline bundle.",
         )
 
+    def add_manifest_signature_arg(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--manifest-signature",
+            help="Detached manifest signature path or URL. Defaults to the manifest source plus '.sig'.",
+        )
+
     install = subparsers.add_parser("install", help="Install PacketSafari on-prem into onboarding mode.")
     install_source = install.add_mutually_exclusive_group()
     install_source.add_argument("--manifest", help="Connected install release manifest path or URL.")
@@ -106,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-url",
         help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
     )
+    add_manifest_signature_arg(install)
     install.add_argument("--license-public-key", help="License public key path or URL. Defaults to the PacketSafari key bundled with the ops tool.")
     install.add_argument(
         "--allow-bundled-license-public-key",
@@ -120,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--audit-retention-days")
     install.add_argument("--audit-forwarding-mode")
     install.add_argument("--audit-forwarder-type")
+    install.add_argument(
+        "--connectivity-policy",
+        choices=["connected", "restricted", "airgapped"],
+        default="connected",
+        help="Initial runtime connectivity contract. Use airgapped before starting an offline-isolated deployment.",
+    )
     install.add_argument("--size", choices=["auto", "small", "medium", "large", "none"], default="auto")
 
     status_parser = subparsers.add_parser("status", help="Show installer/runtime status.")
@@ -136,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     healthcheck.add_argument("--api-base-url")
     healthcheck.add_argument("--json", action="store_true")
     healthcheck.add_argument("--image-retention-keep", type=int, default=2, help="Recorded previous deployment image sets to keep.")
-    healthcheck.add_argument("--prune-old-images", action="store_true", help="Remove safe old dangling images without prompting.")
+    healthcheck.add_argument("--prune-old-images", action="store_true", help="Remove unprotected PacketSafari images without prompting.")
     healthcheck.add_argument("--skip-image-retention-check", action="store_true")
 
     upgrade = subparsers.add_parser("upgrade", help="Apply a new release manifest or offline bundle.")
@@ -162,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-url",
         help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
     )
+    add_manifest_signature_arg(upgrade)
     upgrade.add_argument(
         "--backup-proof",
         help="Path to the most recent external backup proof JSON/text file. Defaults to state/latest-backup.json in require-recent mode.",
@@ -209,7 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     onboard.add_argument("--draft-json", default="{}")
 
     config = subparsers.add_parser("config", help="Inspect or update managed deployment config.")
-    config.add_argument("action", choices=["show", "check-env", "prompt-env", "upstream-proxy"])
+    config.add_argument("action", choices=["overview", "show", "check-env", "prompt-env", "upstream-proxy"])
     config.add_argument("--manifest", help="Release manifest path or URL used to derive required env keys.")
     config.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
     config.add_argument("--output", help="Env file to update for prompt-env. Defaults to the managed runtime env.")
@@ -220,6 +242,19 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--clear", action="store_true", help="Remove HTTP_PROXY, HTTPS_PROXY, and NO_PROXY from ironproxy.env.")
     config.add_argument("--restart", action="store_true", help="Restart egress-ironproxy after writing ironproxy.env.")
     add_download_args(config)
+
+    egress = subparsers.add_parser("egress", help="Manage purpose-scoped deployment egress approvals.")
+    egress.add_argument(
+        "action",
+        choices=[
+            "approve-intelligence-host",
+            "remove-intelligence-host",
+            "list-intelligence-hosts",
+        ],
+    )
+    egress.add_argument("--url", help="HTTPS feed URL or origin to approve or remove.")
+    egress.add_argument("--approved-by", default="", help="Operator identity recorded with an approval.")
+    egress.add_argument("--notes", default="", help="Optional approval rationale or change reference.")
 
     update = subparsers.add_parser("update", help="Check or apply the configured release channel update.")
     update.add_argument(
@@ -240,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest-url",
         help="Release manifest URL/path. If omitted, uses PACKETSAFARI_UPDATE_MANIFEST_URL or the default release channel.",
     )
+    add_manifest_signature_arg(update)
     update.add_argument(
         "--backup-mode",
         choices=["inline", "require-recent", "skip"],
@@ -252,15 +288,27 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--skip-health-check", action="store_true")
     update.add_argument("--skip-image-pull", action="store_true")
     update.add_argument("--image-retention-keep", type=int, default=2, help="Recorded previous deployment image sets to keep before offering image cleanup.")
-    update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove safe old dangling images without prompting.")
+    update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove unprotected PacketSafari images without prompting.")
     update.add_argument("--skip-image-retention-check", action="store_true")
     update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
+    update.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the complete final update payload instead of the interactive terminal summary.",
+    )
     update.add_argument(
         "--allow-unbacked-upgrade",
         action="store_true",
         help="Allow --backup-mode skip. Intended only for container-only releases or disposable development hosts.",
     )
     add_download_args(update)
+
+    content = subparsers.add_parser("content", help="Verify and operate the signed data-only security-content channel.")
+    content.add_argument("action", choices=["check", "apply", "import", "status", "rollback"])
+    content.add_argument("--pack", help="Local path or authenticated URL to a signed security-content pack.")
+    content.add_argument("--public-key", help="Release public key. Defaults to the installed PacketSafari release key.")
+    content.add_argument("--allow-downgrade", action="store_true", help="Allow explicit activation of an older sequence.")
+    add_download_args(content)
 
     iam = subparsers.add_parser("iam", help="Host-side IAM helpers.")
     iam.add_argument("action", choices=["show-initial-admin-command", "set-password"])
@@ -280,12 +328,116 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _format_update_result(payload: dict) -> str:
+    summary = payload.get("updateSummary") if isinstance(payload.get("updateSummary"), dict) else {}
+    previous_app = str(summary.get("previousApplicationVersion") or payload.get("currentVersion") or "unknown")
+    installed_app = str(summary.get("installedApplicationVersion") or payload.get("version") or payload.get("targetVersion") or "unknown")
+    previous_ops = str(summary.get("previousOpsVersion") or "unknown")
+    installed_ops = str(summary.get("installedOpsVersion") or previous_ops)
+    status_value = str(payload.get("status") or "ok")
+    ops_updated = bool(summary.get("opsUpdated"))
+    app_updated = previous_app != installed_app and status_value != "noop"
+    if status_value == "noop" and ops_updated:
+        title = "✓ OPS TOOL UPDATE SUCCEEDED — APPLICATION ALREADY CURRENT"
+    elif status_value == "noop":
+        title = "✓ PACKETSAFARI IS ALREADY CURRENT"
+    else:
+        title = "✓ PACKETSAFARI UPDATE SUCCEEDED"
+    changed_services = summary.get("changedServices") if isinstance(summary.get("changedServices"), list) else []
+    image_retention = payload.get("imageRetention") if isinstance(payload.get("imageRetention"), dict) else {}
+    backup_retention = payload.get("backupRetention") if isinstance(payload.get("backupRetention"), dict) else {}
+    candidate_count = int(image_retention.get("candidateCount") or 0)
+    cleanup_status = str(image_retention.get("status") or "")
+    if cleanup_status == "ok":
+        cleanup = f"removed {len(image_retention.get('removedIds') or [])} old PacketSafari image(s)"
+    elif candidate_count:
+        cleanup = f"{candidate_count} removable PacketSafari image(s) kept"
+    elif image_retention.get("skipped"):
+        cleanup = "image-retention check skipped"
+    else:
+        cleanup = "no cleanup needed"
+    backup_cleanup_status = str(backup_retention.get("status") or "not run")
+    backup_removed = int(backup_retention.get("removedCount") or 0)
+    backup_cleanup = (
+        f"{backup_cleanup_status}; removed {backup_removed} old verified full backup(s)"
+        if backup_removed
+        else backup_cleanup_status
+    )
+    lines = [
+        "",
+        "=" * 76,
+        title,
+        "=" * 76,
+        f"Application/backend  {previous_app} -> {installed_app}  [{'updated' if app_updated else 'current'}]",
+        f"Ops tooling          {previous_ops} -> {installed_ops}  [{'updated' if ops_updated else 'current'}]",
+        f"Profile              {payload.get('profile') or 'unknown'}",
+        f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'none'}",
+        f"Config reloads       {', '.join(str(item) for item in payload.get('configurationReloadedServices') or []) or 'none'}",
+        f"Health/readiness     {summary.get('verification') or 'unknown'}",
+        f"Rollback             {summary.get('rollback') or 'unchanged'}",
+        f"Image cleanup        {cleanup}",
+        f"Backup cleanup       {backup_cleanup}",
+    ]
+    if payload.get("snapshot"):
+        lines.append(f"Snapshot             {payload['snapshot']}")
+    warnings = [str(item) for item in summary.get("hostWarnings") or [] if str(item).strip()]
+    if warnings:
+        lines.append("Warnings             " + warnings[0])
+        lines.extend(f"                     {warning}" for warning in warnings[1:])
+    lines.extend(["=" * 76, ""])
+    return "\n".join(lines)
+
+
+def _format_update_failure(exc: Exception) -> str:
+    def sanitize_url(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        suffix = ""
+        while raw and raw[-1] in ").,;":
+            suffix = raw[-1] + suffix
+            raw = raw[:-1]
+        parsed = urllib.parse.urlsplit(raw)
+        hostname = parsed.hostname or ""
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        netloc = f"{hostname}:{port}" if port else hostname
+        return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", "")) + suffix
+
+    reason = re.sub(r"https?://[^\s]+", sanitize_url, str(exc))
+    return "\n".join(
+        [
+            "",
+            "=" * 76,
+            "✗ PACKETSAFARI UPDATE FAILED",
+            "=" * 76,
+            f"Reason: {reason}",
+            "",
+            "The command exited without reporting successful release promotion.",
+            "Inspect `packetsafari-ops status` and run `packetsafari-ops healthcheck` before retrying.",
+            "=" * 76,
+            "",
+        ]
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.runtime_root = detect_runtime_root(getattr(args, "runtime_root", None))
     if hasattr(args, "api_base_url"):
         args.api_base_url = detect_api_base_url(getattr(args, "api_base_url", None))
+
+    if args.command is None:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            parser.print_help()
+            return 2
+        run_menu(
+            runtime_root=args.runtime_root,
+            container_runtime_root=args.container_runtime_root,
+            api_base_url=detect_api_base_url(None),
+        )
+        return 0
 
     if args.command == "install":
         print(json.dumps(install_release(args), indent=2))
@@ -325,7 +477,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "check":
             print(json.dumps(check_for_update(args), indent=2))
         else:
-            print(json.dumps(apply_update(args), indent=2))
+            human_output = bool(sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty() and not args.json)
+            setattr(args, "human_output", human_output)
+            try:
+                payload = apply_update(args)
+            except Exception as exc:
+                if human_output:
+                    print(_format_update_failure(exc), file=sys.stderr)
+                    return 1
+                raise
+            if human_output:
+                print(_format_update_result(payload))
+            else:
+                print(json.dumps(payload, indent=2))
+        return 0
+    if args.command == "content":
+        print(json.dumps(operate_security_content(args), indent=2))
         return 0
     if args.command == "rollback":
         print(json.dumps(rollback_release(args), indent=2))
@@ -347,12 +514,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0
     if args.command == "config":
-        if args.action == "show":
+        if args.action == "overview":
+            print(json.dumps(configuration_overview(runtime_layout(args.runtime_root, args.container_runtime_root)), indent=2))
+        elif args.action == "show":
             print(show_runtime_env(runtime_layout(args.runtime_root, args.container_runtime_root)))
         elif args.action == "upstream-proxy":
             print(json.dumps(configure_upstream_proxy(args), indent=2))
         else:
             print(json.dumps(configure_required_env(args), indent=2))
+        return 0
+    if args.command == "egress":
+        if args.action != "list-intelligence-hosts" and not str(args.url or "").strip():
+            parser.error(f"egress {args.action} requires --url")
+        print(json.dumps(operate_intelligence_egress(args), indent=2))
         return 0
     if args.command == "iam":
         if args.action == "show-initial-admin-command":

@@ -180,6 +180,8 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
 
     assert "python3 /app/scripts/resolve_worker_concurrency.py index" in rendered
     assert 'CELERY_INDEX_CONCURRENCY:-auto' in rendered
+    assert "PACKETSAFARI_CELERY_TASK_PROFILE=security" in rendered
+    assert "--concurrency=1 --queues=security --hostname=security@%h" in rendered
     assert "  frontend:" in rendered
     assert "mem_limit:" not in rendered
     assert '--save "3600 1 300 100 60 10000"' in rendered

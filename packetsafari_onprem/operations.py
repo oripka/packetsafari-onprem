@@ -5,14 +5,17 @@ import base64
 import getpass
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -31,6 +34,16 @@ DEFAULT_CONTAINER_RUNTIME_ROOT = "/storage/onprem"
 DEFAULT_API_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_DATA_ROOT = str(Path.home() / "packetsafari-data")
 DEPLOYMENT_PROFILES = {"onprem", "saas"}
+CONNECTIVITY_POLICIES = {"connected", "restricted", "airgapped"}
+AIRGAPPED_LOCAL_AI_PROVIDERS = {"lm_studio", "llmster", "ollama", "openai_compatible"}
+AIRGAPPED_FORBIDDEN_TRUE_SETTINGS = {
+    "PACKETSAFARI_FEATURE_BYO_OPENAI_API_KEY_ENABLED": "User-supplied OpenAI keys require public AI egress.",
+    "PACKETSAFARI_FEATURE_CODEX_CHATGPT_LOGIN_ENABLED": "ChatGPT browser login requires public identity and AI egress.",
+    "PACKETSAFARI_FEATURE_SOCIAL_LOGIN_OAUTH_ENABLED": "Social login requires public identity-provider egress.",
+    "PACKETSAFARI_INTELLIGENCE_AUTO_UPDATE_ENABLED": "Automatic intelligence updates require Internet egress.",
+    "PACKETSAFARI_INTELLIGENCE_SPAMHAUS_DROP_ENABLED": "Spamhaus DROP refreshes require Internet egress.",
+    "PACKETSAFARI_TLS_CERTIFICATE_PUBLIC_CT_ENRICHMENT_ENABLED": "Public CT enrichment requires Internet egress.",
+}
 SAAS_REQUIRED_ENV_KEYS = [
     "PACKETSAFARI_PUBLIC_BASE_URL",
     "OPENAI_API_KEY",
@@ -69,6 +82,35 @@ RECOMMENDED_SMALL_HOST_VCPUS = 4
 RECOMMENDED_SMALL_HOST_MEMORY_BYTES = 16 * GIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
 DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS = 2
+DEFAULT_FULL_BACKUP_RETENTION_KEEP = 2
+BACKUP_SNAPSHOT_NAME = re.compile(r"[0-9]{8}-[0-9]{6}")
+DOCTOR_STARTUP_GRACE_CHECKS = frozenset({
+    "security_queue_consumer",
+    "intelligence_updates",
+})
+AUTO_GENERATED_UPGRADE_ENV_KEYS = frozenset({
+    "AI_AGENT_STREAM_TICKET_SECRET",
+    "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
+})
+INTELLIGENCE_EGRESS_REGISTRY_NAME = "approved-intelligence-egress-hosts.json"
+INTELLIGENCE_EGRESS_MANAGED_BY = "packetsafari-egress-intelligence"
+SHARED_SAAS_EGRESS_OVERLAY = "shared-saas.json"
+SHARED_SAAS_DEPLOYMENT_MODE = "shared_saas"
+INTELLIGENCE_EGRESS_METADATA_ADDRESSES = {
+    ipaddress.ip_address("100.100.100.200"),
+    ipaddress.ip_address("169.254.169.254"),
+    ipaddress.ip_address("fd00:ec2::254"),
+}
+INTELLIGENCE_EGRESS_CUSTOMER_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in (
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    )
+)
 
 DEFAULT_LOGGING_VALUES = {
     "AUDIT_LOG_ENABLED": "true",
@@ -160,6 +202,18 @@ class RuntimeLayout:
     @property
     def ironproxy_env_path(self) -> Path:
         return self.env_dir / "ironproxy.env"
+
+    @property
+    def intelligence_egress_registry_path(self) -> Path:
+        return self.configuration_dir / INTELLIGENCE_EGRESS_REGISTRY_NAME
+
+    @property
+    def production_egress_allowlist_path(self) -> Path:
+        return self.configuration_dir / "egress-allowlist.production.yaml"
+
+    @property
+    def production_ironproxy_config_path(self) -> Path:
+        return self.configuration_dir / "iron-proxy" / "proxy.production.generated.yaml"
 
     @property
     def deployment_state_path(self) -> Path:
@@ -485,6 +539,23 @@ def deployment_profile(args) -> str:
     if profile not in DEPLOYMENT_PROFILES:
         raise RuntimeError(f"Unsupported deployment profile: {profile}")
     return profile
+
+
+def validate_manifest_profile(manifest: dict, *, expected_profile: str) -> str:
+    if expected_profile not in DEPLOYMENT_PROFILES:
+        raise RuntimeError(f"Unsupported deployment profile: {expected_profile}")
+    target_profile = str(manifest.get("targetProfile") or "").strip().lower()
+    if not target_profile:
+        # Compatibility for manifests published before the profile contract.
+        # Existing license/operator authorization remains the trust boundary.
+        return expected_profile
+    if target_profile not in DEPLOYMENT_PROFILES:
+        raise RuntimeError(f"Release manifest has unsupported targetProfile: {target_profile}")
+    if target_profile != expected_profile:
+        raise RuntimeError(
+            f"Release manifest targets profile {target_profile!r}, but this operation targets {expected_profile!r}."
+        )
+    return target_profile
 
 
 def supports_upgrade_host_actions(layout: RuntimeLayout, *, profile: str) -> bool:
@@ -881,7 +952,15 @@ def _copy_s3_source(source: str, destination: Path, partial: Path, label: str) -
         ) from exc
 
 
-def materialize_source(source: str | os.PathLike[str], destination_dir: Path, label: str, args=None, *, default_name: str) -> Path:
+def materialize_source(
+    source: str | os.PathLike[str],
+    destination_dir: Path,
+    label: str,
+    args=None,
+    *,
+    default_name: str,
+    max_bytes: int | None = None,
+) -> Path:
     raw = str(source or "").strip()
     if not raw:
         raise RuntimeError(f"Missing {label} source.")
@@ -893,11 +972,16 @@ def materialize_source(source: str | os.PathLike[str], destination_dir: Path, la
             _copy_s3_source(raw, destination, partial, label)
         finally:
             partial.unlink(missing_ok=True)
+        if max_bytes is not None and destination.stat().st_size > max_bytes:
+            destination.unlink(missing_ok=True)
+            raise RuntimeError(f"Downloaded {label} exceeds the {max_bytes}-byte limit.")
         return destination
     if not _is_url(raw):
         path = Path(raw).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"{label.capitalize()} not found: {path}")
+        if max_bytes is not None and path.stat().st_size > max_bytes:
+            raise RuntimeError(f"{label.capitalize()} exceeds the {max_bytes}-byte limit.")
         return path
 
     destination_dir.mkdir(parents=True, exist_ok=True)
@@ -911,7 +995,15 @@ def materialize_source(source: str | os.PathLike[str], destination_dir: Path, la
         else:
             response = urllib.request.urlopen(request, timeout=_download_timeout(args))
         with response, partial.open("wb") as output:
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+            copied = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if max_bytes is not None and copied > max_bytes:
+                    raise RuntimeError(f"Downloaded {label} exceeds the {max_bytes}-byte limit.")
+                output.write(chunk)
         partial.replace(destination)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Failed to download {label} from {raw}: HTTP {exc.code}") from exc
@@ -1383,13 +1475,15 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "        PIDS=()",
         "        shutdown() { kill -TERM \"$${PIDS[@]}\" 2>/dev/null || true; }",
         "        trap shutdown TERM INT",
+        "        python3 /app/scripts/wait_for_backend_startup.py \\",
+        "          --timeout-seconds \"$${PACKETSAFARI_WORKER_BACKEND_STARTUP_WAIT_SECONDS:-45}\"",
         "",
         "        CELERY_AICHAT_CONCURRENCY=\"$$(python3 /app/scripts/resolve_worker_concurrency.py aichat)\"",
         "        CELERY_INDEX_CONCURRENCY=\"$$(python3 /app/scripts/resolve_worker_concurrency.py index)\"",
         "        export CELERY_AICHAT_CONCURRENCY CELERY_INDEX_CONCURRENCY",
         "        echo \"Resolved Celery worker concurrency: aichat=$$CELERY_AICHAT_CONCURRENCY index=$$CELERY_INDEX_CONCURRENCY\"",
         "",
-        "        celery -A packetsafari.celery_app worker \\",
+        "        PACKETSAFARI_CELERY_TASK_PROFILE=aichat celery -A packetsafari.celery_app worker \\",
         "          --loglevel=\"$${CELERY_AICHAT_LOGLEVEL:-info}\" \\",
         "          --without-gossip --without-mingle \\",
         "          --concurrency=\"$${CELERY_AICHAT_CONCURRENCY:-2}\" \\",
@@ -1399,14 +1493,14 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "        PIDS+=(\"$$AICHAT_PID\")",
         "",
         "        CELERY_PRIORITY_AGENT_CONCURRENCY=\"$${PACKETSAFARI_CELERY_PRIORITY_AGENT_CONCURRENCY:-1}\"",
-        "        celery -A packetsafari.celery_app worker \\",
+        "        PACKETSAFARI_CELERY_TASK_PROFILE=aichat celery -A packetsafari.celery_app worker \\",
         "          --loglevel=\"$${CELERY_AICHAT_LOGLEVEL:-info}\" \\",
         "          --without-gossip --without-mingle --prefetch-multiplier=1 \\",
         "          --concurrency=\"$$CELERY_PRIORITY_AGENT_CONCURRENCY\" \\",
         "          --queues=aichat_priority --hostname=aichat-priority@%h &",
         "        PIDS+=(\"$$!\")",
         "",
-        "        celery -A packetsafari.celery_app worker \\",
+        "        PACKETSAFARI_CELERY_TASK_PROFILE=index PACKETSAFARI_CELERY_RUN_STARTUP_MAINTENANCE=1 celery -A packetsafari.celery_app worker \\",
         "          --loglevel=\"$${CELERY_INDEX_LOGLEVEL:-info}\" \\",
         "          --pool=threads \\",
         "          --without-gossip --without-mingle \\",
@@ -1417,23 +1511,31 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "        PIDS+=(\"$$INDEX_PID\")",
         "",
         "        CELERY_PRIORITY_ANALYSIS_CONCURRENCY=\"$${PACKETSAFARI_CELERY_PRIORITY_ANALYSIS_CONCURRENCY:-1}\"",
-        "        celery -A packetsafari.celery_app worker \\",
+        "        PACKETSAFARI_CELERY_TASK_PROFILE=index_priority celery -A packetsafari.celery_app worker \\",
         "          --loglevel=\"$${CELERY_INDEX_LOGLEVEL:-info}\" --pool=threads \\",
         "          --without-gossip --without-mingle --prefetch-multiplier=1 \\",
         "          --concurrency=\"$$CELERY_PRIORITY_ANALYSIS_CONCURRENCY\" \\",
         "          --queues=index_priority --hostname=index-priority@%h &",
         "        PIDS+=(\"$$!\")",
         "",
+        "        # Keep the managed sizing overlay aligned with the base worker command:",
+        "        # intelligence refreshes require a dedicated security queue consumer.",
+        "        PACKETSAFARI_CELERY_TASK_PROFILE=security celery -A packetsafari.celery_app worker \\",
+        "          --loglevel=\"$${CELERY_INDEX_LOGLEVEL:-info}\" --pool=solo \\",
+        "          --without-gossip --without-mingle --prefetch-multiplier=1 \\",
+        "          --concurrency=1 --queues=security --hostname=security@%h &",
+        "        PIDS+=(\"$$!\")",
+        "",
         "        CELERY_RESERVED_ANALYSIS_CONCURRENCY=\"$${PACKETSAFARI_RESERVED_ANALYSIS_SLOTS:-0}\"",
         "        if [ \"$$CELERY_RESERVED_ANALYSIS_CONCURRENCY\" -gt 0 ]; then",
-        "          celery -A packetsafari.celery_app worker \\",
+        "          PACKETSAFARI_CELERY_TASK_PROFILE=aichat celery -A packetsafari.celery_app worker \\",
         "            --loglevel=\"$${CELERY_AICHAT_LOGLEVEL:-info}\" \\",
         "            --without-gossip --without-mingle --prefetch-multiplier=1 \\",
         "            --concurrency=\"$$CELERY_RESERVED_ANALYSIS_CONCURRENCY\" \\",
         "            --queues=aichat_reserved --hostname=aichat-reserved@%h &",
         "          PIDS+=(\"$$!\")",
         "",
-        "          celery -A packetsafari.celery_app worker \\",
+        "          PACKETSAFARI_CELERY_TASK_PROFILE=index_priority celery -A packetsafari.celery_app worker \\",
         "            --loglevel=\"$${CELERY_INDEX_LOGLEVEL:-info}\" --pool=threads \\",
         "            --without-gossip --without-mingle --prefetch-multiplier=1 \\",
         "            --concurrency=\"$$CELERY_RESERVED_ANALYSIS_CONCURRENCY\" \\",
@@ -1528,6 +1630,17 @@ def write_sizing_profile(layout: RuntimeLayout, *, profile: str) -> dict[str, ob
     layout.compose_sizing_file.write_text(_render_sizing_compose(layout, plan), encoding="utf-8")
     _write_json(layout.sizing_state_path, plan)
     return plan
+
+
+def refresh_managed_sizing_profile(layout: RuntimeLayout) -> dict[str, object] | None:
+    """Regenerate an existing managed profile so release defaults reach upgrades."""
+    state = _read_json(layout.sizing_state_path, {})
+    requested_profile = str(
+        state.get("requestedProfile") or state.get("requested_profile") or ""
+    ).strip().lower()
+    if not requested_profile or requested_profile == "none":
+        return None
+    return write_sizing_profile(layout, profile=requested_profile)
 
 
 def resolve_logging_values(args) -> dict[str, str]:
@@ -1688,11 +1801,67 @@ def write_helper_status(layout: RuntimeLayout, *, status: str = "ok", message: s
     )
 
 
-def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> None:
+def _apply_profile_egress_overlay(layout: RuntimeLayout, source_root: Path, *, profile: str) -> None:
+    if profile != "saas":
+        return
+
+    runtime_env = parse_env_file(layout.runtime_env_path)
+    deployment_mode = str(runtime_env.get("PACKETSAFARI_DEPLOYMENT_MODE") or "").strip().lower()
+    if deployment_mode and deployment_mode != SHARED_SAAS_DEPLOYMENT_MODE:
+        return
+
+    overlay_path = source_root / "templates" / "egress-profiles" / SHARED_SAAS_EGRESS_OVERLAY
+    overlay = _read_json(overlay_path, {})
+    if (
+        overlay.get("deploymentProfile") != "saas"
+        or overlay.get("deploymentMode") != SHARED_SAAS_DEPLOYMENT_MODE
+        or not isinstance(overlay.get("destinations"), list)
+    ):
+        raise RuntimeError(f"Invalid shared-SaaS egress overlay: {overlay_path}")
+
+    allowlist_path = layout.production_egress_allowlist_path
+    allowlist = _read_json(allowlist_path, {})
+    destinations = allowlist.get("destinations") if isinstance(allowlist, dict) else None
+    if not isinstance(destinations, list):
+        raise RuntimeError(f"Invalid egress allowlist: {allowlist_path}")
+
+    overlay_destinations = overlay["destinations"]
+    overlay_hosts = {
+        (str(item.get("host") or "").strip().lower(), int(item.get("port") or 443))
+        for item in overlay_destinations
+        if isinstance(item, dict) and str(item.get("host") or "").strip()
+    }
+    retained = [
+        item
+        for item in destinations
+        if not (
+            isinstance(item, dict)
+            and (str(item.get("host") or "").strip().lower(), int(item.get("port") or 443)) in overlay_hosts
+        )
+    ]
+    allowlist["destinations"] = [*retained, *overlay_destinations]
+    _write_json(allowlist_path, allowlist)
+
+
+def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> dict[str, bool]:
     root = source_root or layout.tooling_root
+    ironproxy_config_before = (
+        layout.production_ironproxy_config_path.read_bytes()
+        if layout.production_ironproxy_config_path.exists()
+        else None
+    )
     config_source = root / "templates" / "egress-config"
+    preserved_intelligence_registry = (
+        _read_json(layout.intelligence_egress_registry_path, {"approved_hosts": [], "version": 1})
+        if layout.intelligence_egress_registry_path.exists()
+        else None
+    )
     if config_source.exists():
         shutil.copytree(config_source, layout.configuration_dir, dirs_exist_ok=True)
+    if isinstance(preserved_intelligence_registry, dict):
+        _write_json(layout.intelligence_egress_registry_path, preserved_intelligence_registry)
+    _apply_profile_egress_overlay(layout, root, profile=profile)
+    _sync_intelligence_egress_config(layout)
     _run_script(
         root,
         "render_compose.py",
@@ -1715,6 +1884,12 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
             str(layout.compose_file),
         ],
     )
+    ironproxy_config_after = (
+        layout.production_ironproxy_config_path.read_bytes()
+        if layout.production_ironproxy_config_path.exists()
+        else None
+    )
+    return {"ironProxyConfigChanged": ironproxy_config_before != ironproxy_config_after}
 
 
 def render_logging_config(layout: RuntimeLayout, *, source_root: Path | None = None) -> None:
@@ -1881,6 +2056,8 @@ def _generated_env_default(key: str) -> str:
     upper = key.upper()
     if upper in {
         "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
+        "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
+        "AI_AGENT_STREAM_TICKET_SECRET",
         "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
         "REDIS_PASSWORD",
         "PACKETSAFARI_RUNTIME_REDIS_PASSWORD",
@@ -1957,6 +2134,45 @@ def _generated_env_default_for_values(key: str, values: dict[str, str]) -> str:
     if upper == "PACKETSAFARI_RUNTIME_POSTGRES_URL":
         return _postgres_url_default(values)
     return _generated_env_default(key)
+
+
+def ensure_generated_upgrade_env(
+    layout: RuntimeLayout,
+    manifest: dict,
+    *,
+    profile: str,
+) -> list[str]:
+    """Backfill safe internal secrets required by a newer release.
+
+    Existing valid values are never rotated. Only explicitly allowlisted,
+    PacketSafari-internal values may be generated during a non-interactive
+    upgrade; customer credentials continue to require operator input.
+    """
+
+    required = set(_merged_required_env_keys(manifest, profile=profile))
+    if profile == "onprem":
+        required.add("PACKETSAFARI_AUTH_MFA_SECRET_KEY")
+    values = parse_env_file(layout.runtime_env_path)
+    generated: list[str] = []
+    for key in sorted(AUTO_GENERATED_UPGRADE_ENV_KEYS & required):
+        if _required_env_value_is_valid(key, str(values.get(key, ""))):
+            continue
+        generated_value = _generated_env_default_for_values(key, values)
+        if not _required_env_value_is_valid(key, generated_value):
+            raise RuntimeError(f"Unable to generate required internal runtime value: {key}")
+        values[key] = generated_value
+        generated.append(key)
+
+    if generated:
+        write_env_file(
+            layout.runtime_env_path,
+            values,
+            header_lines=[
+                "# Managed by PacketSafari ops.",
+                "# Missing internal secrets may be generated during upgrades; existing values are preserved.",
+            ],
+        )
+    return generated
 
 
 def configure_required_env(args) -> dict:
@@ -2166,6 +2382,246 @@ def configure_upstream_proxy(args) -> dict:
     }
 
 
+def _parse_intelligence_egress_url(value: str, *, resolve_dns: bool) -> dict[str, object]:
+    raw = str(value or "").strip()
+    if not raw:
+        raise RuntimeError("--url is required.")
+    if len(raw) > 4096 or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in raw):
+        raise RuntimeError("--url must be a bounded URL without whitespace or control characters.")
+    parsed = urllib.parse.urlsplit(raw)
+    if str(parsed.scheme or "").lower() != "https":
+        raise RuntimeError("Intelligence feed hosts must use HTTPS.")
+    if parsed.username or parsed.password:
+        raise RuntimeError("Intelligence feed URLs must not embed credentials.")
+    if parsed.fragment:
+        raise RuntimeError("Intelligence feed URLs must not include a fragment.")
+    host = str(parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise RuntimeError("Intelligence feed URL must include a hostname.")
+    if not host.isascii():
+        raise RuntimeError("Intelligence feed URL must use an ASCII hostname or IP address.")
+    try:
+        port = int(parsed.port or 443)
+    except Exception as exc:
+        raise RuntimeError("Intelligence feed URL contains an invalid port.") from exc
+    if port < 1 or port > 65535:
+        raise RuntimeError("Intelligence feed URL port must be between 1 and 65535.")
+
+    def unsafe(address: str) -> bool:
+        ip = ipaddress.ip_address(address)
+        if ip not in INTELLIGENCE_EGRESS_METADATA_ADDRESSES and any(
+            ip in network for network in INTELLIGENCE_EGRESS_CUSTOMER_PRIVATE_NETWORKS
+        ):
+            return False
+        return ip in INTELLIGENCE_EGRESS_METADATA_ADDRESSES or any(
+            (
+                not ip.is_global,
+                ip.is_loopback,
+                ip.is_link_local,
+                ip.is_multicast,
+                ip.is_reserved,
+                ip.is_unspecified,
+            )
+        )
+
+    if resolve_dns:
+        try:
+            literal = ipaddress.ip_address(host.strip("[]"))
+            addresses = {str(literal)}
+        except ValueError:
+            original_timeout = socket.getdefaulttimeout()
+            try:
+                socket.setdefaulttimeout(2.0)
+                addresses = {
+                    str(row[4][0])
+                    for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                    if row and row[4]
+                }
+            except OSError as exc:
+                raise RuntimeError(f"Intelligence feed hostname did not resolve: {host}") from exc
+            finally:
+                socket.setdefaulttimeout(original_timeout)
+        if not addresses:
+            raise RuntimeError(f"Intelligence feed hostname did not resolve: {host}")
+        blocked = sorted(address for address in addresses if unsafe(address))
+        if blocked:
+            raise RuntimeError(
+                "Intelligence feed host resolves to a forbidden loopback, link-local, reserved, or metadata address: "
+                + ", ".join(blocked)
+            )
+
+    display_host = f"[{host}]" if ":" in host else host
+    return {
+        "host": host,
+        "port": port,
+        "scheme": "https",
+        "origin": urllib.parse.urlunsplit(("https", display_host if port == 443 else f"{display_host}:{port}", "", "", "")),
+    }
+
+
+def _load_intelligence_egress_registry(layout: RuntimeLayout) -> dict[str, object]:
+    payload = _read_json(layout.intelligence_egress_registry_path, {"approved_hosts": [], "version": 1})
+    approved_hosts = payload.get("approved_hosts") if isinstance(payload, dict) else []
+    return {
+        "approved_hosts": [entry for entry in approved_hosts if isinstance(entry, dict)] if isinstance(approved_hosts, list) else [],
+        "version": 1,
+    }
+
+
+def _replace_ironproxy_domains(path: Path, hosts: list[str]) -> None:
+    if not path.exists():
+        raise RuntimeError(f"Iron proxy configuration is missing: {path}")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        marker = next(index for index, line in enumerate(lines) if line.strip() == "domains:")
+    except StopIteration as exc:
+        raise RuntimeError(f"Iron proxy allowlist transform is missing from {path}") from exc
+    end = marker + 1
+    while end < len(lines) and lines[end].startswith("        - "):
+        end += 1
+    rendered = [*lines[: marker + 1], *(f'        - "{host}"' for host in hosts), *lines[end:]]
+    path.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+
+
+def _sync_intelligence_egress_config(layout: RuntimeLayout) -> dict[str, object]:
+    allowlist_path = layout.production_egress_allowlist_path
+    if not allowlist_path.exists():
+        raise RuntimeError(f"Egress allowlist is missing: {allowlist_path}")
+    allowlist = _read_json(allowlist_path, {"destinations": [], "version": 1})
+    if not isinstance(allowlist, dict):
+        raise RuntimeError(f"Egress allowlist is not an object: {allowlist_path}")
+    destinations = allowlist.get("destinations")
+    if not isinstance(destinations, list):
+        destinations = []
+    retained = [
+        item
+        for item in destinations
+        if not (isinstance(item, dict) and str(item.get("managed_by") or "") == INTELLIGENCE_EGRESS_MANAGED_BY)
+    ]
+    registry = _load_intelligence_egress_registry(layout)
+    for entry in registry["approved_hosts"]:
+        host = str(entry.get("host") or "").strip().lower()
+        if not host:
+            continue
+        retained.append(
+            {
+                "classification": "feature-optional",
+                "host": host,
+                "managed_by": INTELLIGENCE_EGRESS_MANAGED_BY,
+                "notes": "Host-approved custom intelligence feed routed through the egress proxy.",
+                "owners": ["backend", "worker"],
+                "port": int(entry.get("port") or 443),
+                "purpose": "Security intelligence",
+            }
+        )
+    allowlist["destinations"] = retained
+    allowlist["version"] = 1
+    _write_json(allowlist_path, allowlist)
+    hosts = sorted(
+        {
+            str(item.get("host") or "").strip().lower()
+            for item in retained
+            if isinstance(item, dict) and str(item.get("host") or "").strip()
+        }
+    )
+    _replace_ironproxy_domains(layout.production_ironproxy_config_path, hosts)
+    return {
+        "allowlistPath": str(allowlist_path),
+        "proxyConfigPath": str(layout.production_ironproxy_config_path),
+        "approvedHosts": registry["approved_hosts"],
+    }
+
+
+def _restart_ironproxy_if_running(layout: RuntimeLayout) -> bool:
+    result = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    running = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    if not {"packetsafari-egress-ironproxy", "egress-ironproxy"}.intersection(running):
+        return False
+    docker_compose_restart(layout, services=["egress-ironproxy"])
+    return True
+
+
+def operate_intelligence_egress(args) -> dict[str, object]:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    action = str(getattr(args, "action", "") or "").strip()
+    registry = _load_intelligence_egress_registry(layout)
+    if action == "list-intelligence-hosts":
+        return {
+            "ok": True,
+            "registryPath": str(layout.intelligence_egress_registry_path),
+            "approvedHosts": registry["approved_hosts"],
+        }
+
+    parsed = _parse_intelligence_egress_url(
+        str(getattr(args, "url", "") or ""),
+        resolve_dns=action == "approve-intelligence-host",
+    )
+    target = (parsed["host"], parsed["port"], parsed["scheme"])
+    approved_hosts = list(registry["approved_hosts"])
+    retained = []
+    matched = False
+    for entry in approved_hosts:
+        key = (
+            str(entry.get("host") or "").strip().lower(),
+            int(entry.get("port") or 443),
+            str(entry.get("scheme") or "https").strip().lower(),
+        )
+        if key == target:
+            matched = True
+            if action == "remove-intelligence-host":
+                continue
+        retained.append(entry)
+
+    if action == "approve-intelligence-host":
+        approved_by = str(getattr(args, "approved_by", "") or getpass.getuser()).strip()
+        notes = str(getattr(args, "notes", "") or "").strip()
+        entry = {
+            "approved_at": utc_now(),
+            "approved_by": approved_by,
+            "host": parsed["host"],
+            "notes": notes,
+            "port": parsed["port"],
+            "scheme": parsed["scheme"],
+        }
+        if matched:
+            retained = [
+                entry if (
+                    str(item.get("host") or "").strip().lower(),
+                    int(item.get("port") or 443),
+                    str(item.get("scheme") or "https").strip().lower(),
+                ) == target else item
+                for item in retained
+            ]
+        else:
+            retained.append(entry)
+    elif action != "remove-intelligence-host":
+        raise RuntimeError(f"Unsupported egress action: {action}")
+
+    retained.sort(key=lambda item: (str(item.get("host") or ""), int(item.get("port") or 443)))
+    _write_json(
+        layout.intelligence_egress_registry_path,
+        {"approved_hosts": retained, "version": 1},
+    )
+    synced = _sync_intelligence_egress_config(layout)
+    changed = action == "approve-intelligence-host" or matched
+    restarted = _restart_ironproxy_if_running(layout) if changed else False
+    return {
+        "ok": True,
+        "action": action,
+        "target": parsed,
+        "changed": changed,
+        "removed": action == "remove-intelligence-host" and matched,
+        "restarted": restarted,
+        "registryPath": str(layout.intelligence_egress_registry_path),
+        **synced,
+    }
+
+
 def _release_public_key_candidates(layout: RuntimeLayout, explicit: str | None = None) -> list[Path]:
     candidates: list[Path] = []
     if explicit:
@@ -2203,7 +2659,199 @@ def verify_detached_signature(public_key: Path, payload_path: Path, signature_pa
             str(payload_path),
         ],
         check=True,
+        capture_output=True,
+        text=True,
     )
+
+
+def _manifest_signature_source(manifest_source: str, args=None) -> str:
+    explicit = str(getattr(args, "manifest_signature", "") or "").strip()
+    if explicit:
+        return explicit
+
+    source = str(manifest_source or "").strip()
+    parsed = urllib.parse.urlsplit(source)
+    if parsed.scheme in {"http", "https"} and parsed.query:
+        raise RuntimeError(
+            "Cannot derive a detached signature URL from a manifest URL with a query string. "
+            "Pass --manifest-signature explicitly."
+        )
+    if parsed.scheme in {"http", "https", "s3"}:
+        return urllib.parse.urlunsplit(parsed._replace(path=f"{parsed.path}.sig"))
+    return f"{Path(source).expanduser()}.sig"
+
+
+def materialize_verified_release_manifest(
+    layout: RuntimeLayout,
+    manifest_source: str,
+    args=None,
+    *,
+    destination: Path | None = None,
+) -> Path:
+    downloads = layout.tmp_dir / "downloads"
+    manifest_path = materialize_source(
+        manifest_source,
+        downloads,
+        "release manifest",
+        args,
+        default_name="release-manifest.json",
+        max_bytes=MIB,
+    )
+    signature_path = materialize_source(
+        _manifest_signature_source(manifest_source, args),
+        downloads,
+        "release manifest signature",
+        args,
+        default_name="release-manifest.json.sig",
+        max_bytes=64 * 1024,
+    )
+    public_key = _resolve_release_public_key(layout)
+    if public_key is None:
+        raise RuntimeError(
+            "PacketSafari release public key is unavailable; refusing to trust the connected release manifest."
+        )
+    try:
+        verify_detached_signature(public_key, manifest_path, signature_path)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("PacketSafari release manifest signature verification failed.") from exc
+
+    if destination is None:
+        return manifest_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if manifest_path.resolve() != destination.resolve():
+        shutil.copy2(manifest_path, destination)
+    return destination
+
+
+def _safe_extract_content_pack(archive_path: Path, destination: Path) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, "r:*") as archive:
+        members = archive.getmembers()
+        if len(members) > 256:
+            raise RuntimeError("Security-content pack contains too many archive members.")
+        total = 0
+        for member in members:
+            member_path = Path(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts or member.issym() or member.islnk() or member.isdev():
+                raise RuntimeError(f"Unsafe security-content archive member: {member.name}")
+            total += max(0, int(member.size))
+            if total > GIB:
+                raise RuntimeError("Security-content pack exceeds the 1 GiB extraction limit.")
+        for member in members:
+            target = destination / member.name
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise RuntimeError(f"Unsupported security-content archive member: {member.name}")
+            source = archive.extractfile(member)
+            if source is None:
+                raise RuntimeError(f"Could not read security-content archive member: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source, target.open("wb") as output:
+                shutil.copyfileobj(source, output, length=MIB)
+    candidates = [path.parent for path in destination.rglob("content-manifest.json")]
+    if len(candidates) != 1:
+        raise RuntimeError("Security-content pack must contain exactly one content-manifest.json.")
+    return candidates[0]
+
+
+def _verify_content_pack(pack_dir: Path, public_key: Path) -> dict:
+    manifest_path = pack_dir / "content-manifest.json"
+    signature_path = pack_dir / "content-manifest.json.sig"
+    if manifest_path.stat().st_size > MIB:
+        raise RuntimeError("Security-content manifest exceeds 1 MiB.")
+    verify_detached_signature(public_key, manifest_path, signature_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != "packetsafari-security-content-v1":
+        raise RuntimeError("Unsupported security-content manifest schema.")
+    packages = manifest.get("packages")
+    if not isinstance(packages, list) or not packages or len(packages) > 64:
+        raise RuntimeError("Security-content manifest must contain 1-64 packages.")
+    total = 0
+    for package in packages:
+        if not isinstance(package, dict):
+            raise RuntimeError("Invalid security-content package entry.")
+        relative = Path(str(package.get("path") or ""))
+        if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("Unsafe security-content package path.")
+        source = pack_dir / relative
+        try:
+            source.resolve(strict=True).relative_to(pack_dir.resolve(strict=True))
+        except (FileNotFoundError, ValueError) as exc:
+            raise RuntimeError(f"Security-content package escapes the pack: {package.get('id')}") from exc
+        declared_size = int(package.get("size") or -1)
+        if not source.is_file() or source.is_symlink() or source.stat().st_size != declared_size:
+            raise RuntimeError(f"Security-content package size mismatch: {package.get('id')}")
+        if _sha256(source) != str(package.get("sha256") or "").lower():
+            raise RuntimeError(f"Security-content package digest mismatch: {package.get('id')}")
+        total += declared_size
+    if total > GIB:
+        raise RuntimeError("Security-content packages exceed the 1 GiB verification limit.")
+    return {
+        "ok": True,
+        "channel": str(manifest.get("channel") or ""),
+        "sequence": int(manifest.get("sequence") or 0),
+        "version": str(manifest.get("version") or ""),
+        "packages": len(packages),
+        "bytes": total,
+        "manifestSha256": _sha256(manifest_path),
+    }
+
+
+def _content_backend_command(layout: RuntimeLayout, args: list[str]) -> dict:
+    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-m", "packetsafari.common.security_content_channel", *args]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=300)
+    output = result.stdout.strip()
+    try:
+        payload = json.loads(output.splitlines()[-1] if output else "{}")
+    except json.JSONDecodeError:
+        payload = {"status": "error", "stdout": output}
+    if result.returncode != 0:
+        raise RuntimeError(str(payload.get("error") or result.stderr.strip() or "Security-content backend command failed."))
+    return payload
+
+
+def operate_security_content(args) -> dict:
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    action = str(args.action)
+    if action == "status":
+        return _content_backend_command(layout, ["status"])
+    if action == "rollback":
+        return _content_backend_command(layout, ["rollback"])
+    source = str(getattr(args, "pack", "") or "").strip()
+    if not source:
+        raise RuntimeError("content check/apply/import requires --pack with a local path or authenticated URL.")
+    public_key = _resolve_release_public_key(layout, getattr(args, "public_key", None))
+    if public_key is None:
+        raise RuntimeError("No PacketSafari release public key is installed. Pass --public-key.")
+    with tempfile.TemporaryDirectory(prefix="packetsafari-content-") as tmp:
+        work = Path(tmp)
+        archive = materialize_source(
+            source,
+            work,
+            "security-content pack",
+            args,
+            default_name="security-content-pack.tar.gz",
+            max_bytes=GIB + MIB,
+        )
+        pack_dir = _safe_extract_content_pack(archive, work / "extracted")
+        verified = _verify_content_pack(pack_dir, public_key)
+        if action == "check":
+            return verified
+        container_root = f"/tmp/packetsafari-content-{secrets.token_hex(8)}"
+        compose = _compose_base_command(layout)
+        try:
+            subprocess.run([*compose, "exec", "-T", "backend", "mkdir", "-p", container_root], check=True)
+            subprocess.run([*compose, "cp", f"{pack_dir}/.", f"backend:{container_root}/pack"], check=True)
+            subprocess.run([*compose, "cp", str(public_key), f"backend:{container_root}/release-public.pem"], check=True)
+            command_args = ["apply", "--pack-dir", f"{container_root}/pack", "--public-key", f"{container_root}/release-public.pem"]
+            if bool(getattr(args, "allow_downgrade", False)):
+                command_args.append("--allow-downgrade")
+            activated = _content_backend_command(layout, command_args)
+        finally:
+            subprocess.run([*compose, "exec", "-T", "backend", "rm", "-rf", container_root], check=False)
+        return {"verified": verified, "activated": activated}
 
 
 @contextmanager
@@ -2318,7 +2966,7 @@ def _docker_image_id(ref: str) -> str:
 
 
 def _docker_container_image_ids() -> set[str]:
-    ps = _run_text(["docker", "ps", "-q"])
+    ps = _run_text(["docker", "ps", "-aq"])
     if ps.returncode != 0:
         return set()
     container_ids = [line.strip() for line in ps.stdout.splitlines() if line.strip()]
@@ -2397,7 +3045,8 @@ def _protected_image_ids(layout: RuntimeLayout, *, keep_deployments: int) -> tup
     history = ((state.get("imageRetention") or {}).get("history") or []) if isinstance(state, dict) else []
     if not isinstance(history, list):
         history = []
-    retained_history = [item for item in history if isinstance(item, dict)][-max(0, int(keep_deployments)) :]
+    history_keep = max(0, int(keep_deployments)) + 1
+    retained_history = [item for item in history if isinstance(item, dict)][-history_keep:]
     for item in retained_history:
         images = item.get("images") if isinstance(item.get("images"), dict) else {}
         for image in images.values():
@@ -2421,11 +3070,43 @@ def _parse_docker_size(value: object) -> int:
     return int(amount * multiplier)
 
 
-def _dangling_docker_images() -> list[dict[str, object]]:
-    result = _run_text(["docker", "image", "ls", "--no-trunc", "--filter", "dangling=true", "--format", "{{json .}}"])
+def _image_repository(ref: object) -> str:
+    value = str(ref or "").strip()
+    if not value or value == "<none>":
+        return ""
+    value = value.split("@", 1)[0]
+    slash = value.rfind("/")
+    colon = value.rfind(":")
+    if colon > slash:
+        value = value[:colon]
+    return value
+
+
+def _managed_docker_repositories(layout: RuntimeLayout) -> set[str]:
+    refs = set(_active_image_refs(layout))
+    state = _read_json(layout.deployment_state_path, {})
+    history = ((state.get("imageRetention") or {}).get("history") or []) if isinstance(state, dict) else []
+    if isinstance(history, list):
+        for entry in history:
+            images = entry.get("images") if isinstance(entry, dict) else {}
+            if not isinstance(images, dict):
+                continue
+            for image in images.values():
+                if isinstance(image, dict):
+                    ref = str(image.get("ref") or "").strip()
+                    if ref:
+                        refs.add(ref)
+    return {repository for ref in refs if (repository := _image_repository(ref))}
+
+
+def _managed_docker_images(layout: RuntimeLayout) -> list[dict[str, object]]:
+    repositories = _managed_docker_repositories(layout)
+    if not repositories:
+        return []
+    result = _run_text(["docker", "image", "ls", "--no-trunc", "--digests", "--format", "{{json .}}"])
     if result.returncode != 0:
         return []
-    rows: list[dict[str, object]] = []
+    rows_by_id: dict[str, dict[str, object]] = {}
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -2437,20 +3118,103 @@ def _dangling_docker_images() -> list[dict[str, object]]:
         if not isinstance(parsed, dict):
             continue
         image_id = str(parsed.get("ID") or "").strip()
-        if not image_id:
+        repository = _image_repository(parsed.get("Repository"))
+        if not image_id or repository not in repositories:
             continue
-        rows.append(
+        row = rows_by_id.setdefault(
+            image_id,
             {
                 "id": image_id,
-                "repository": str(parsed.get("Repository") or ""),
-                "tag": str(parsed.get("Tag") or ""),
+                "repositories": [],
+                "tags": [],
+                "digests": [],
                 "createdAt": str(parsed.get("CreatedAt") or ""),
                 "createdSince": str(parsed.get("CreatedSince") or ""),
                 "size": str(parsed.get("Size") or ""),
                 "sizeBytes": _parse_docker_size(parsed.get("Size")),
-            }
+            },
         )
-    return rows
+        for key, value in (
+            ("repositories", repository),
+            ("tags", str(parsed.get("Tag") or "")),
+            ("digests", str(parsed.get("Digest") or "")),
+        ):
+            values = row[key]
+            if isinstance(values, list) and value and value != "<none>" and value not in values:
+                values.append(value)
+    return list(rows_by_id.values())
+
+
+def _docker_all_image_ids() -> set[str]:
+    result = _run_text(["docker", "image", "ls", "-aq", "--no-trunc"])
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _docker_layer_reclaim_estimate(candidate_ids: set[str], retained_ids: set[str]) -> dict[str, object]:
+    if not candidate_ids:
+        return {"status": "exact", "method": "overlay2-layerdb", "bytes": 0, "size": _format_bytes(0)}
+    all_ids = sorted(candidate_ids | retained_ids)
+    inspect = _run_text(["docker", "image", "inspect", *all_ids])
+    info = _run_text(["docker", "info", "--format", "{{json .}}"])
+    if inspect.returncode != 0 or info.returncode != 0:
+        return {"status": "unavailable", "method": "docker-inspect", "bytes": None, "size": "unknown"}
+    try:
+        images = json.loads(inspect.stdout)
+        docker_info = json.loads(info.stdout)
+    except json.JSONDecodeError:
+        return {"status": "unavailable", "method": "docker-inspect", "bytes": None, "size": "unknown"}
+    if str(docker_info.get("Driver") or "") != "overlay2":
+        return {
+            "status": "unavailable",
+            "method": str(docker_info.get("Driver") or "unknown"),
+            "bytes": None,
+            "size": "unknown",
+        }
+
+    candidate_layers: set[str] = set()
+    retained_layers: set[str] = set()
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        image_id = str(image.get("Id") or "")
+        layers = {
+            str(value or "").strip()
+            for value in ((image.get("RootFS") or {}).get("Layers") or [])
+            if str(value or "").strip()
+        }
+        if image_id in candidate_ids:
+            candidate_layers.update(layers)
+        else:
+            retained_layers.update(layers)
+
+    docker_root = Path(str(docker_info.get("DockerRootDir") or "/var/lib/docker"))
+    layerdb = docker_root / "image" / "overlay2" / "layerdb" / "sha256"
+    sizes: dict[str, int] = {}
+    try:
+        for entry in layerdb.iterdir():
+            diff_path = entry / "diff"
+            size_path = entry / "size"
+            if not diff_path.is_file() or not size_path.is_file():
+                continue
+            diff_id = diff_path.read_text(encoding="utf-8").strip()
+            sizes[diff_id] = max(0, int(size_path.read_text(encoding="utf-8").strip() or 0))
+    except (OSError, ValueError):
+        return {"status": "unavailable", "method": "overlay2-layerdb", "bytes": None, "size": "unknown"}
+
+    reclaimable_layers = candidate_layers - retained_layers
+    unknown_layers = sorted(reclaimable_layers - sizes.keys())
+    reclaimable_bytes = sum(sizes.get(layer, 0) for layer in reclaimable_layers)
+    return {
+        "status": "exact" if not unknown_layers else "partial",
+        "method": "overlay2-layerdb",
+        "bytes": reclaimable_bytes,
+        "size": _format_bytes(reclaimable_bytes),
+        "candidateLayerCount": len(candidate_layers),
+        "reclaimableLayerCount": len(reclaimable_layers),
+        "unknownLayerCount": len(unknown_layers),
+    }
 
 
 def docker_image_retention_health(layout: RuntimeLayout, *, keep_deployments: int = DEFAULT_IMAGE_RETENTION_KEEP_DEPLOYMENTS) -> dict[str, object]:
@@ -2458,26 +3222,33 @@ def docker_image_retention_health(layout: RuntimeLayout, *, keep_deployments: in
         return {"ok": True, "skipped": True, "reason": "docker_missing", "candidates": []}
     keep = max(0, int(keep_deployments))
     protected, recorded_deployments = _protected_image_ids(layout, keep_deployments=keep)
-    dangling = _dangling_docker_images()
-    candidates = [row for row in dangling if str(row.get("id") or "") not in protected]
-    total_bytes = sum(int(row.get("sizeBytes") or 0) for row in candidates)
+    managed = _managed_docker_images(layout)
+    candidates = [row for row in managed if str(row.get("id") or "") not in protected]
+    candidate_ids = {str(row.get("id") or "") for row in candidates if str(row.get("id") or "")}
+    all_image_ids = _docker_all_image_ids() or set(protected)
+    reclaim = _docker_layer_reclaim_estimate(candidate_ids, all_image_ids - candidate_ids)
+    virtual_bytes = sum(int(row.get("sizeBytes") or 0) for row in candidates)
+    reclaim_bytes = reclaim.get("bytes") if isinstance(reclaim.get("bytes"), int) else None
     safe_to_prune = recorded_deployments >= keep + 1
     return {
         "ok": not candidates,
-        "danglingCount": len(dangling),
+        "managedImageCount": len(managed),
         "candidateCount": len(candidates),
-        "candidateBytes": total_bytes,
-        "candidateSize": _format_bytes(total_bytes),
+        "candidateBytes": reclaim_bytes,
+        "candidateSize": reclaim.get("size") or "unknown",
+        "candidateVirtualBytes": virtual_bytes,
+        "candidateVirtualSize": _format_bytes(virtual_bytes),
+        "reclaimEstimate": reclaim,
         "keepDeployments": keep,
         "recordedDeployments": recorded_deployments,
         "safeToPrune": safe_to_prune,
         "message": (
-            f"{len(candidates)} old dangling Docker images can be removed while keeping the current plus last {keep} recorded deployments."
+            f"{len(candidates)} unprotected PacketSafari images can be removed while keeping the current plus last {keep} recorded deployments."
             if candidates and safe_to_prune
             else (
-                f"{len(candidates)} dangling Docker images were found, but packetsafari-ops has only {recorded_deployments} recorded deployment image sets; recording more upgrades before automatic pruning is safer."
+                f"{len(candidates)} unprotected PacketSafari images were found, but packetsafari-ops has only {recorded_deployments} recorded deployment image sets; recording more upgrades before automatic pruning is safer."
                 if candidates
-                else "No old dangling Docker images need cleanup."
+                else "No unprotected PacketSafari images need cleanup."
             )
         ),
         "candidateIds": [str(row.get("id") or "") for row in candidates if str(row.get("id") or "")],
@@ -2518,13 +3289,13 @@ def maybe_offer_docker_image_prune(args, layout: RuntimeLayout) -> dict[str, obj
         return health
     print("", file=sys.stderr)
     print("PacketSafari image cleanup opportunity:", file=sys.stderr)
-    print(f"  {health.get('candidateCount')} old dangling Docker images ({health.get('candidateSize')}) are outside the current + last {keep} deployment keep set.", file=sys.stderr)
+    print(f"  {health.get('candidateCount')} unprotected PacketSafari images ({health.get('candidateSize')} estimated reclaim) are outside the current + last {keep} deployment keep set.", file=sys.stderr)
     print("  These images are not used by running containers and can usually be removed after a healthy update.", file=sys.stderr)
     print("  To run without prompting next time, pass --prune-old-images; to only report, press Enter or answer no.", file=sys.stderr)
     if not sys.stdin.isatty():
         print("  Non-interactive shell detected; leaving images in place.", file=sys.stderr)
         return health
-    answer = input("Remove old dangling PacketSafari images now? [y/N]: ").strip().lower()
+    answer = input("Remove old unprotected PacketSafari images now? [y/N]: ").strip().lower()
     if answer in {"y", "yes"}:
         return prune_old_docker_images(layout, keep_deployments=keep)
     return {"status": "skipped", **health}
@@ -2559,7 +3330,11 @@ def format_healthcheck_report(payload: dict[str, object]) -> str:
     for check in checks:
         if not isinstance(check, dict):
             continue
-        marker = "ok" if check.get("ok") else "fail"
+        marker = (
+            "fail"
+            if not check.get("ok")
+            else ("warn" if check.get("warning") else "ok")
+        )
         detail = str(check.get("message") or check.get("error") or "").strip()
         suffix = f" - {detail}" if detail else ""
         lines.append(f"  [{marker}] {check.get('name')}{suffix}")
@@ -2820,13 +3595,24 @@ def docker_exec_backend(layout: RuntimeLayout, args: list[str]) -> None:
     subprocess.run(["docker", "exec", "-i", "packetsafari-backend", *args], check=True)
 
 
-def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, onboarding_mode: bool) -> None:
+def write_runtime_env(
+    layout: RuntimeLayout,
+    logging_values: dict[str, str],
+    *,
+    onboarding_mode: bool,
+    connectivity_policy: str = "connected",
+) -> None:
+    connectivity_policy = str(connectivity_policy or "connected").strip().lower()
+    if connectivity_policy not in CONNECTIVITY_POLICIES:
+        raise RuntimeError(f"Unsupported connectivity policy: {connectivity_policy}")
     onboarding_value = quote_env_value("true" if onboarding_mode else "false")
     postgres_db = "packetsafari"
     postgres_user = "packetsafari"
     postgres_password = secrets.token_urlsafe(32)
     redis_password = secrets.token_urlsafe(32)
     jwt_secret = secrets.token_urlsafe(64)
+    mfa_secret_key = secrets.token_urlsafe(64)
+    agent_stream_ticket_secret = secrets.token_urlsafe(64)
     sharkd_secret = secrets.token_urlsafe(64)
     lines = [
         "# Managed by PacketSafari on-prem Python operations.",
@@ -2872,6 +3658,10 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
         'NUXT_PUBLIC_API_BASE="/api/v2/"',
         'NUXT_PUBLIC_SHARKD_WS_URL=""',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
+        f"PACKETSAFARI_AUTH_MFA_SECRET_KEY={quote_env_value(mfa_secret_key)}",
+        f"AI_AGENT_STREAM_TICKET_SECRET={quote_env_value(agent_stream_ticket_secret)}",
+        'AI_AGENT_STREAM_GATEWAY_INTERNAL_URL="http://agent-stream-gateway:8091"',
+        'AI_AGENT_STREAM_TICKET_TTL_SECONDS="30"',
         f"PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET={quote_env_value(sharkd_secret)}",
         f"SHARKD_JWT_SECRET={quote_env_value(sharkd_secret)}",
     ]
@@ -2880,6 +3670,7 @@ def write_runtime_env(layout: RuntimeLayout, logging_values: dict[str, str], *, 
     lines.extend(
         [
         'PACKETSAFARI_FEATURE_SAAS_PAYWALL_ENABLED="false"',
+        f"PACKETSAFARI_CONNECTIVITY_POLICY={quote_env_value(connectivity_policy)}",
     ]
     )
     layout.runtime_env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -2892,15 +3683,21 @@ def _release_version(manifest_path: Path) -> str:
 
 def _active_deployment_profile(layout: RuntimeLayout) -> str:
     state = _read_json(layout.deployment_state_path, {})
-    mode = str(((state.get("deployment") or {}).get("mode") or "")).strip().lower()
+    deployment = state.get("deployment") if isinstance(state.get("deployment"), dict) else {}
+    installed_profile = str(deployment.get("profile") or "").strip().lower()
+    if installed_profile in DEPLOYMENT_PROFILES:
+        return installed_profile
+    mode = str(deployment.get("mode") or "").strip().lower()
     if mode == "saas":
         return "saas"
+    if mode in {"normal", "onboarding", "onprem"}:
+        return "onprem"
     if (layout.secrets_dir / "saas-operator-token").exists():
         return "saas"
     active_manifest = _read_json(layout.release_manifest_path, {})
-    profiles = active_manifest.get("deploymentProfiles")
-    if isinstance(profiles, dict) and isinstance(profiles.get("saas"), dict):
-        return "saas"
+    manifest_profile = str(active_manifest.get("targetProfile") or "").strip().lower()
+    if manifest_profile in DEPLOYMENT_PROFILES:
+        return manifest_profile
     return "onprem"
 
 
@@ -2941,13 +3738,9 @@ def _update_manifest_source(args, layout: RuntimeLayout) -> str:
 
 def _download_update_manifest(args, layout: RuntimeLayout) -> Path:
     source = _update_manifest_source(args, layout)
-    return materialize_source(
-        source,
-        layout.tmp_dir / "downloads",
-        "update manifest",
-        args,
-        default_name="release-manifest.json",
-    )
+    manifest_path = materialize_verified_release_manifest(layout, source, args)
+    setattr(args, "_release_signature_verified", True)
+    return manifest_path
 
 
 def check_for_update(args) -> dict:
@@ -2959,6 +3752,9 @@ def check_for_update(args) -> dict:
 
 def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> dict:
     manifest = _read_json(manifest_path, {})
+    active_manifest = _read_json(layout.release_manifest_path, {})
+    profile = _requested_or_active_profile(args, layout)
+    validate_manifest_profile(manifest, expected_profile=profile)
     current = _current_release_version(layout)
     target = str(manifest.get("version") or "").strip()
     if not target:
@@ -2983,10 +3779,16 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
     return {
         **app,
         "channel": str(manifest.get("channel") or ""),
-        "profile": _requested_or_active_profile(args, layout),
+        "profile": profile,
+        "platform": str(getattr(args, "platform", "") or DEFAULT_UPDATE_PLATFORM),
         "manifest": str(manifest_path),
         "source": _update_manifest_source(args, layout),
-        "backupMode": resolve_backup_mode(args, profile=_requested_or_active_profile(args, layout)),
+        "backupMode": resolve_backup_mode(args, profile=profile),
+        "releaseSignature": {
+            "status": "verified" if bool(getattr(args, "_release_signature_verified", False)) else "unknown",
+            "algorithm": "RSA-SHA256",
+        },
+        "changedServices": _services_with_changed_images(active_manifest, manifest),
         "app": app,
         "ops": ops,
         "tooling": ops,
@@ -2994,17 +3796,125 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
     }
 
 
+_UPDATE_PLAN_PRINTED_ENV = "PACKETSAFARI_OPS_INTERNAL_UPDATE_PLAN_PRINTED"
+_UPDATE_ORIGINAL_OPS_ENV = "PACKETSAFARI_OPS_INTERNAL_UPDATE_ORIGINAL_OPS_VERSION"
+
+
+def _display_release_source(source: object) -> str:
+    raw = str(source or "").strip()
+    if not raw:
+        return "configured release channel"
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme not in {"http", "https"}:
+        return raw
+    hostname = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port else hostname
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def format_update_plan(payload: dict, host_requirements: dict[str, object]) -> str:
+    app = payload.get("app") if isinstance(payload.get("app"), dict) else payload
+    ops = payload.get("ops") if isinstance(payload.get("ops"), dict) else {}
+    changed_services = payload.get("changedServices") if isinstance(payload.get("changedServices"), list) else []
+    backup_mode = str(payload.get("backupMode") or "profile default")
+    backup_note = {
+        "inline": "local PostgreSQL and /storage backup",
+        "require-recent": "verified recent external backup required",
+        "skip": "UNBACKED — no PacketSafari data backup",
+    }.get(backup_mode, "profile default")
+    ops_target = str(ops.get("targetVersion") or ops.get("requiredVersion") or ops.get("currentVersion") or "unknown")
+    ops_marker = "upgrade" if ops.get("available") else "current"
+    app_marker = "upgrade" if app.get("available") else "current"
+    signature = payload.get("releaseSignature") if isinstance(payload.get("releaseSignature"), dict) else {}
+    signature_status = "verified" if signature.get("status") == "verified" else "not reported"
+    lines = [
+        "",
+        "=" * 76,
+        "PACKETSAFARI UPDATE PLAN",
+        "=" * 76,
+        f"Application/backend  {app.get('currentVersion') or 'not installed'} -> {app.get('targetVersion') or 'unknown'}  [{app_marker}]",
+        f"Ops tooling          {ops.get('currentVersion') or version()} -> {ops_target}  [{ops_marker}]",
+        f"Deployment           {payload.get('profile') or 'unknown'} / {payload.get('channel') or 'stable'} / {payload.get('platform') or DEFAULT_UPDATE_PLATFORM}",
+        f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'no image changes detected'}",
+        f"Backup policy        {backup_mode} ({backup_note})",
+        f"Release source       {_display_release_source(payload.get('source'))}",
+        f"Release signature    {signature_status} ({signature.get('algorithm') or 'RSA-SHA256'})",
+    ]
+    warnings = [str(item) for item in host_requirements.get("warnings") or [] if str(item).strip()]
+    sizing = payload.get("sizingStatus") if isinstance(payload.get("sizingStatus"), dict) else {}
+    if sizing.get("stale"):
+        warnings.extend(str(item) for item in sizing.get("warnings") or [] if str(item).strip())
+    if warnings:
+        lines.append("Warnings             " + warnings[0])
+        lines.extend(f"                     {warning}" for warning in warnings[1:])
+    else:
+        lines.append("Preflight            host requirements and sizing look ready")
+    lines.extend(["=" * 76, ""])
+    return "\n".join(lines)
+
+
+def _attach_update_summary(
+    result: dict,
+    check_payload: dict,
+    host_requirements: dict[str, object],
+    args,
+) -> dict:
+    app = check_payload.get("app") if isinstance(check_payload.get("app"), dict) else check_payload
+    original_ops = str(os.getenv(_UPDATE_ORIGINAL_OPS_ENV) or ((check_payload.get("ops") or {}).get("currentVersion")) or version())
+    installed_ops = version()
+    backup_mode = str(result.get("backupMode") or check_payload.get("backupMode") or "")
+    if result.get("status") == "noop":
+        installed_app = str(app.get("currentVersion") or "")
+        verification = "not needed"
+        rollback = "unchanged"
+    elif bool(getattr(args, "skip_health_check", False)):
+        installed_app = str(result.get("version") or app.get("targetVersion") or "")
+        verification = "skipped by operator"
+        rollback = "full local restore available" if backup_mode == "inline" else "metadata restore only"
+    else:
+        installed_app = str(result.get("version") or app.get("targetVersion") or "")
+        verification = "passed"
+        rollback = "full local restore available" if backup_mode == "inline" else "metadata restore only"
+    if backup_mode == "require-recent":
+        rollback += "; data restore uses the verified external backup"
+    elif backup_mode == "skip":
+        rollback += "; no PacketSafari data backup was captured"
+    result["updateSummary"] = {
+        "previousApplicationVersion": str(app.get("currentVersion") or ""),
+        "installedApplicationVersion": installed_app,
+        "previousOpsVersion": original_ops,
+        "installedOpsVersion": installed_ops,
+        "opsUpdated": _version_key(original_ops) < _version_key(installed_ops),
+        "changedServices": check_payload.get("changedServices") or [],
+        "configurationReloadedServices": result.get("configurationReloadedServices") or [],
+        "verification": verification,
+        "rollback": rollback,
+        "hostWarnings": host_requirements.get("warnings") or [],
+    }
+    return result
+
+
 def apply_update(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     ensure_runtime_dirs(layout)
-    host_requirements = warn_if_host_below_requirements(layout)
-    sizing_status = warn_if_sizing_state_stale(layout)
+    human_output = bool(getattr(args, "human_output", False))
+    host_requirements = host_requirements_report(layout) if human_output else warn_if_host_below_requirements(layout)
+    sizing_status = sizing_state_status(layout) if human_output else warn_if_sizing_state_stale(layout)
     manifest_path = _download_update_manifest(args, layout)
     check_payload = _update_check_payload(args, layout, manifest_path)
+    ops_status = check_payload.get("ops") if isinstance(check_payload.get("ops"), dict) else {}
+    os.environ.setdefault(_UPDATE_ORIGINAL_OPS_ENV, str(ops_status.get("currentVersion") or version()))
+    if human_output and not _truthy(os.getenv(_UPDATE_PLAN_PRINTED_ENV)):
+        print(format_update_plan(check_payload, host_requirements), file=sys.stderr, flush=True)
+        os.environ[_UPDATE_PLAN_PRINTED_ENV] = "true"
     manifest = _read_json(manifest_path, {})
     maybe_self_update_tooling(args, layout, manifest)
     if not check_payload["available"] and not bool(getattr(args, "force", False)):
-        return {"status": "noop", **check_payload}
+        return _attach_update_summary({"status": "noop", **check_payload}, check_payload, host_requirements, args)
     setattr(args, "manifest", str(manifest_path))
     setattr(args, "bundle", None)
     setattr(args, "_host_requirements_report", host_requirements)
@@ -3015,14 +3925,23 @@ def apply_update(args) -> dict:
     result["hostRequirements"] = host_requirements
     result["sizingStatus"] = sizing_status
     result["imageRetention"] = maybe_offer_docker_image_prune(args, layout)
-    return result
+    return _attach_update_summary(result, check_payload, host_requirements, args)
 
 
-def write_deployment_state(layout: RuntimeLayout, *, mode: str, action_type: str, action_status: str, action_message: str) -> None:
+def write_deployment_state(
+    layout: RuntimeLayout,
+    *,
+    mode: str,
+    action_type: str,
+    action_status: str,
+    action_message: str,
+    profile: str = "onprem",
+) -> None:
     payload = {
         "schemaVersion": 1,
         "deployment": {
             "mode": mode,
+            "profile": profile,
             "installedVersion": _release_version(layout.release_manifest_path) if layout.release_manifest_path.exists() else "",
             "installedBuild": "",
             "installedAt": "",
@@ -3075,7 +3994,12 @@ def install_release(args) -> dict:
             shutil.copy2(release_public_key_path, layout.release_public_key_path)
 
         logging_values = resolve_logging_values(args)
-        write_runtime_env(layout, logging_values, onboarding_mode=True)
+        write_runtime_env(
+            layout,
+            logging_values,
+            onboarding_mode=True,
+            connectivity_policy=str(getattr(args, "connectivity_policy", "connected") or "connected"),
+        )
         sizing = write_sizing_profile(layout, profile=str(getattr(args, "size", "auto") or "auto"))
         render_compose(layout, layout.release_manifest_path, source_root=bundle_root(), profile="onprem")
         render_logging_config(layout, source_root=bundle_root())
@@ -3121,7 +4045,299 @@ def status(layout: RuntimeLayout) -> dict:
         "composeFiles": compose_files,
         "sizing": _read_json(layout.sizing_state_path, {}),
         "sizingStatus": sizing_state_status(layout),
+        "storageMaintenance": storage_maintenance_health(layout),
         "backups": [path.name for path in sorted(layout.backup_dir.glob("*"), reverse=True) if path.is_dir()][:10],
+    }
+
+
+def storage_maintenance_health(layout: RuntimeLayout) -> dict[str, object]:
+    """Read the bounded application maintenance receipt through Compose."""
+
+    if not layout.compose_file.exists() or not layout.runtime_env_path.exists():
+        return {
+            "healthy": False,
+            "status": "unavailable",
+            "warning": True,
+            "message": "Storage maintenance is unavailable before the runtime is installed.",
+        }
+
+    script = """import json
+import os
+from pathlib import Path
+state_path = Path(os.environ.get(
+    'PACKETSAFARI_ONPREM_STATE_PATH',
+    '/storage/onprem/state/deployment-state.json',
+))
+p = state_path.parent / 'last-maintenance.json'
+if not p.is_file():
+    print(json.dumps({'status': 'missing'}))
+else:
+    d = json.loads(p.read_text(encoding='utf-8'))
+    print(json.dumps({
+        'status': d.get('status'),
+        'apply': d.get('apply'),
+        'startedAt': d.get('started_at'),
+        'finishedAt': d.get('finished_at'),
+        'deleted': d.get('deleted'),
+        'bytesReclaimed': d.get('bytes_reclaimed'),
+        'failedRules': d.get('failed_rules') or [],
+        'partialRules': d.get('partial_rules') or [],
+    }))
+"""
+    try:
+        result = subprocess.run(
+            [
+                *_compose_base_command(layout),
+                "exec",
+                "-T",
+                "backend",
+                "python3",
+                "-c",
+                script,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "healthy": False,
+            "status": "unavailable",
+            "warning": True,
+            "message": f"Storage maintenance receipt could not be read: {exc}",
+        }
+    if result.returncode != 0:
+        return {
+            "healthy": False,
+            "status": "unavailable",
+            "warning": True,
+            "message": "Storage maintenance receipt could not be read from the backend container.",
+        }
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {
+            "healthy": False,
+            "status": "invalid",
+            "warning": True,
+            "message": "Storage maintenance receipt is not valid JSON.",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "healthy": False,
+            "status": "invalid",
+            "warning": True,
+            "message": "Storage maintenance receipt is not a JSON object.",
+        }
+
+    runtime_env = parse_env_file(layout.runtime_env_path)
+    sizing_env = parse_env_file(layout.runtime_sizing_env_path)
+    configured_interval = sizing_env.get(
+        "PACKETSAFARI_MAINTENANCE_STORAGE_CLEANUP_INTERVAL_SECONDS",
+        runtime_env.get("PACKETSAFARI_MAINTENANCE_STORAGE_CLEANUP_INTERVAL_SECONDS", "21600"),
+    )
+    try:
+        interval_seconds = max(300, int(configured_interval or 21600))
+    except (TypeError, ValueError):
+        interval_seconds = 21600
+    stale_after_seconds = max(18 * 60 * 60, interval_seconds * 3)
+    finished_at = str(payload.get("finishedAt") or "").strip()
+    age_seconds: int | None = None
+    if finished_at:
+        try:
+            finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+            if finished.tzinfo is None:
+                finished = finished.replace(tzinfo=timezone.utc)
+            age_seconds = max(
+                0,
+                int((datetime.now(timezone.utc) - finished.astimezone(timezone.utc)).total_seconds()),
+            )
+        except ValueError:
+            age_seconds = None
+
+    receipt_status = str(payload.get("status") or "missing").strip().lower()
+    failed_rules = list(payload.get("failedRules") or [])
+    partial_rules = list(payload.get("partialRules") or [])
+    stale = age_seconds is None or age_seconds > stale_after_seconds
+    healthy = bool(
+        receipt_status in {"ok", "success"}
+        and payload.get("apply") is True
+        and not failed_rules
+        and not partial_rules
+        and not stale
+    )
+    if receipt_status == "missing":
+        message = "No applied storage-maintenance receipt has been observed yet."
+    elif stale:
+        message = "The last storage-maintenance receipt is stale."
+    elif failed_rules or partial_rules or receipt_status not in {"ok", "success"}:
+        message = "Storage maintenance needs operator attention."
+    else:
+        message = "Storage maintenance is current and all recorded rules succeeded."
+    return {
+        **payload,
+        "healthy": healthy,
+        "warning": not healthy,
+        "ageSeconds": age_seconds,
+        "staleAfterSeconds": stale_after_seconds,
+        "message": message,
+    }
+
+
+def _configuration_display_value(value: object, *, secret: bool) -> str:
+    if secret:
+        return "********"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, separators=(",", ":"), sort_keys=True)
+    else:
+        text = str(value)
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        netloc = f"{parsed.hostname}:{port}" if port else parsed.hostname
+        text = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
+def configuration_overview(layout: RuntimeLayout) -> dict[str, object]:
+    """Return a read-only, fail-closed view of effective host configuration."""
+    manifest = _read_json(layout.release_manifest_path, {})
+    profile = _active_deployment_profile(layout)
+    runtime_values = parse_env_file(layout.runtime_env_path)
+    sizing_values = parse_env_file(layout.runtime_sizing_env_path)
+    ironproxy_values = parse_env_file(layout.ironproxy_env_path)
+    configured_values = dict(runtime_values)
+    configured_sources = {key: "runtime.env" for key in runtime_values}
+    for key, value in sizing_values.items():
+        configured_values[key] = value
+        configured_sources[key] = "runtime-sizing.env"
+    for key, value in ironproxy_values.items():
+        configured_values[key] = value
+        configured_sources[key] = "ironproxy.env"
+
+    catalog = manifest.get("configurationCatalog") if isinstance(manifest.get("configurationCatalog"), dict) else {}
+    source_entries = catalog.get("entries") if isinstance(catalog.get("entries"), list) else []
+    required = set(_merged_required_env_keys(manifest, profile=profile))
+    entries_by_key: dict[str, dict[str, object]] = {}
+    for source in source_entries:
+        if not isinstance(source, dict):
+            continue
+        key = str(source.get("key") or "").strip()
+        if key:
+            entries_by_key[key] = source
+
+    catalog_complete = bool(entries_by_key)
+    for key in sorted(required | set(configured_values)):
+        if key not in entries_by_key:
+            entries_by_key[key] = {
+                "key": key,
+                "domain": "required" if key in required else "uncatalogued",
+                "type": "string",
+                "default": "",
+                "secret": True,
+                "required": key in required,
+                "description": "Not described by this release manifest; value is masked by default.",
+            }
+
+    inventory: list[dict[str, object]] = []
+    counts = {"configured": 0, "defaulted": 0, "unset": 0, "missingRequired": 0}
+    for key, entry in entries_by_key.items():
+        aliases = [str(item).strip() for item in entry.get("aliases") or [] if str(item).strip()]
+        configured_key = next((candidate for candidate in [key, *aliases] if str(configured_values.get(candidate) or "").strip()), "")
+        configured_value = configured_values.get(configured_key, "") if configured_key else ""
+        is_required = key in required
+        secret = entry.get("secret") is True or _secret_env_key(key)
+        default = entry.get("default", "")
+        has_default = default is not None and default != ""
+        valid = bool(configured_key) and _required_env_value_is_valid(key, str(configured_value))
+        if is_required and not valid:
+            state = "missing-required"
+            display_value = "<unset>"
+            counts["missingRequired"] += 1
+        elif configured_key:
+            state = "configured"
+            display_value = _configuration_display_value(configured_value, secret=secret)
+            counts["configured"] += 1
+        elif has_default:
+            state = "defaulted"
+            display_value = _configuration_display_value(default, secret=secret)
+            counts["defaulted"] += 1
+        else:
+            state = "unset"
+            display_value = "<unset>"
+            counts["unset"] += 1
+        inventory.append(
+            {
+                "key": key,
+                "label": str(entry.get("label") or key),
+                "domain": str(entry.get("domain") or "other"),
+                "type": str(entry.get("type") or "string"),
+                "lifecycle": str(entry.get("lifecycle") or ""),
+                "required": is_required,
+                "secret": secret,
+                "state": state,
+                "value": display_value,
+                "source": configured_sources.get(configured_key, "default" if state == "defaulted" else ""),
+                "configuredKey": configured_key,
+                "description": str(entry.get("description") or ""),
+            }
+        )
+    inventory.sort(key=lambda item: (str(item.get("domain") or "other"), str(item.get("key") or "")))
+
+    allowlist = _read_json(layout.production_egress_allowlist_path, {})
+    raw_destinations = allowlist.get("destinations") if isinstance(allowlist.get("destinations"), list) else []
+    destinations: list[dict[str, object]] = []
+    for item in raw_destinations:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("host") or item.get("dynamic_config") or "").strip()
+        if not target:
+            continue
+        destinations.append(
+            {
+                "target": target,
+                "port": item.get("port"),
+                "purpose": str(item.get("purpose") or "Other"),
+                "classification": str(item.get("classification") or "unknown"),
+                "managed": bool(item.get("managed_by")),
+            }
+        )
+    destinations.sort(key=lambda item: (str(item["purpose"]), str(item["target"])))
+    service_modes = allowlist.get("services") if isinstance(allowlist.get("services"), dict) else {}
+    upstream_proxy_keys = [key for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY") if str(ironproxy_values.get(key) or "").strip()]
+    return {
+        "profile": profile,
+        "deploymentMode": str(runtime_values.get("PACKETSAFARI_DEPLOYMENT_MODE") or "unset"),
+        "catalog": {
+            "status": "complete" if catalog_complete else "partial",
+            "version": catalog.get("version") if catalog_complete else None,
+            "message": "Canonical release catalog loaded." if catalog_complete else "This older release has no configuration catalog; only required and configured variables are shown.",
+        },
+        "summary": {**counts, "total": len(inventory)},
+        "inventory": inventory,
+        "egress": {
+            "allowlistLoaded": bool(allowlist),
+            "monitorMode": bool(allowlist.get("monitor_mode")),
+            "ironProxyConfigured": layout.production_ironproxy_config_path.exists(),
+            "upstreamProxyConfigured": bool(upstream_proxy_keys),
+            "upstreamProxyKeys": upstream_proxy_keys,
+            "secretVariablesConfigured": sum(
+                1 for key, value in ironproxy_values.items() if str(value).strip() and _secret_env_key(key)
+            ),
+            "serviceModes": service_modes,
+            "destinations": destinations,
+        },
+        "paths": {
+            "runtimeEnv": str(layout.runtime_env_path),
+            "ironProxyEnv": str(layout.ironproxy_env_path),
+            "egressAllowlist": str(layout.production_egress_allowlist_path),
+        },
     }
 
 
@@ -3190,6 +4406,8 @@ def snapshot_runtime(layout: RuntimeLayout) -> Path:
         (layout.runtime_sizing_env_path, "runtime-sizing", ".env"),
         (layout.sizing_state_path, "sizing", ".json"),
         (layout.compose_sizing_file, "docker-compose-sizing", ".yml"),
+        (layout.production_egress_allowlist_path, "egress-allowlist", ".json"),
+        (layout.production_ironproxy_config_path, "ironproxy-config", ".yaml"),
     ):
         if src.exists():
             shutil.copy2(src, snapshot_dir / f"{prefix}{suffix}")
@@ -3300,6 +4518,7 @@ def complete_full_backup(layout: RuntimeLayout, snapshot_dir: Path) -> None:
         snapshot_dir / "snapshot.json",
         {
             **_read_json(snapshot_dir / "snapshot.json", {}),
+            "backupMode": "inline",
             "postgresBackup": "postgres.dump",
             "storageBackup": "storage.tar",
             "completedAt": utc_now(),
@@ -3319,6 +4538,165 @@ def record_external_backup_proof(snapshot_dir: Path, proof: dict[str, object]) -
     )
 
 
+def _verified_full_backup(snapshot_dir: Path) -> bool:
+    if snapshot_dir.is_symlink() or not snapshot_dir.is_dir():
+        return False
+    manifest_path = snapshot_dir / "snapshot.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return False
+    snapshot = _read_json(manifest_path, {})
+    if (
+        not snapshot.get("completedAt")
+        or str(snapshot.get("postgresBackup") or "") != "postgres.dump"
+        or str(snapshot.get("storageBackup") or "") != "storage.tar"
+    ):
+        return False
+    for name in ("postgres.dump", "storage.tar"):
+        artifact = snapshot_dir / name
+        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size <= 0:
+            return False
+    return True
+
+
+def _full_backup_retention_keep(layout: RuntimeLayout) -> tuple[bool, int, str | None]:
+    runtime_env = parse_env_file(layout.runtime_env_path)
+    raw_enabled = str(
+        runtime_env.get("PACKETSAFARI_BACKUP_RETENTION_ENABLED", "true")
+    ).strip().lower()
+    if raw_enabled not in {"1", "true", "yes", "y", "on", "0", "false", "no", "n", "off"}:
+        return False, DEFAULT_FULL_BACKUP_RETENTION_KEEP, (
+            "PACKETSAFARI_BACKUP_RETENTION_ENABLED must be a boolean"
+        )
+    enabled = raw_enabled in {"1", "true", "yes", "y", "on"}
+    raw_keep = str(
+        runtime_env.get(
+            "PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL",
+            DEFAULT_FULL_BACKUP_RETENTION_KEEP,
+        )
+    ).strip()
+    if not re.fullmatch(r"[0-9]+", raw_keep):
+        return enabled, DEFAULT_FULL_BACKUP_RETENTION_KEEP, (
+            "PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL must be an integer"
+        )
+    keep = int(raw_keep)
+    if keep < 2 or keep > 20:
+        return enabled, DEFAULT_FULL_BACKUP_RETENTION_KEEP, (
+            "PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL must be between 2 and 20"
+        )
+    return enabled, keep, None
+
+
+def prune_verified_full_backups(layout: RuntimeLayout) -> dict[str, object]:
+    """Bound completed inline backups after promotion without touching evidence."""
+
+    enabled, keep, configuration_error = _full_backup_retention_keep(layout)
+    if configuration_error:
+        return {
+            "status": "blocked",
+            "enabled": enabled,
+            "keepFullBackups": keep,
+            "reason": "invalid_configuration",
+            "message": configuration_error,
+            "removed": [],
+        }
+    if not enabled:
+        return {
+            "status": "disabled",
+            "enabled": False,
+            "keepFullBackups": keep,
+            "removed": [],
+        }
+
+    backup_root = layout.backup_dir.resolve()
+    state = _read_json(layout.deployment_state_path, {})
+    rollback = state.get("rollback") if isinstance(state.get("rollback"), dict) else {}
+    rollback_snapshot = str(rollback.get("latestSnapshot") or "")
+    protected_rollback = Path(rollback_snapshot).resolve() if rollback_snapshot else None
+    verified = sorted(
+        (
+            path
+            for path in layout.backup_dir.iterdir()
+            if BACKUP_SNAPSHOT_NAME.fullmatch(path.name)
+            and path.parent.resolve() == backup_root
+            and _verified_full_backup(path)
+        ),
+        reverse=True,
+    )
+    protected = {path.resolve() for path in verified[:keep]}
+    if protected_rollback is not None:
+        protected.add(protected_rollback)
+
+    removed: list[str] = []
+    failures: list[dict[str, str]] = []
+    metadata_names = (
+        ("release-manifest", ".json"),
+        ("runtime", ".env"),
+        ("deployment-state", ".json"),
+        ("docker-compose", ".yml"),
+        ("runtime-sizing", ".env"),
+        ("sizing", ".json"),
+        ("docker-compose-sizing", ".yml"),
+        ("egress-allowlist", ".json"),
+        ("ironproxy-config", ".yaml"),
+    )
+    for snapshot_dir in verified[keep:]:
+        resolved = snapshot_dir.resolve()
+        if resolved in protected:
+            continue
+        try:
+            if (
+                snapshot_dir.is_symlink()
+                or snapshot_dir.parent.resolve() != backup_root
+                or not BACKUP_SNAPSHOT_NAME.fullmatch(snapshot_dir.name)
+                or not _verified_full_backup(snapshot_dir)
+            ):
+                raise RuntimeError("backup changed after retention planning")
+            stamp = snapshot_dir.name
+            shutil.rmtree(snapshot_dir)
+            for prefix, suffix in metadata_names:
+                duplicate = layout.backup_dir / f"{prefix}-{stamp}{suffix}"
+                if duplicate.is_symlink():
+                    failures.append(
+                        {"snapshot": stamp, "error": f"refused symlink {duplicate.name}"}
+                    )
+                elif duplicate.is_file():
+                    duplicate.unlink()
+            removed.append(str(resolved))
+        except Exception as exc:
+            failures.append(
+                {"snapshot": snapshot_dir.name, "error": f"{type(exc).__name__}: {exc}"}
+            )
+    return {
+        "status": "partial" if failures else ("ok" if removed else "noop"),
+        "enabled": True,
+        "keepFullBackups": keep,
+        "verifiedFullBackups": len(verified),
+        "protectedRollbackSnapshot": str(protected_rollback or ""),
+        "removed": removed,
+        "removedCount": len(removed),
+        "failures": failures,
+    }
+
+
+def record_backup_retention_outcome(
+    layout: RuntimeLayout, outcome: dict[str, object]
+) -> None:
+    state = _read_json(layout.deployment_state_path, {})
+    state["backupRetention"] = {
+        "status": str(outcome.get("status") or "unknown"),
+        "enabled": bool(outcome.get("enabled")),
+        "keepFullBackups": int(
+            outcome.get("keepFullBackups") or DEFAULT_FULL_BACKUP_RETENTION_KEEP
+        ),
+        "verifiedFullBackups": int(outcome.get("verifiedFullBackups") or 0),
+        "removedCount": int(outcome.get("removedCount") or 0),
+        "failureCount": len(outcome.get("failures") or []),
+        "message": str(outcome.get("message") or ""),
+        "updatedAt": utc_now(),
+    }
+    _write_json(layout.deployment_state_path, state)
+
+
 def _restore_metadata_snapshot(layout: RuntimeLayout, snapshot_dir: Path) -> None:
     mapping = {
         "release-manifest.json": layout.release_manifest_path,
@@ -3328,6 +4706,8 @@ def _restore_metadata_snapshot(layout: RuntimeLayout, snapshot_dir: Path) -> Non
         "runtime-sizing.env": layout.runtime_sizing_env_path,
         "sizing.json": layout.sizing_state_path,
         "docker-compose-sizing.yml": layout.compose_sizing_file,
+        "egress-allowlist.json": layout.production_egress_allowlist_path,
+        "ironproxy-config.yaml": layout.production_ironproxy_config_path,
     }
     for name, dest in mapping.items():
         src = snapshot_dir / name
@@ -3545,6 +4925,7 @@ def prepare_offline_bundle(
         verify_bundle_checksums(bundle_dir)
 
         manifest = _read_json(bundle_dir / "release-manifest.json", {})
+        validate_manifest_profile(manifest, expected_profile=deployment_profile(args))
         maybe_self_update_tooling(args, layout, manifest, bundle_dir=bundle_dir)
         images = _manifest_images(manifest)
         version_value = str(manifest.get("version") or "release")
@@ -3632,15 +5013,13 @@ def prepare_offline_bundle(
 
 
 def prepare_connected_manifest(layout: RuntimeLayout, manifest_arg: str, args=None, *, destination: Path | None = None) -> Path:
-    manifest_path = materialize_source(
-        manifest_arg,
-        layout.tmp_dir / "downloads",
-        "release manifest",
-        args,
-        default_name="release-manifest.json",
-    )
     target = destination or layout.target_release_manifest_path
-    shutil.copy2(manifest_path, target)
+    manifest_path = materialize_verified_release_manifest(layout, manifest_arg, args)
+    manifest = _read_json(manifest_path, {})
+    validate_manifest_profile(manifest, expected_profile=deployment_profile(args))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if manifest_path.resolve() != target.resolve():
+        shutil.copy2(manifest_path, target)
     return target
 
 
@@ -3668,6 +5047,56 @@ def wait_for_health(*, url: str = "http://127.0.0.1:8080/api/v2/health", timeout
             last_error = str(exc)
         time.sleep(5)
     raise RuntimeError(f"Health check failed at {url}: {last_error}")
+
+
+def _agent_stream_gateway_probe(layout: RuntimeLayout) -> dict[str, object]:
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+    probe = """
+import json
+import urllib.request
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8091/healthz", timeout=3) as response:
+        response.read(1024)
+        print(json.dumps({"ok": 200 <= response.status < 300, "status": response.status}))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    raise
+"""
+    result = subprocess.run(
+        [*_compose_base_command(layout), "exec", "-T", "agent-stream-gateway", "python3", "-c", probe],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = result.stdout.strip().splitlines()
+    payload: dict[str, object] = {}
+    if output:
+        try:
+            parsed = json.loads(output[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "error": str(payload.get("error") or result.stderr.strip() or "gateway_health_failed"),
+        }
+    return payload or {"ok": False, "error": "gateway_health_missing_result"}
+
+
+def wait_for_agent_stream_gateway(layout: RuntimeLayout, *, timeout_seconds: int = 180) -> None:
+    deadline = time.time() + timeout_seconds
+    last_error = ""
+    while time.time() < deadline:
+        result = _agent_stream_gateway_probe(layout)
+        if result.get("ok"):
+            return
+        last_error = str(result.get("error") or result.get("status") or "not ready")
+        time.sleep(5)
+    raise RuntimeError(f"Agent stream gateway health check failed: {last_error}")
 
 
 def _http_probe(url: str, *, timeout: int = 8) -> dict[str, object]:
@@ -3737,6 +5166,102 @@ def _compose_service_status(layout: RuntimeLayout) -> dict[str, object]:
     return {"ok": not unhealthy and bool(rows), "services": rows, "unhealthy": unhealthy}
 
 
+def _security_queue_consumer_probe(layout: RuntimeLayout) -> dict[str, object]:
+    """Verify that the running worker has a real Celery security consumer."""
+
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+
+    try:
+        worker = subprocess.run(
+            [*_compose_base_command(layout), "ps", "-q", "worker"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "worker_container_probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    container_id = next((line.strip() for line in worker.stdout.splitlines() if line.strip()), "")
+    if worker.returncode != 0 or not container_id:
+        return {
+            "ok": False,
+            "error": worker.stderr.strip() or worker.stdout.strip() or "worker_container_not_running",
+        }
+
+    try:
+        top = subprocess.run(
+            ["docker", "top", container_id, "-eo", "pid,args"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "security_consumer_probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if top.returncode != 0:
+        return {"ok": False, "error": top.stderr.strip() or top.stdout.strip() or f"docker top exited {top.returncode}"}
+
+    queue_pattern = re.compile(r"(?:--queues(?:=|\s+)|-Q\s+)[^\s]*\bsecurity\b")
+    consumers = [
+        line
+        for line in top.stdout.splitlines()
+        if "celery" in line.lower()
+        and queue_pattern.search(line)
+        and "/bin/bash -lc" not in line
+        and "/bin/sh -lc" not in line
+    ]
+    return {
+        "ok": bool(consumers),
+        "container": container_id[:12],
+        "consumerCount": len(consumers),
+        "message": (
+            "Security queue consumer is running."
+            if consumers
+            else "Worker is running without a Celery consumer for the security queue."
+        ),
+    }
+
+
+def validate_rendered_security_consumer(layout: RuntimeLayout) -> None:
+    """Fail before migrations when the target Compose omits the security queue."""
+
+    result = subprocess.run(
+        [*_compose_base_command(layout), "config", "--format", "json"],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"Could not inspect rendered target Compose: exited {result.returncode}"
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except Exception as exc:
+        raise RuntimeError("Rendered target Compose did not produce valid JSON") from exc
+
+    services = payload.get("services") if isinstance(payload, dict) else {}
+    worker = services.get("worker") if isinstance(services, dict) else {}
+    command = worker.get("command") if isinstance(worker, dict) else None
+    if isinstance(command, list):
+        command_text = " ".join(str(part) for part in command)
+    else:
+        command_text = str(command or "")
+    queue_pattern = re.compile(r"(?:--queues(?:=|\s+)|-Q\s+)[^\s]*\bsecurity\b")
+    if not queue_pattern.search(command_text):
+        raise RuntimeError("Rendered target worker does not declare a Celery consumer for the security queue")
+
+
 def _backend_sharkd_probe(layout: RuntimeLayout) -> dict[str, object]:
     if not layout.compose_file.exists():
         return {"ok": False, "error": "compose_file_missing"}
@@ -3783,10 +5308,127 @@ except Exception as exc:
     return {**payload, "ok": bool(payload.get("ok", True))}
 
 
+def _backend_intelligence_probe(layout: RuntimeLayout) -> dict[str, object]:
+    if not layout.compose_file.exists():
+        return {"ok": False, "error": "compose_file_missing"}
+    probe = """
+import json
+import sys
+
+try:
+    from packetsafari.common.intelligence_updates import get_public_state
+
+    state = get_public_state()
+    health = state.get("health") if isinstance(state.get("health"), dict) else {}
+    content = state.get("content_channel") if isinstance(state.get("content_channel"), dict) else {}
+    active_content = content.get("active") if isinstance(content.get("active"), dict) else {}
+    feeds = state.get("feeds") if isinstance(state.get("feeds"), list) else []
+    print(json.dumps({
+        "ok": bool(health.get("ok", False)) and str(content.get("status") or "inactive") != "error",
+        "status": str(health.get("status") or "unknown"),
+        "autoUpdateEnabled": bool(state.get("auto_update_enabled", False)),
+        "lastSuccessAt": str(state.get("last_success_at") or ""),
+        "nextRunAt": str(state.get("next_run_at") or ""),
+        "problems": list(health.get("problems") or []),
+        "warnings": list(health.get("warnings") or []),
+        "contentChannel": {
+            "status": str(content.get("status") or "inactive"),
+            "channel": str(active_content.get("channel") or ""),
+            "sequence": int(active_content.get("sequence") or 0),
+            "version": str(active_content.get("version") or ""),
+            "packages": len(active_content.get("packages") or []),
+            "rollbackAvailable": bool(content.get("rollback_available", False)),
+            "lastError": str(content.get("last_error") or ""),
+        },
+        "feeds": [
+            {
+                "id": str(row.get("id") or ""),
+                "enabled": bool(row.get("enabled", False)),
+                "status": str(row.get("last_status") or "never"),
+                "updatedAt": str(row.get("last_updated_at") or ""),
+                "version": str(row.get("last_version") or ""),
+            }
+            for row in feeds
+            if isinstance(row, dict)
+        ],
+    }))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": str(exc)}))
+    sys.exit(1)
+""".strip()
+    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-c", probe]
+    try:
+        result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "probe_timeout"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    raw_output = result.stdout.strip()
+    payload: dict[str, object] = {}
+    if raw_output:
+        try:
+            parsed = json.loads(raw_output.splitlines()[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {"stdout": raw_output}
+    if result.returncode != 0:
+        return {
+            **payload,
+            "ok": False,
+            "error": str(payload.get("error") or result.stderr.strip() or raw_output or f"probe exited {result.returncode}"),
+        }
+    return {**payload, "ok": bool(payload.get("ok", False))}
+
+
+def connectivity_policy_check(runtime_env: dict[str, str], *, profile: str) -> dict[str, object]:
+    policy = str(runtime_env.get("PACKETSAFARI_CONNECTIVITY_POLICY") or "connected").strip().lower()
+    violations: list[dict[str, str]] = []
+    if policy not in CONNECTIVITY_POLICIES:
+        violations.append({
+            "key": "PACKETSAFARI_CONNECTIVITY_POLICY",
+            "reason": "Connectivity policy must be connected, restricted, or airgapped.",
+        })
+    elif policy == "airgapped":
+        if profile != "onprem":
+            violations.append({
+                "key": "PACKETSAFARI_CONNECTIVITY_POLICY",
+                "reason": "The SaaS deployment profile cannot declare an air-gapped runtime.",
+            })
+        ai_disabled = _truthy(runtime_env.get("PACKETSAFARI_FEATURE_DISABLE_ALL_AI"))
+        if not ai_disabled:
+            provider_type = str(runtime_env.get("PACKETSAFARI_AI_PROVIDER_TYPE") or "openai").strip().lower()
+            auth_mode = str(runtime_env.get("PACKETSAFARI_AI_PROVIDER_AUTH_MODE") or "environment").strip().lower()
+            if provider_type not in AIRGAPPED_LOCAL_AI_PROVIDERS:
+                violations.append({
+                    "key": "PACKETSAFARI_AI_PROVIDER_TYPE",
+                    "reason": "Air-gapped deployments require a local AI provider or all AI disabled.",
+                })
+            if auth_mode in {"bring_your_own", "chatgpt_login"}:
+                violations.append({
+                    "key": "PACKETSAFARI_AI_PROVIDER_AUTH_MODE",
+                    "reason": "Air-gapped deployments cannot use browser or user-supplied public AI authentication.",
+                })
+        for key, reason in AIRGAPPED_FORBIDDEN_TRUE_SETTINGS.items():
+            if _truthy(runtime_env.get(key)):
+                violations.append({"key": key, "reason": reason})
+    return {
+        "ok": not violations,
+        "policy": policy,
+        "violations": violations,
+    }
+
+
 def doctor_deployment(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
-    manifest_arg = str(getattr(args, "manifest", "") or "").strip()
+    manifest_arg = str(
+        getattr(args, "doctor_manifest", "")
+        or getattr(args, "_doctor_manifest_path", "")
+        or getattr(args, "manifest", "")
+        or ""
+    ).strip()
     manifest = _read_json(Path(manifest_arg), {}) if manifest_arg else _read_json(layout.release_manifest_path, {})
     runtime_env = _effective_required_env_values(layout) if layout.runtime_env_path.exists() else {}
     checks: list[dict[str, object]] = []
@@ -3802,6 +5444,15 @@ def doctor_deployment(args) -> dict:
         **host_requirements,
         warning=not bool(host_requirements.get("ok")),
     )
+
+    try:
+        validate_manifest_profile(manifest, expected_profile=profile)
+        add_check("manifest_profile", True, targetProfile=str(manifest.get("targetProfile") or "legacy"))
+    except Exception as exc:
+        add_check("manifest_profile", False, error=str(exc))
+
+    connectivity = connectivity_policy_check(runtime_env, profile=profile)
+    add_check("connectivity_policy", bool(connectivity.get("ok")), **connectivity)
 
     try:
         required = _merged_required_env_keys(manifest, profile=profile)
@@ -3848,8 +5499,27 @@ def doctor_deployment(args) -> dict:
     compose = _compose_service_status(layout)
     add_check("compose_services", bool(compose.get("ok")), **compose)
 
+    maintenance = storage_maintenance_health(layout)
+    add_check(
+        "storage_maintenance",
+        True,
+        **{
+            **maintenance,
+            "warning": not bool(maintenance.get("healthy")),
+        },
+    )
+
+    security_consumer = _security_queue_consumer_probe(layout)
+    add_check("security_queue_consumer", bool(security_consumer.get("ok")), **security_consumer)
+
+    gateway = _agent_stream_gateway_probe(layout)
+    add_check("agent_stream_gateway", bool(gateway.get("ok")), **gateway)
+
     sharkd = _backend_sharkd_probe(layout)
     add_check("backend_sharkd", bool(sharkd.get("ok")), **sharkd)
+
+    intelligence = _backend_intelligence_probe(layout)
+    add_check("intelligence_updates", bool(intelligence.get("ok")), **intelligence)
 
     ok = all(bool(check.get("ok")) for check in checks)
     return {
@@ -3861,12 +5531,71 @@ def doctor_deployment(args) -> dict:
     }
 
 
+def _doctor_failure_message(payload: dict) -> str:
+    failures: list[str] = []
+    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
+    for check in checks:
+        if not isinstance(check, dict) or check.get("ok"):
+            continue
+        name = str(check.get("name") or "unknown")
+        details: list[str] = []
+        for key in ("error", "message", "status"):
+            value = str(check.get(key) or "").strip()
+            if value and value not in details:
+                details.append(value)
+        problems = check.get("problems") if isinstance(check.get("problems"), list) else []
+        details.extend(str(problem) for problem in problems if str(problem).strip())
+        failures.append(f"{name} ({'; '.join(details)})" if details else name)
+    return f"Deployment readiness checks failed: {', '.join(failures) or 'unknown'}"
+
+
+def assert_upgrade_preflight_doctor(args) -> dict:
+    """Block hard current-release failures while allowing target worker repair."""
+
+    payload = doctor_deployment(args)
+    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
+    blocking = [
+        check
+        for check in checks
+        if isinstance(check, dict)
+        and not check.get("ok")
+        and str(check.get("name") or "unknown") not in DOCTOR_STARTUP_GRACE_CHECKS
+    ]
+    if blocking:
+        raise RuntimeError(_doctor_failure_message({"checks": blocking}))
+    return payload
+
+
 def assert_doctor_ok(args) -> dict:
     payload = doctor_deployment(args)
     if not payload.get("ok"):
-        failed = [str(check.get("name")) for check in payload.get("checks", []) if not check.get("ok")]
-        raise RuntimeError(f"Deployment readiness checks failed: {', '.join(failed)}")
+        raise RuntimeError(_doctor_failure_message(payload))
     return payload
+
+
+def wait_for_doctor_ok(args, *, timeout_seconds: int, poll_seconds: float = 5.0) -> dict:
+    """Allow target startup to recover only checks backed by asynchronous workers."""
+
+    deadline = time.monotonic() + max(1, int(timeout_seconds))
+    last_payload: dict = {}
+    while True:
+        last_payload = doctor_deployment(args)
+        if last_payload.get("ok"):
+            return last_payload
+
+        checks = last_payload.get("checks") if isinstance(last_payload.get("checks"), list) else []
+        failed_names = {
+            str(check.get("name") or "unknown")
+            for check in checks
+            if isinstance(check, dict) and not check.get("ok")
+        }
+        if not failed_names or not failed_names.issubset(DOCTOR_STARTUP_GRACE_CHECKS):
+            raise RuntimeError(_doctor_failure_message(last_payload))
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(_doctor_failure_message(last_payload))
+        time.sleep(min(max(0.0, float(poll_seconds)), remaining))
 
 
 def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, *, source: str, profile: str, backup_mode: str) -> dict:
@@ -3875,6 +5604,7 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
     deployment = state.setdefault("deployment", {})
     deployment["installedVersion"] = str(manifest.get("version") or "")
     deployment["mode"] = "normal" if profile == "onprem" else "saas"
+    deployment["profile"] = profile
     deployment["installedAt"] = utc_now()
     state["lastAction"] = {
         "type": "upgrade",
@@ -3882,11 +5612,18 @@ def _promote_release(layout: RuntimeLayout, manifest: dict, snapshot_dir: Path, 
         "message": f"Applied release {deployment['installedVersion']}.",
         "updatedAt": utc_now(),
     }
-    rollback_note = (
-        "If migrations ran, rollback restores the saved Postgres and storage backup before restarting the previous release."
-        if backup_mode == "inline"
-        else "This upgrade used an external backup proof. Automatic rollback restores runtime metadata only; restore data from the external backup if migrations must be undone."
-    )
+    if backup_mode == "inline":
+        rollback_note = "If migrations ran, rollback restores the saved Postgres and storage backup before restarting the previous release."
+    elif backup_mode == "require-recent":
+        rollback_note = (
+            "This upgrade used an external backup proof. Automatic rollback restores runtime metadata only; "
+            "restore data from the external backup if migrations must be undone."
+        )
+    else:
+        rollback_note = (
+            "This upgrade did not capture a PacketSafari data backup. Automatic rollback restores runtime metadata only; "
+            "restore Postgres and /storage from a separately managed backup if migrations must be undone."
+        )
     state["rollback"] = {
         "latestSnapshot": str(snapshot_dir),
         "rollbackMode": "restore" if backup_mode == "inline" else "external-data-restore",
@@ -3941,6 +5678,7 @@ def upgrade_release(args) -> dict:
         source = "bundle" if getattr(args, "bundle", None) else "manifest"
         snapshot_dir: Path | None = None
         phase = "preflight"
+        generated_runtime_env_keys: list[str] = []
         try:
             if source == "bundle":
                 target_manifest_path = prepare_offline_bundle(layout, args)
@@ -3949,10 +5687,14 @@ def upgrade_release(args) -> dict:
                 if not manifest_arg:
                     manifest_arg = str(_download_update_manifest(args, layout))
                 target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
+            if layout.compose_file.exists():
+                setattr(args, "_doctor_manifest_path", str(layout.release_manifest_path))
+                assert_upgrade_preflight_doctor(args)
             setattr(args, "_doctor_manifest_path", str(target_manifest_path))
             maybe_fail_upgrade_simulation(layout, args, "preflight")
 
             manifest = _read_json(target_manifest_path, {})
+            validate_manifest_profile(manifest, expected_profile=profile)
             maybe_self_update_tooling(args, layout, manifest)
             validate_tooling_requirement(manifest)
             validate_upgrade_path(layout, manifest)
@@ -3960,6 +5702,19 @@ def upgrade_release(args) -> dict:
                 verify_license_allows_release(layout, manifest)
             else:
                 verify_saas_operator_authorization(layout, args, manifest)
+            generated_runtime_env_keys = ensure_generated_upgrade_env(
+                layout,
+                manifest,
+                profile=profile,
+            )
+            if generated_runtime_env_keys:
+                generated_names = ", ".join(generated_runtime_env_keys)
+                message = (
+                    "Generated missing managed internal runtime secret(s): "
+                    f"{generated_names}. Existing values were preserved; secret values were not logged."
+                )
+                print(f"PacketSafari update: {message}", file=sys.stderr)
+                write_helper_status(layout, status="upgrading", message=message)
             validate_required_env(layout, manifest, profile=profile)
             external_backup_proof = None
             if backup_mode == "require-recent":
@@ -3981,8 +5736,18 @@ def upgrade_release(args) -> dict:
             snapshot_dir = snapshot_runtime(layout)
 
             phase = "compose"
-            render_compose(layout, target_manifest_path, profile=profile)
+            sizing_refresh = refresh_managed_sizing_profile(layout)
+            render_result = render_compose(layout, target_manifest_path, profile=profile) or {}
+            ironproxy_config_changed = bool(render_result.get("ironProxyConfigChanged"))
+            ironproxy_config_reload_required = (
+                had_active_compose
+                and ironproxy_config_changed
+                and "egress-ironproxy" in _rendered_compose_services(layout)
+            )
+            if ironproxy_config_reload_required and "egress-ironproxy" not in services_to_recreate:
+                services_to_recreate.append("egress-ironproxy")
             render_logging_config(layout)
+            validate_rendered_security_consumer(layout)
             maybe_fail_upgrade_simulation(layout, args, "compose")
             if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):
                 write_helper_status(layout, status="upgrading", message="Pulling target release images before stopping running services.")
@@ -3998,7 +5763,8 @@ def upgrade_release(args) -> dict:
                         layout,
                         status="upgrading",
                         message=(
-                            f"Stopping services with changed images ({', '.join(services_to_recreate)}) and "
+                            f"Stopping services with changed images or startup configuration "
+                            f"({', '.join(services_to_recreate)}) and "
                             f"{backup_message}."
                         ),
                     )
@@ -4035,15 +5801,46 @@ def upgrade_release(args) -> dict:
             docker_compose_up(layout, pull_policy="never")
             maybe_fail_upgrade_simulation(layout, args, "healthcheck")
             if not bool(getattr(args, "skip_health_check", False)):
-                wait_for_health(timeout_seconds=int(getattr(args, "health_timeout", 180) or 180))
-                if profile == "saas":
-                    assert_doctor_ok(args)
+                health_timeout = int(getattr(args, "health_timeout", 180) or 180)
+                wait_for_health(timeout_seconds=health_timeout)
+                wait_for_agent_stream_gateway(layout, timeout_seconds=health_timeout)
+                wait_for_doctor_ok(args, timeout_seconds=health_timeout)
 
             phase = "promote"
             maybe_fail_upgrade_simulation(layout, args, "promote")
             result = _promote_release(layout, manifest, snapshot_dir, source=source, profile=profile, backup_mode=backup_mode)
+            if profile == "onprem" and backup_mode == "inline":
+                try:
+                    backup_retention = prune_verified_full_backups(layout)
+                except Exception as cleanup_exc:
+                    backup_retention = {
+                        "status": "failed",
+                        "enabled": True,
+                        "keepFullBackups": DEFAULT_FULL_BACKUP_RETENTION_KEEP,
+                        "message": f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                        "removed": [],
+                        "failures": [],
+                    }
+                    print(
+                        f"PacketSafari backup retention failed after successful promotion: {cleanup_exc}",
+                        file=sys.stderr,
+                    )
+                try:
+                    record_backup_retention_outcome(layout, backup_retention)
+                except Exception as state_exc:
+                    backup_retention["stateRecordError"] = (
+                        f"{type(state_exc).__name__}: {state_exc}"
+                    )
+                    print(
+                        f"PacketSafari could not record backup retention health: {state_exc}",
+                        file=sys.stderr,
+                    )
+                result["backupRetention"] = backup_retention
             result["hostRequirements"] = host_requirements
-            result["sizingStatus"] = sizing_status
+            result["sizingStatus"] = sizing_state_status(layout) if sizing_refresh is not None else sizing_status
+            result["sizingRefreshed"] = sizing_refresh is not None
+            result["generatedRuntimeEnvKeys"] = generated_runtime_env_keys
+            result["configurationReloadedServices"] = ["egress-ironproxy"] if ironproxy_config_reload_required else []
             return result
         except Exception as exc:
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")

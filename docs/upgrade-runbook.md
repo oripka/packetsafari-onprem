@@ -43,6 +43,7 @@ The frontend intentionally connects directly to sharkd for low-latency packet vi
 ## Customer Commands
 
 ```bash
+sudo env HOME=/root packetsafari-ops
 packetsafari-ops status
 packetsafari-ops update check
 packetsafari-ops update
@@ -54,11 +55,33 @@ packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 ```
 
+On an interactive terminal, bare `packetsafari-ops` opens the operator
+cockpit. It loads local state immediately and offers the same connected
+check/update, signed offline bundle, backup, healthcheck, rollback, and
+image-retention workflows as the commands below. Use the explicit commands for
+automation and recovery shells.
+
+For a detected PacketSafari-operated SaaS profile, the cockpit checks the
+private signed release channel and local deployment health in the background.
+Customer on-prem and air-gapped profiles never perform that automatic release
+check. The dashboard evaluates external backup proof freshness against the
+normal 180-minute limit and shows the exact application and ops-tool targets
+before an update is confirmed.
+
 `update check`, `update`, `install --license`, and bare `upgrade` are the
 normal connected operator flow. `update apply` remains accepted for older
 runbooks, but new docs and operator habits should use `update`. The tool still
 uses a release manifest internally, but operators do not need to pass one each
 time.
+
+Interactive `update` prints an update plan before mutation with the current and
+target application/backend versions, current and target ops-tool versions,
+changed services, deployment identity, backup policy, sanitized release source,
+and host warnings. After the transaction it prints a concise success, already
+current, or failure readback with installed versions, health verification,
+rollback capability, snapshot, and image-cleanup outcome. The final result
+payload remains JSON in non-interactive use; use `update --json` to request it
+explicitly in a terminal.
 
 `bootstrap.sh` is for first install and recovery. It can launch `update`, but
 the normal post-install command is the installed wrapper:
@@ -93,10 +116,23 @@ Docker still needs the ECR credential helper for image pulls. Do not use
 workstation AWS keys, public SaaS manifests, or copied CloudFront signing
 material to simplify this path.
 
-The manifest also advertises the matching ops tooling archive. When the host is
-running an older `packetsafari-ops`, `update` downloads that archive, verifies
-its checksum, swaps `/opt/packetsafari/tooling/onprem`, re-execs the updated
-CLI, and then continues the app release.
+The manifest also advertises the matching ops tooling archive. From ops version
+`0.2.21`, `update` verifies the detached manifest signature before trusting that
+archive URL or checksum. During the one-time upgrade from an older ops version,
+the existing HTTPS/private-S3 plus checksum path installs and re-execs `0.2.21`;
+the new CLI then verifies the manifest before any application release action.
+Subsequent tooling self-updates are protected before download.
+
+Every connected manifest must have an adjacent `release-manifest.json.sig`.
+Local paths, S3 URIs, and HTTP(S) URLs without query strings derive that sibling
+automatically. For an object-specific signed URL, pass the independently signed
+signature URL explicitly:
+
+```bash
+packetsafari-ops update \
+  --manifest-url 'https://downloads.example/release-manifest.json?manifest-token' \
+  --manifest-signature 'https://downloads.example/release-manifest.json.sig?signature-token'
+```
 
 Use these environment variables only when testing a private/staged channel or a
 customer-specific manifest:
@@ -138,6 +174,30 @@ storage migrations, or on disposable development hosts. If migrations run,
 rollback may require restoring PostgreSQL and `/storage` from an external
 backup.
 
+The cockpit exposes this as **Update without backup** under **Updates &
+recovery**. It displays the target release and rollback limitation and requires
+the operator to type `UNBACKED`; it never selects this mode by default.
+
+## Configuration overview
+
+Open **Configuration → Configuration overview** to inspect the effective host
+configuration without revealing secrets. The paginated view reports deployment
+identity, enabled feature flags, configured/defaulted/unset variables, missing
+required values, IronProxy and upstream-proxy state, service egress modes, and
+the installed purpose-scoped destination allowlist. Secret variables and
+variables absent from the signed release catalog are masked as `********`.
+
+For automation-friendly inspection, use:
+
+```bash
+packetsafari-ops config overview
+```
+
+New release manifests embed a value-free configuration catalog generated from
+PacketSafari's canonical environment registry. Older manifests are reported as
+partial and show only manifest-required and locally configured variables; the
+cockpit never implies that such a fallback is a complete inventory.
+
 ## Host Hygiene Checks
 
 `packetsafari-ops healthcheck` runs deployment readiness checks and adds Docker
@@ -145,8 +205,12 @@ image retention guidance. Successful upgrades record the image ids for each
 deployed release. Cleanup then protects the current deployment plus the last two
 recorded deployment image sets by default.
 
-After `packetsafari-ops update` succeeds, the tool reports old dangling Docker
-images when enough deployment image history exists. In an interactive shell it
+After `packetsafari-ops update` succeeds, the tool reports PacketSafari-managed
+images outside the running-container and current-plus-two-deployment keep set.
+This includes digest-associated images that Docker does not label as dangling.
+On overlay2 hosts, the report calculates reclaimable bytes from the exact layer
+references and Docker layer database instead of summing virtual image sizes.
+In an interactive shell it
 asks whether to remove them; pressing Enter keeps them. Scheduled or
 non-interactive updates never remove images unless `--prune-old-images` is
 passed explicitly.
@@ -223,7 +287,25 @@ keys. Upstream `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `PACKETSAFARI_PADDLE_
 `env/ironproxy.env`, which is mounted only into `egress-ironproxy`; the
 backend/worker runtime env should contain the proxy placeholders instead. The
 doctor then probes backend health/config, frontend `runtime-config.json`, and
-Compose service state.
+Compose service state. All deployment profiles also verify intelligence updater
+freshness and scheduling. Automatic updates that are overdue, failed, or stale
+block readiness; explicitly disabled updates remain valid for air-gapped use.
+
+Both SaaS and on-prem upgrades also verify that the target worker has a live
+Celery consumer for the `security` queue before promotion. Because that
+consumer starts the intelligence scheduler asynchronously, the upgrade grants
+only the security-consumer and intelligence-update checks a bounded startup
+grace period using the configured health timeout. Missing configuration and
+unhealthy backend, gateway, Sharkd, or Compose checks still fail immediately.
+A timeout reports the underlying feed, scheduler, or consumer details instead
+of only the check name.
+
+When an active deployment exists, the upgrade runs its doctor before replacing
+Compose or running migrations. Current hard failures stop there. A missing
+security consumer or overdue intelligence refresh may proceed only because the
+target is required to declare that consumer before services stop and prove it
+live afterward; this lets the first corrected release repair older deployments
+without weakening other preflight checks.
 
 ```json
 {
@@ -330,6 +412,22 @@ in onboarding mode.
 For `--profile saas --backup-mode require-recent`, step 6 records the verified
 external backup proof instead of taking a local PostgreSQL and `/storage` dump.
 The migration and promotion gates stay the same.
+
+After a healthy on-prem release is promoted, `packetsafari-ops` retains the two
+newest completed inline backups by default. A backup qualifies only when its
+snapshot metadata records completion and its non-empty `postgres.dump` and
+`storage.tar` are both present. The snapshot referenced by the current rollback
+state is always protected, even when it falls outside the count-based keep set.
+Failed, incomplete, external-proof, and unbacked metadata snapshots are never
+treated as verified full backups and are not deleted by this rule. Retention is
+not run during a failed upgrade or before promotion.
+
+Set `PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL` in the managed runtime env to a
+value from 2 through 20 to keep more verified full backups. Set
+`PACKETSAFARI_BACKUP_RETENTION_ENABLED=false` to disable automatic full-backup
+retention. Invalid settings block cleanup without failing or rolling back an
+otherwise successful release; the latest outcome is recorded in deployment
+state under `backupRetention` and returned by the upgrade command.
 
 ## Failure Behavior
 

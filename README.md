@@ -1,15 +1,16 @@
 # PacketSafari On-Prem
 
-Customer-facing Python-native installer, operator CLI, and simple interactive menu for PacketSafari on-prem.
+Customer-facing Python-native installer, operator CLI, and interactive operations cockpit for PacketSafari on-prem.
 
 ## Layout
 
 - `bootstrap.sh` - pinned/download-host bootstrap shim that downloads the bundle and launches the Python CLI
-- `packetsafari_onprem/` - Python control plane for install, status, onboarding, upgrade, rollback, diagnostics, and the interactive operator menu
+- `packetsafari_onprem/` - Python control plane for install, status, onboarding, upgrade, rollback, diagnostics, and the interactive operator cockpit
 - `scripts/license_*.py` - offline entitlement token tooling
 - `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
 - `docs/upgrade-runbook.md` - connected and air-gapped upgrade/rollback runbook
 - `docs/ai-model-onboarding.md` - customer-managed AI endpoint, model-profile, parser, qualification, and offline onboarding workflow
+- `docs/passkeys.md` - canonical public URL, automatic WebAuthn configuration, and safe hostname-change procedure
 - `scripts/render_compose.py` - render pinned on-prem compose files from release manifests
 - `scripts/build_offline_bundle.py` - build signed USB/offline install/upgrade bundles from a release manifest
 - `scripts/build_local_release.py` - build a locally hosted on-prem release directory for VM validation
@@ -18,6 +19,12 @@ Customer-facing Python-native installer, operator CLI, and simple interactive me
 - `templates/docker-compose.onprem.yml.tpl` - compose template rendered during install and upgrade
 
 ## Bootstrap And Updates
+
+Release manifests may declare `targetProfile=onprem` or `targetProfile=saas`.
+The CLI persists the installed profile and rejects a declared mismatch before
+self-updating tooling, loading bundle images, or changing the stack. Manifests
+from before this contract remain compatible and retain the signed license or
+SaaS operator-token authorization boundary.
 
 Bootstrap is for first install and recovery. Once `/usr/local/bin/packetsafari-ops`
 exists, normal connected and SaaS updates should use `packetsafari-ops update`;
@@ -32,6 +39,10 @@ curl -fsSL "https://<portal-presigned-url>/bootstrap.sh" | bash -s -- install --
 
 ```bash
 curl -fsSL "https://<portal-presigned-url>/bootstrap.sh" | bash -s -- install --bundle ./packetsafari-10.0.1-offline.tar.zst
+```
+
+```bash
+sudo env HOME=/root packetsafari-ops
 ```
 
 ```bash
@@ -172,8 +183,9 @@ That host runtime root is bind-mounted into the app containers at `/storage/onpr
 Primary commands:
 
 ```bash
+sudo env HOME=/root packetsafari-ops
 packetsafari-ops install --license /path/to/license-token.json --non-interactive
-packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
+packetsafari-ops install --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst --connectivity-policy airgapped
 packetsafari-ops status --json
 packetsafari-ops tui
 packetsafari-ops upgrade
@@ -181,6 +193,8 @@ packetsafari-ops upgrade --bundle /media/usb/packetsafari-10.0.1-offline.tar.zst
 packetsafari-ops rollback
 packetsafari-ops onboard schema
 packetsafari-ops config show
+packetsafari-ops egress list-intelligence-hosts
+packetsafari-ops egress approve-intelligence-host --url https://feeds.example.com
 packetsafari-ops iam show-initial-admin-command --email admin@example.com
 packetsafari-ops diagnostics restart
 ```
@@ -191,14 +205,70 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 
 - `install` validates the signed license token, writes runtime state under the managed root, installs the Python bundle, renders compose and logging config, and starts PacketSafari in onboarding mode.
 - `install --bundle` performs a fresh air-gapped install from a signed bundle, loads image archives locally, and starts Compose with `--pull never`.
-- `tui` is the primary operator interface. It is a simple menu runner with back navigation.
+- A bare `packetsafari-ops` invocation in an interactive terminal opens the
+  operator cockpit. `packetsafari-ops tui` remains an explicit alias. Bare
+  non-interactive invocations print command help and exit instead of waiting
+  for terminal input.
+- The cockpit summarizes the detected profile, installed application and ops
+  versions, backup/rollback state, and session health. It exposes connected
+  update checks, profile-safe updates, explicit inline backups, guarded
+  unbacked updates, signed offline bundles, rollback, readiness checks,
+  bounded logs, service operations, sizing, signed security content,
+  configuration, onboarding, and access helpers.
+- Opening the cockpit never contacts a release channel automatically for
+  customer on-prem or air-gapped profiles, preserving that deployment
+  boundary. A detected PacketSafari-operated SaaS profile checks its private
+  signed release channel and local deployment health in the background so the
+  opening dashboard can show application and ops-tool targets without blocking
+  navigation.
+- External backup proofs are reported as ready or stale against the same
+  180-minute default enforced by the SaaS update workflow. Restore verification
+  and freshness are shown separately; an old `verifiedRestore` flag never
+  appears as current update readiness.
+- Mutating cockpit actions run through the existing `packetsafari-ops`
+  transaction path. Tooling self-update/re-exec, manifest and bundle
+  verification, entitlement, backup policy, migrations, health checks,
+  promotion, rollback, and image-retention rules therefore remain identical
+  to their command-line equivalents.
+- Deployment rendering fingerprints IronProxy's generated startup policy. If
+  the effective allowlist changes, the transaction stops and starts
+  `egress-ironproxy` so the running in-memory policy matches the promoted file;
+  the final update receipt reports the configuration reload.
+- Cockpit configuration and onboarding views never print managed runtime
+  secret values. Password entry is masked, signed URL query strings are
+  removed from rendered summaries, and the unbacked update and rollback
+  actions require explicit typed acknowledgements.
+- **Configuration → Configuration overview** shows the effective deployment
+  profile and application mode, enabled feature flags, configured/defaulted/
+  unset variables, missing required values, IronProxy state, and the effective
+  purpose-scoped egress allowlist. It is generated from the release's canonical
+  environment catalog; secrets and uncatalogued values are always rendered as
+  `********`. Use `packetsafari-ops config overview` for the same secret-safe
+  data as JSON.
+- Managed update completion screens report application and ops-tool before/after
+  versions, changed services, verification outcome, and rollback capability.
+  Failures retain the latest helper/recovery state instead of only displaying a
+  generic command failure.
 - When `PACKETSAFARI_DATA_ROOT` or `~/packetsafari-data` exists, the menu defaults to that local dev layout. Otherwise it defaults to `/opt/packetsafari`.
 - Native onboarding uses the existing local `/api/v2/onprem/onboarding/*` APIs. The menu can show schema output and validate, save, or finalize pasted draft JSON directly from the terminal.
 - Generated-capable internal deployment secrets are now registry-driven. The onboarding schema distinguishes generated-capable platform secrets from manual-only external credentials.
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
+- The public HTTPS URL entered during onboarding automatically owns the WebAuthn origin and relying-party ID; see `docs/passkeys.md` before enrolling passkeys or changing the hostname.
 - `update check` discovers the configured release-channel manifest and reports app and ops tooling availability.
 - `update` downloads the configured release-channel manifest, self-updates `packetsafari-ops` when the manifest advertises newer tooling, re-execs the updated CLI, and then runs the same transaction as `upgrade --manifest`.
+- In an interactive terminal, `update` prints a concise plan before mutation
+  showing the application/backend and ops-tool version transitions, changed
+  services, profile/channel/platform, backup policy, sanitized source, and host
+  warnings. Successful OpenSSL verification is folded into one release-
+  signature row instead of leaking duplicate subprocess chatter. It ends with
+  an explicit succeeded/current/failed summary covering
+  installed versions, health verification, rollback capability, and image
+  cleanup. The final result payload remains JSON in non-interactive use; pass
+  `--json` to request that payload explicitly in a terminal.
 - `healthcheck` runs deployment readiness checks and Docker image-retention guidance without applying a release.
+- `doctor` validates the manifest profile and the declared
+  `PACKETSAFARI_CONNECTIVITY_POLICY`. Air-gapped deployments require local AI
+  or all AI disabled and reject known Internet-backed runtime features.
 - `install --license` and bare `upgrade` use the same default release-channel
   manifest discovery. Pass `--manifest` only for a pinned file/URL, staging
   channel, or customer-specific manifest.
@@ -234,10 +304,11 @@ sudo env HOME=/root packetsafari-ops update
 On a SaaS host, the command infers `profile=saas`, downloads the private release
 manifest from
 `s3://packetsafari-release-channels-166826692770/channels/saas/stable/linux-arm64/release-manifest.json`
-with the EC2 instance role, updates `packetsafari-ops` from the manifest's
-`tooling.archiveUrl` when needed, pulls ECR images through root Docker's ECR
-credential helper, applies migrations, restarts services, health-checks, and
-promotes.
+and its adjacent `.sig` with the EC2 instance role, verifies the manifest with
+the public release key bundled into `packetsafari-ops`, then updates the tool
+from the verified `tooling.archiveUrl` and checksum when needed. Only after that
+does it pull ECR images, apply migrations, restart services, health-check, and
+promote.
 
 SaaS-specific safety rules:
 
@@ -265,6 +336,11 @@ https://releases.packetsafari.com/channels/<profile>/<channel>/<platform>/releas
 Override `PACKETSAFARI_UPDATE_MANIFEST_URL` or `PACKETSAFARI_UPDATE_BASE_URL`
 only for staged/private/customer-specific manifests.
 
+All connected manifest sources require a detached signature. The normal source
+is the manifest path or URL plus `.sig`. If a private manifest URL has a query
+string whose authorization does not cover the sibling object, also pass its
+separately authorized URL with `--manifest-signature`.
+
 `doctor --profile saas` checks product readiness, not just Docker liveness. It
 verifies required SaaS env such as `PACKETSAFARI_PUBLIC_BASE_URL` and
 `PACKETSAFARI_PADDLE_WEBHOOK_SECRET`, plus upstream OpenAI/Paddle keys from
@@ -275,12 +351,48 @@ health/config, checks frontend `runtime-config.json`, and inspects Compose
 service state. SaaS upgrades run this readiness check after startup and before
 release promotion.
 
+For every profile, doctor also reads intelligence updater state from the backend.
+
+Signed data-only security content is updated independently from container releases:
+
+```bash
+packetsafari-ops content check --pack 'https://authenticated.example/security-content.tar.gz'
+packetsafari-ops content apply --pack 'https://authenticated.example/security-content.tar.gz'
+packetsafari-ops content status
+packetsafari-ops content rollback
+```
+
+Release images also contain a verified complete baseline for disconnected
+startup. On fresh storage it is activated automatically. On an upgrade, startup
+activates the embedded baseline only when it is a strictly newer sequence on the
+same signed channel; it never downgrades or replaces a newer/operator-selected
+channel. The previous generation remains available for rollback.
+
+For an air-gapped host, transfer the same signed pack and use `content import
+--pack ./security-content.tar.gz`. The installed PacketSafari release public key
+verifies the manifest; each package is size-, digest-, schema-, and compatibility-
+checked again inside the backend before activation. Content activation never scans
+existing captures. Automatic upstream feed updates can remain disabled in an
+air-gapped deployment without making `doctor` fail.
+It reports enabled feeds, active versions, last success, next run, warnings, and
+failures; an overdue scheduler, failed enabled feed, or stale automatically
+managed content makes readiness fail. Intentionally disabled automatic updates
+remain valid for air-gapped deployments and are reported as disabled.
+
 Successful updates also record the deployed image ids. When old dangling Docker
 images are detected and enough deployment history exists, `update` explains the
 space impact and asks whether to remove images outside the current plus last two
 recorded deployment image sets. Pressing Enter keeps them. Non-interactive runs
 only report the condition unless `--prune-old-images` is passed. Use
 `packetsafari-ops healthcheck --json` for automation-friendly reporting.
+
+Successful on-prem updates also bound local full-backup growth. After release
+promotion, the tool keeps the newest two verified inline PostgreSQL plus
+`/storage` backups and always preserves the snapshot named by current rollback
+state. It does not prune before promotion, after a failed upgrade, or based on
+an incomplete backup. Configure the keep count (2–20) with
+`PACKETSAFARI_BACKUP_RETENTION_KEEP_FULL`, or disable this cleanup with
+`PACKETSAFARI_BACKUP_RETENTION_ENABLED=false`.
 
 Install the operator token at `/opt/packetsafari/secrets/saas-operator-token`
 and set the expected SHA-256 digest in the manifest at
@@ -331,16 +443,16 @@ docker exec -it packetsafari-backend python3 /app/scripts/create_initial_admin.p
 
 ## License Claims
 
-On-prem licenses are signed offline entitlement tokens. Current tokens carry explicit claims for `agent_enabled`, `max_users`, `max_agent_runs_per_month`, `offline_expiry`, `customer_id`, `deployment_id`, and `support_tier`. The established `max_agent_runs_per_month` claim now represents weighted Agent units per licensed deployment; the claim name remains unchanged so existing runtimes continue to verify new tokens.
+On-prem licenses are signed offline entitlement tokens. Current tokens carry explicit claims for `agent_enabled`, `max_users`, `max_analysis_runs_per_month`, `max_quick_questions_per_month`, `max_prompt_coach_requests_per_month`, `offline_expiry`, `customer_id`, `deployment_id`, and `support_tier`.
 
 Create and verify tokens with:
 
 ```bash
-python3 scripts/license_create.py --private-key keys/license-private.pem --customer-id customer-acme --customer-email security@example.com --license-id lic-acme-001 --deployment-id dep-acme-prod --support-tier enterprise --max-users 25 --max-agent-units-per-month 5000 --agent-enabled --days 365 --output /tmp/packetsafari-license-token.json
+python3 scripts/license_create.py --private-key keys/license-private.pem --customer-id customer-acme --customer-email security@example.com --license-id lic-acme-001 --deployment-id dep-acme-prod --support-tier enterprise --max-users 25 --max-analysis-runs-per-month 100 --max-quick-questions-per-month 100 --max-prompt-coach-requests-per-month 500 --agent-enabled --days 365 --output /tmp/packetsafari-license-token.json
 python3 scripts/license_verify.py --token /tmp/packetsafari-license-token.json --public-key keys/license-public.pem
 ```
 
-The default enterprise entitlement is 25 enabled named users and 5,000 weighted Agent units per licensed deployment and calendar month. Agent operation uses the customer-managed compatible AI endpoint, credentials, and compute; neither the license token nor an offline bundle supplies upstream AI capacity. See `docs/license-claims.md` for the unit schedule and full claim schema. The private signing key is internal-only and must never be installed on a customer host.
+Set all three monthly AI limits from the signed customer contract; the values above are examples. Use `-1` only when that category is contractually unlimited. Agent operation uses the customer-managed compatible AI endpoint, credentials, and compute; neither the license token nor an offline bundle supplies upstream AI capacity. See `docs/license-claims.md` for the full claim schema. The private signing key is internal-only and must never be installed on a customer host.
 
 ## Audit Logging Modes
 

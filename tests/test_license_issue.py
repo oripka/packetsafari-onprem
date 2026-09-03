@@ -59,19 +59,17 @@ class LicenseCreateTests(unittest.TestCase):
         token = json.loads(output.read_text(encoding="utf-8"))
         return json.loads(license_common.b64url_decode(token["payload"]).decode("utf-8"))
 
-    def test_default_is_five_thousand_weighted_units(self):
-        payload = self._issue()
+    def test_writes_three_canonical_ai_limits(self):
+        payload = self._issue(
+            "--max-analysis-runs-per-month", "100",
+            "--max-quick-questions-per-month", "100",
+            "--max-prompt-coach-requests-per-month", "500",
+        )
 
-        self.assertEqual(payload["max_agent_runs_per_month"], 5000)
-
-    def test_preferred_and_legacy_options_write_the_legacy_claim(self):
-        for option, expected in (
-            ("--max-agent-units-per-month", 4321),
-            ("--max-agent-runs-per-month", 1234),
-        ):
-            with self.subTest(option=option):
-                payload = self._issue(option, str(expected))
-                self.assertEqual(payload["max_agent_runs_per_month"], expected)
+        self.assertEqual(payload["max_analysis_runs_per_month"], 100)
+        self.assertEqual(payload["max_quick_questions_per_month"], 100)
+        self.assertEqual(payload["max_prompt_coach_requests_per_month"], 500)
+        self.assertNotIn("max_agent_runs_per_month", payload)
 
 
 class LicenseRenewTests(unittest.TestCase):
@@ -119,7 +117,9 @@ class LicenseRenewTests(unittest.TestCase):
                 "deployment_id": "deployment-1",
                 "support_tier": "enterprise",
                 "max_users": 0,
-                "max_agent_runs_per_month": 0,
+                "max_analysis_runs_per_month": 0,
+                "max_quick_questions_per_month": 0,
+                "max_prompt_coach_requests_per_month": 0,
                 "agent_enabled": False,
                 "channel": "stable",
                 "allowed_versions": ["10.0.1", "10.0.2"],
@@ -127,8 +127,9 @@ class LicenseRenewTests(unittest.TestCase):
         )
 
         self.assertEqual(cmd[cmd.index("--max-users") + 1], "0")
-        self.assertEqual(cmd[cmd.index("--max-agent-units-per-month") + 1], "0")
-        self.assertNotIn("--max-agent-runs-per-month", cmd)
+        self.assertEqual(cmd[cmd.index("--max-analysis-runs-per-month") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--max-quick-questions-per-month") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--max-prompt-coach-requests-per-month") + 1], "0")
         self.assertIn("--no-agent", cmd)
         allowed_versions = [
             cmd[index + 1]
@@ -137,16 +138,19 @@ class LicenseRenewTests(unittest.TestCase):
         ]
         self.assertEqual(allowed_versions, ["10.0.1", "10.0.2"])
 
-    def test_missing_agent_allowance_uses_enterprise_default(self):
+    def test_legacy_analysis_allowance_migrates_without_new_restrictions(self):
         cmd = self._renew_command(
             {
                 "customerId": "customer-1",
                 "customerEmail": "security@example.com",
                 "licenseId": "license-1",
+                "max_agent_runs_per_month": 5000,
             }
         )
 
-        self.assertEqual(cmd[cmd.index("--max-agent-units-per-month") + 1], "5000")
+        self.assertEqual(cmd[cmd.index("--max-analysis-runs-per-month") + 1], "5000")
+        self.assertEqual(cmd[cmd.index("--max-quick-questions-per-month") + 1], "-1")
+        self.assertEqual(cmd[cmd.index("--max-prompt-coach-requests-per-month") + 1], "-1")
 
 
 if __name__ == "__main__":

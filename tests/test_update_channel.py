@@ -38,6 +38,68 @@ def test_onprem_update_keeps_public_https_channel(tmp_path):
     assert source == "https://releases.packetsafari.com/channels/onprem/stable/linux-arm64/release-manifest.json"
 
 
+def test_installed_profile_wins_and_capability_metadata_does_not_select_saas(tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.deployment_state_path.write_text(
+        json.dumps({"deployment": {"mode": "normal", "profile": "onprem"}}),
+        encoding="utf-8",
+    )
+    layout.release_manifest_path.write_text(
+        json.dumps({"deploymentProfiles": {"onprem": {}, "saas": {}}}),
+        encoding="utf-8",
+    )
+
+    assert operations._active_deployment_profile(layout) == "onprem"
+
+
+def test_airgapped_connectivity_policy_requires_local_ai_or_ai_disabled():
+    rejected = operations.connectivity_policy_check(
+        {
+            "PACKETSAFARI_CONNECTIVITY_POLICY": "airgapped",
+            "PACKETSAFARI_AI_PROVIDER_TYPE": "openai",
+            "PACKETSAFARI_AI_PROVIDER_AUTH_MODE": "chatgpt_login",
+        },
+        profile="onprem",
+    )
+    accepted = operations.connectivity_policy_check(
+        {
+            "PACKETSAFARI_CONNECTIVITY_POLICY": "airgapped",
+            "PACKETSAFARI_AI_PROVIDER_TYPE": "ollama",
+            "PACKETSAFARI_AI_PROVIDER_AUTH_MODE": "none",
+        },
+        profile="onprem",
+    )
+
+    assert rejected["ok"] is False
+    assert {item["key"] for item in rejected["violations"]} == {
+        "PACKETSAFARI_AI_PROVIDER_TYPE",
+        "PACKETSAFARI_AI_PROVIDER_AUTH_MODE",
+    }
+    assert accepted == {"ok": True, "policy": "airgapped", "violations": []}
+
+
+def test_install_parser_and_runtime_env_activate_airgap_before_start(tmp_path):
+    from packetsafari_onprem import cli
+
+    args = cli.build_parser().parse_args(
+        ["install", "--bundle", "/media/release.tar.zst", "--connectivity-policy", "airgapped"]
+    )
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+
+    operations.write_runtime_env(
+        layout,
+        {},
+        onboarding_mode=True,
+        connectivity_policy=args.connectivity_policy,
+    )
+
+    runtime_env = operations.parse_env_file(layout.runtime_env_path)
+    assert args.connectivity_policy == "airgapped"
+    assert runtime_env["PACKETSAFARI_CONNECTIVITY_POLICY"] == "airgapped"
+
+
 def test_ensure_journald_retention_config_writes_bounded_policy(tmp_path, monkeypatch):
     config_path = tmp_path / "journald.conf.d" / "packetsafari.conf"
     calls: list[list[str]] = []
@@ -282,11 +344,17 @@ def test_image_retention_blocks_prune_until_history_has_keep_set(monkeypatch, tm
     monkeypatch.setattr(operations, "_docker_image_id", lambda ref: "sha256:current" if ref == "repo/backend:3" else "")
     monkeypatch.setattr(
         operations,
-        "_dangling_docker_images",
-        lambda: [
+        "_managed_docker_images",
+        lambda _layout: [
             {"id": "sha256:old", "sizeBytes": 1_500_000_000, "size": "1.5GB", "createdSince": "2 weeks ago"},
         ],
     )
+    monkeypatch.setattr(
+        operations,
+        "_docker_layer_reclaim_estimate",
+        lambda candidate_ids, retained_ids: {"status": "exact", "method": "test", "bytes": 1_500_000_000, "size": "1.5 GB"},
+    )
+    monkeypatch.setattr(operations, "_docker_all_image_ids", lambda: {"sha256:current", "sha256:old"})
 
     health = operations.docker_image_retention_health(layout, keep_deployments=2)
 
@@ -295,7 +363,7 @@ def test_image_retention_blocks_prune_until_history_has_keep_set(monkeypatch, tm
     assert health["recordedDeployments"] == 1
 
 
-def test_image_retention_prunes_only_unprotected_dangling_images(monkeypatch, tmp_path):
+def test_image_retention_prunes_only_unprotected_managed_images(monkeypatch, tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     layout.state_dir.mkdir(parents=True)
     layout.compose_dir.mkdir(parents=True)
@@ -325,11 +393,21 @@ def test_image_retention_prunes_only_unprotected_dangling_images(monkeypatch, tm
     monkeypatch.setattr(operations, "_docker_image_id", lambda ref: "sha256:current" if ref == "repo/backend:3" else "")
     monkeypatch.setattr(
         operations,
-        "_dangling_docker_images",
-        lambda: [
+        "_managed_docker_images",
+        lambda _layout: [
             {"id": "sha256:previous", "sizeBytes": 500_000_000, "size": "500MB"},
             {"id": "sha256:old-unused", "sizeBytes": 700_000_000, "size": "700MB"},
         ],
+    )
+    monkeypatch.setattr(
+        operations,
+        "_docker_layer_reclaim_estimate",
+        lambda candidate_ids, retained_ids: {"status": "exact", "method": "test", "bytes": 700_000_000, "size": "700.0 MB"},
+    )
+    monkeypatch.setattr(
+        operations,
+        "_docker_all_image_ids",
+        lambda: {"sha256:current", "sha256:previous", "sha256:old-unused"},
     )
 
     def fake_run(command, *, check=False):
@@ -369,6 +447,8 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     monkeypatch.setattr(operations, "validate_upgrade_path", lambda layout, manifest: None)
     monkeypatch.setattr(operations, "verify_saas_operator_authorization", lambda layout, args, manifest: None)
     monkeypatch.setattr(operations, "validate_required_env", lambda layout, manifest, profile: None)
+    monkeypatch.setattr(operations, "assert_upgrade_preflight_doctor", lambda args: calls.append("preflight_doctor"))
+    monkeypatch.setattr(operations, "validate_rendered_security_consumer", lambda layout: calls.append("validate_security_consumer"))
     monkeypatch.setattr(operations, "ensure_ecr_credential_helper_ready", lambda layout: calls.append("ensure_ecr"))
     monkeypatch.setattr(operations, "render_logging_config", lambda layout: calls.append("render_logging"))
     monkeypatch.setattr(operations, "docker_compose_pull", lambda layout: calls.append("pull"))
@@ -376,7 +456,16 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     monkeypatch.setattr(operations, "run_target_migrations", lambda layout: calls.append("migrate"))
     monkeypatch.setattr(operations, "docker_compose_up", lambda layout, services=None, pull_policy=None: calls.append("up"))
     monkeypatch.setattr(operations, "wait_for_health", lambda timeout_seconds=180: calls.append("health"))
-    monkeypatch.setattr(operations, "assert_doctor_ok", lambda args: calls.append("doctor"))
+    monkeypatch.setattr(
+        operations,
+        "wait_for_agent_stream_gateway",
+        lambda layout, timeout_seconds=180: calls.append("agent_stream_gateway"),
+    )
+    monkeypatch.setattr(
+        operations,
+        "wait_for_doctor_ok",
+        lambda args, timeout_seconds: calls.append(f"doctor:{timeout_seconds}"),
+    )
 
     def fake_render_compose(layout, manifest_path, source_root=None, profile="onprem"):
         calls.append("render")
@@ -407,7 +496,75 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
         )
     )
 
-    assert result == {"message": "ok"}
+    assert result["message"] == "ok"
     assert calls.index("pull") < calls.index("stop:backend,worker")
+    assert calls.index("preflight_doctor") < calls.index("render")
     assert calls.index("render") < calls.index("pull")
+    assert calls.index("render") < calls.index("validate_security_consumer")
+    assert calls.index("validate_security_consumer") < calls.index("stop:backend,worker")
     assert calls.index("stop:backend,worker") < calls.index("migrate")
+    assert calls.index("health") < calls.index("doctor:1")
+    assert calls.index("health") < calls.index("agent_stream_gateway")
+    assert calls.index("agent_stream_gateway") < calls.index("doctor:1")
+    assert calls.index("doctor:1") < calls.index("promote")
+
+
+def test_security_queue_consumer_probe_requires_real_celery_process(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.compose_file.write_text("services:\n  worker:\n", encoding="utf-8")
+    responses = iter([
+        SimpleNamespace(returncode=0, stdout="worker-container-id\n", stderr=""),
+        SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "PID ARGS\n"
+                "10 /bin/bash -lc celery --queues=security\n"
+                "11 /venv/bin/python3 /venv/bin/celery -A packetsafari.celery_app worker --queues=index\n"
+            ),
+            stderr="",
+        ),
+    ])
+    monkeypatch.setattr(operations.subprocess, "run", lambda *args, **kwargs: next(responses))
+
+    result = operations._security_queue_consumer_probe(layout)
+
+    assert result["ok"] is False
+    assert result["consumerCount"] == 0
+
+
+def test_wait_for_doctor_ok_allows_intelligence_startup_grace(monkeypatch):
+    payloads = iter([
+        {
+            "ok": False,
+            "checks": [
+                {
+                    "name": "intelligence_updates",
+                    "ok": False,
+                    "status": "unhealthy",
+                    "problems": ["scheduled_update_overdue"],
+                }
+            ],
+        },
+        {"ok": True, "checks": [{"name": "intelligence_updates", "ok": True}]},
+    ])
+    monkeypatch.setattr(operations, "doctor_deployment", lambda args: next(payloads))
+
+    result = operations.wait_for_doctor_ok(SimpleNamespace(), timeout_seconds=1, poll_seconds=0)
+
+    assert result["ok"] is True
+
+
+def test_wait_for_doctor_ok_fails_immediately_for_permanent_check(monkeypatch):
+    payload = {
+        "ok": False,
+        "checks": [{"name": "required_env", "ok": False, "error": "missing API key"}],
+    }
+    monkeypatch.setattr(operations, "doctor_deployment", lambda args: payload)
+
+    try:
+        operations.wait_for_doctor_ok(SimpleNamespace(), timeout_seconds=30, poll_seconds=0)
+    except RuntimeError as exc:
+        assert str(exc) == "Deployment readiness checks failed: required_env (missing API key)"
+    else:
+        raise AssertionError("permanent readiness failure should not be retried")

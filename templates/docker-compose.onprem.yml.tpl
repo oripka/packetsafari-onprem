@@ -82,6 +82,8 @@ services:
     depends_on:
       backend:
         condition: service_started
+      agent-stream-gateway:
+        condition: service_healthy
       sharkd:
         condition: service_started
     networks:
@@ -98,8 +100,8 @@ services:
       - "{{ runtime_env_path }}"
     environment:
       PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
-      PACKETSAFARI_STORAGE_SUBDIRS: "upload upload/archive colorrules temporary avatars uploadchunk capture-agent anoncap agent-visual-reports admin intelligence intelligence/ja4 intelligence/suricata intelligence/suricata/rules intelligence/suricata/update intelligence/zeek intelligence/zeek/intel runtime runtime/sharkd-ids-cache logs analysis analysis/runtime analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets onprem onprem/state onprem/env onprem/secrets"
-      PACKETSAFARI_STORAGE_REPAIR_SUBDIRS: "uploadchunk upload/archive capture-agent anoncap agent-visual-reports runtime/sharkd-ids-cache analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets"
+      PACKETSAFARI_STORAGE_SUBDIRS: "upload upload/archive colorrules temporary avatars uploadchunk capture-agent anoncap agent-visual-reports admin intelligence intelligence/ja4 intelligence/suricata intelligence/suricata/rules intelligence/suricata/update intelligence/zeek intelligence/zeek/intel runtime runtime/sharkd-ids-cache logs analysis analysis/runtime analysis/runtime/primary analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets analysis/runtime/sql-artifacts analysis/runtime/ids-alerts analysis/runtime/packetstats-checkpoints analysis/runtime/native-analysis analysis/runtime/.native-fact-staging analysis/runtime/.capture-generation-quarantine onprem onprem/state onprem/env onprem/secrets"
+      PACKETSAFARI_STORAGE_REPAIR_SUBDIRS: "uploadchunk upload/archive capture-agent anoncap agent-visual-reports runtime/sharkd-ids-cache analysis/runtime/primary analysis/runtime/typed analysis/runtime/typed-securityscan analysis/runtime/typed-shared analysis/runtime/match-bitsets analysis/runtime/sql-artifacts analysis/runtime/ids-alerts analysis/runtime/packetstats-checkpoints analysis/runtime/native-analysis analysis/runtime/.native-fact-staging analysis/runtime/.capture-generation-quarantine"
     command:
       - /bin/bash
       - -lc
@@ -107,6 +109,8 @@ services:
         set -euo pipefail
         /usr/local/bin/setvolumepermissions.sh /
         PACKETSAFARI_STORAGE_EXTERNAL_DIR=/var/lib/packetsafari/codex PACKETSAFARI_STORAGE_SUBDIRS="sqlite" PACKETSAFARI_STORAGE_REPAIR_SUBDIRS="." /usr/local/bin/setvolumepermissions.sh /
+        PACKETSAFARI_SKIP_SERVICE_INIT=true python3 /app/scripts/bootstrap_embedded_security_content.py
+        PACKETSAFARI_STORAGE_EXTERNAL_DIR=/storage PACKETSAFARI_STORAGE_REPAIR_SUBDIRS="intelligence" /usr/local/bin/setvolumepermissions.sh /
     volumes:
       - packetsafari-storage:/storage
       - packetsafari-codexruntime:/var/lib/packetsafari/codex
@@ -117,6 +121,58 @@ services:
     networks:
       packetsafari:
         ipv4_address: 172.20.0.24
+    dns:
+      - 172.20.0.3
+
+  agent-stream-gateway:
+    image: "{{ backend_image }}"
+    container_name: packetsafari-agent-stream-gateway
+    user: backendu
+    init: true
+    restart: always
+    stop_grace_period: 40s
+    logging: *packetsafari-journald-logging
+    env_file:
+      - "{{ runtime_env_path }}"
+    environment:
+      PYTHONPATH: /app
+      PACKETSAFARI_RUNTIME_ROLE: agent_stream_gateway
+      PACKETSAFARI_SKIP_SERVICE_INIT: "true"
+      PACKETSAFARI_RUNTIME_CACHE_REDIS_HOST: redis
+      PACKETSAFARI_RUNTIME_CACHE_REDIS_PORT: "6379"
+      PACKETSAFARI_RUNTIME_CACHE_REDIS_DB: "0"
+      AI_AGENT_STREAM_TICKET_SECRET: "${AI_AGENT_STREAM_TICKET_SECRET:?required}"
+      AI_AGENT_STREAM_TICKET_TTL_SECONDS: "${AI_AGENT_STREAM_TICKET_TTL_SECONDS:-30}"
+    command:
+      - uvicorn
+      - packetsafari.agent_stream_gateway:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8091"
+      - --workers
+      - "1"
+      - --timeout-graceful-shutdown
+      - "30"
+      - --no-access-log
+    expose:
+      - "8091"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import http.client,sys; c=http.client.HTTPConnection('127.0.0.1',8091,timeout=3); c.request('GET','/healthz'); r=c.getresponse(); r.read(1024); sys.exit(0 if 200 <= r.status < 300 else 1)\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      redis:
+        condition: service_started
+    networks:
+      packetsafari:
+        ipv4_address: 172.20.0.22
     dns:
       - 172.20.0.3
 
@@ -131,6 +187,7 @@ services:
       PYTHONPATH: /app
       PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
       PACKETSAFARI_RUNTIME_POSTGRES_ENABLED: "true"
+      POSTGRES_AUTO_RUN_MIGRATIONS: "false"
       PACKETSAFARI_RUNTIME_ES_DISABLED: "true"
       PACKETSAFARI_CAPTURE_SHARKD_HOST: sharkd
       PACKETSAFARI_CAPTURE_SHARKD_PORT: "4448"
@@ -144,7 +201,10 @@ services:
       PACKETSAFARI_RUNTIME_CACHE_REDIS_PORT: "6379"
       PACKETSAFARI_RUNTIME_CACHE_REDIS_DB: "0"
       PACKETSAFARI_RUNTIME_CHECKPOINT_REDIS_DB: "0"
-      APP_BASE_URL: "${APP_BASE_URL:-https://packetsafari.com}"
+      AI_AGENT_STREAM_GATEWAY_INTERNAL_URL: "${AI_AGENT_STREAM_GATEWAY_INTERNAL_URL:-http://agent-stream-gateway:8091}"
+      AI_AGENT_STREAM_TICKET_SECRET: "${AI_AGENT_STREAM_TICKET_SECRET:?required}"
+      AI_AGENT_STREAM_TICKET_TTL_SECONDS: "${AI_AGENT_STREAM_TICKET_TTL_SECONDS:-30}"
+      APP_BASE_URL: "${APP_BASE_URL:-}"
       NEWSLETTER_FROM_EMAIL: "${NEWSLETTER_FROM_EMAIL:-contact@packetsafari.com}"
       NEWSLETTER_FROM_NAME: "${NEWSLETTER_FROM_NAME:-PacketSafari}"
       AWS_ACCESS_KEY_ID: "${PACKETSAFARI_PROXY_TOKEN_AWS_ACCESS_KEY_ID:-ps_proxy_aws_access_key_id}"
@@ -153,7 +213,7 @@ services:
       PACKETSAFARI_EGRESS_PROXY_URL: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTP_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTPS_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
-      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,agent-stream-gateway,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       SSL_CERT_FILE: /etc/packetsafari/egress-proxy/ca.crt
       REQUESTS_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
       CURL_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
@@ -177,6 +237,7 @@ services:
       - "{{ host_runtime_root }}/configuration/egress-allowlist.production.yaml:/app/configuration/egress-allowlist.production.yaml"
       - "{{ host_runtime_root }}/configuration/approved-ai-egress-hosts.json:/app/configuration/approved-ai-egress-hosts.json"
       - "{{ host_runtime_root }}/configuration/approved-identity-egress-hosts.json:/app/configuration/approved-identity-egress-hosts.json"
+      - "{{ host_runtime_root }}/configuration/approved-intelligence-egress-hosts.json:/app/configuration/approved-intelligence-egress-hosts.json"
       - packetsafari-egress-proxy-certs:/etc/packetsafari/egress-proxy:ro
     depends_on:
       storage-init:
@@ -193,6 +254,8 @@ services:
         condition: service_healthy
       egress-firewall:
         condition: service_started
+      agent-stream-gateway:
+        condition: service_healthy
     networks:
       packetsafari:
         ipv4_address: 172.20.0.20
@@ -209,6 +272,7 @@ services:
     environment:
       PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
       PACKETSAFARI_RUNTIME_POSTGRES_ENABLED: "true"
+      POSTGRES_AUTO_RUN_MIGRATIONS: "false"
       PACKETSAFARI_RUNTIME_ES_DISABLED: "true"
       PACKETSAFARI_CAPTURE_SHARKD_HOST: sharkd
       PACKETSAFARI_CAPTURE_SHARKD_PORT: "4448"
@@ -226,7 +290,7 @@ services:
       CELERY_INDEX_CONCURRENCY: "${CELERY_INDEX_CONCURRENCY:-auto}"
       CELERY_AICHAT_LOGLEVEL: "${CELERY_AICHAT_LOGLEVEL:-info}"
       CELERY_INDEX_LOGLEVEL: "${CELERY_INDEX_LOGLEVEL:-info}"
-      APP_BASE_URL: "${APP_BASE_URL:-https://packetsafari.com}"
+      APP_BASE_URL: "${APP_BASE_URL:-}"
       NEWSLETTER_FROM_EMAIL: "${NEWSLETTER_FROM_EMAIL:-contact@packetsafari.com}"
       NEWSLETTER_FROM_NAME: "${NEWSLETTER_FROM_NAME:-PacketSafari}"
       AWS_ACCESS_KEY_ID: "${PACKETSAFARI_PROXY_TOKEN_AWS_ACCESS_KEY_ID:-ps_proxy_aws_access_key_id}"
@@ -235,7 +299,7 @@ services:
       PACKETSAFARI_EGRESS_PROXY_URL: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTP_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
       HTTPS_PROXY: "${PACKETSAFARI_EGRESS_PROXY_URL:-http://egress-ironproxy:10000}"
-      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+      NO_PROXY: "${PACKETSAFARI_EGRESS_NO_PROXY:-localhost,127.0.0.1,::1,backend,agent-stream-gateway,worker,postgres,redis,sharkd,storage-init,egress-ironproxy,egress-dns,.svc.packetsafari.internal,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       SSL_CERT_FILE: /etc/packetsafari/egress-proxy/ca.crt
       REQUESTS_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
       CURL_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
@@ -247,40 +311,42 @@ services:
         PIDS=()
         shutdown() { kill -TERM "$${PIDS[@]}" 2>/dev/null || true; }
         trap shutdown TERM INT
+        python3 /app/scripts/wait_for_backend_startup.py \
+          --timeout-seconds "$${PACKETSAFARI_WORKER_BACKEND_STARTUP_WAIT_SECONDS:-45}"
         CELERY_AICHAT_CONCURRENCY="$$(python3 /app/scripts/resolve_worker_concurrency.py aichat)"
         CELERY_INDEX_CONCURRENCY="$$(python3 /app/scripts/resolve_worker_concurrency.py index)"
         export CELERY_AICHAT_CONCURRENCY CELERY_INDEX_CONCURRENCY
         echo "Resolved Celery worker concurrency: aichat=$$CELERY_AICHAT_CONCURRENCY index=$$CELERY_INDEX_CONCURRENCY"
 
-        celery -A packetsafari.celery_app worker \
+        PACKETSAFARI_CELERY_TASK_PROFILE=aichat celery -A packetsafari.celery_app worker \
           --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
           --without-gossip --without-mingle \
           --concurrency="$${CELERY_AICHAT_CONCURRENCY:-2}" \
-          --queues=aichat,aichat_priority \
+          --queues=aichat \
           --hostname=aichat@%h &
         AICHAT_PID=$$!
         PIDS+=("$$AICHAT_PID")
 
         CELERY_PRIORITY_AGENT_CONCURRENCY="$${PACKETSAFARI_CELERY_PRIORITY_AGENT_CONCURRENCY:-1}"
-        celery -A packetsafari.celery_app worker \
+        PACKETSAFARI_CELERY_TASK_PROFILE=aichat celery -A packetsafari.celery_app worker \
           --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
           --without-gossip --without-mingle --prefetch-multiplier=1 \
           --concurrency="$$CELERY_PRIORITY_AGENT_CONCURRENCY" \
           --queues=aichat_priority --hostname=aichat-priority@%h &
         PIDS+=("$$!")
 
-        celery -A packetsafari.celery_app worker \
+        PACKETSAFARI_CELERY_TASK_PROFILE=index PACKETSAFARI_CELERY_RUN_STARTUP_MAINTENANCE=1 celery -A packetsafari.celery_app worker \
           --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" \
           --pool=threads \
           --without-gossip --without-mingle \
           --concurrency="$${CELERY_INDEX_CONCURRENCY:-auto}" \
-          --queues=index,index_priority \
+          --queues=index \
           --hostname=index@%h &
         INDEX_PID=$$!
         PIDS+=("$$INDEX_PID")
 
         CELERY_PRIORITY_ANALYSIS_CONCURRENCY="$${PACKETSAFARI_CELERY_PRIORITY_ANALYSIS_CONCURRENCY:-1}"
-        celery -A packetsafari.celery_app worker \
+        PACKETSAFARI_CELERY_TASK_PROFILE=index_priority celery -A packetsafari.celery_app worker \
           --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" --pool=threads \
           --without-gossip --without-mingle --prefetch-multiplier=1 \
           --concurrency="$$CELERY_PRIORITY_ANALYSIS_CONCURRENCY" \
@@ -289,7 +355,7 @@ services:
 
         # Standard Security is one bounded Sharkd IDS request on a dedicated
         # durable queue, isolated from index-worker capacity and prefetch.
-        celery -A packetsafari.celery_app worker \
+        PACKETSAFARI_CELERY_TASK_PROFILE=security celery -A packetsafari.celery_app worker \
           --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" --pool=solo \
           --without-gossip --without-mingle --prefetch-multiplier=1 \
           --concurrency=1 --queues=security --hostname=security@%h &
@@ -297,14 +363,14 @@ services:
 
         CELERY_RESERVED_ANALYSIS_CONCURRENCY="$${PACKETSAFARI_RESERVED_ANALYSIS_SLOTS:-0}"
         if [ "$$CELERY_RESERVED_ANALYSIS_CONCURRENCY" -gt 0 ]; then
-          celery -A packetsafari.celery_app worker \
+          PACKETSAFARI_CELERY_TASK_PROFILE=aichat celery -A packetsafari.celery_app worker \
             --loglevel="$${CELERY_AICHAT_LOGLEVEL:-info}" \
             --without-gossip --without-mingle --prefetch-multiplier=1 \
             --concurrency="$$CELERY_RESERVED_ANALYSIS_CONCURRENCY" \
             --queues=aichat_reserved --hostname=aichat-reserved@%h &
           PIDS+=("$$!")
 
-          celery -A packetsafari.celery_app worker \
+          PACKETSAFARI_CELERY_TASK_PROFILE=index_priority celery -A packetsafari.celery_app worker \
             --loglevel="$${CELERY_INDEX_LOGLEVEL:-info}" --pool=threads \
             --without-gossip --without-mingle --prefetch-multiplier=1 \
             --concurrency="$$CELERY_RESERVED_ANALYSIS_CONCURRENCY" \
@@ -325,6 +391,7 @@ services:
       - "{{ host_runtime_root }}/configuration/egress-allowlist.production.yaml:/app/configuration/egress-allowlist.production.yaml"
       - "{{ host_runtime_root }}/configuration/approved-ai-egress-hosts.json:/app/configuration/approved-ai-egress-hosts.json"
       - "{{ host_runtime_root }}/configuration/approved-identity-egress-hosts.json:/app/configuration/approved-identity-egress-hosts.json"
+      - "{{ host_runtime_root }}/configuration/approved-intelligence-egress-hosts.json:/app/configuration/approved-intelligence-egress-hosts.json"
       - packetsafari-egress-proxy-certs:/etc/packetsafari/egress-proxy:ro
     depends_on:
       storage-init:
