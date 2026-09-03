@@ -35,6 +35,7 @@ DEFAULT_API_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_DATA_ROOT = str(Path.home() / "packetsafari-data")
 DEPLOYMENT_PROFILES = {"onprem", "saas"}
 CONNECTIVITY_POLICIES = {"connected", "restricted", "airgapped"}
+EGRESS_MODES = {"allowlist", "unrestricted"}
 AIRGAPPED_LOCAL_AI_PROVIDERS = {"lm_studio", "llmster", "ollama", "openai_compatible"}
 AIRGAPPED_FORBIDDEN_TRUE_SETTINGS = {
     "PACKETSAFARI_FEATURE_BYO_OPENAI_API_KEY_ENABLED": "User-supplied OpenAI keys require public AI egress.",
@@ -1856,10 +1857,22 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
         if layout.intelligence_egress_registry_path.exists()
         else None
     )
+    previous_allowlist = _read_json(layout.production_egress_allowlist_path, {})
+    preserved_monitor_mode = (
+        previous_allowlist.get("monitor_mode")
+        if isinstance(previous_allowlist, dict) and isinstance(previous_allowlist.get("monitor_mode"), bool)
+        else None
+    )
     if config_source.exists():
         shutil.copytree(config_source, layout.configuration_dir, dirs_exist_ok=True)
     if isinstance(preserved_intelligence_registry, dict):
         _write_json(layout.intelligence_egress_registry_path, preserved_intelligence_registry)
+    if profile == "onprem" and preserved_monitor_mode is not None:
+        installed_allowlist = _read_json(layout.production_egress_allowlist_path, {})
+        if not isinstance(installed_allowlist, dict):
+            raise RuntimeError(f"Invalid egress allowlist: {layout.production_egress_allowlist_path}")
+        installed_allowlist["monitor_mode"] = preserved_monitor_mode
+        _write_json(layout.production_egress_allowlist_path, installed_allowlist)
     _apply_profile_egress_overlay(layout, root, profile=profile)
     _sync_intelligence_egress_config(layout)
     _run_script(
@@ -2468,18 +2481,36 @@ def _load_intelligence_egress_registry(layout: RuntimeLayout) -> dict[str, objec
     }
 
 
-def _replace_ironproxy_domains(path: Path, hosts: list[str]) -> None:
+def _replace_ironproxy_domains(path: Path, hosts: list[str], *, warn: bool) -> None:
     if not path.exists():
         raise RuntimeError(f"Iron proxy configuration is missing: {path}")
     lines = path.read_text(encoding="utf-8").splitlines()
     try:
-        marker = next(index for index, line in enumerate(lines) if line.strip() == "domains:")
+        allowlist_marker = next(index for index, line in enumerate(lines) if line.strip() == "- name: allowlist")
+        domains_marker = next(
+            index
+            for index, line in enumerate(lines[allowlist_marker + 1 :], start=allowlist_marker + 1)
+            if line.strip() == "domains:"
+        )
     except StopIteration as exc:
         raise RuntimeError(f"Iron proxy allowlist transform is missing from {path}") from exc
-    end = marker + 1
+    end = domains_marker + 1
     while end < len(lines) and lines[end].startswith("        - "):
         end += 1
-    rendered = [*lines[: marker + 1], *(f'        - "{host}"' for host in hosts), *lines[end:]]
+    transform_prefix = [
+        line
+        for line in lines[allowlist_marker:domains_marker]
+        if not line.strip().startswith("warn:")
+    ]
+    if warn:
+        transform_prefix.append("      warn: true")
+    rendered = [
+        *lines[:allowlist_marker],
+        *transform_prefix,
+        lines[domains_marker],
+        *(f'        - "{host}"' for host in hosts),
+        *lines[end:],
+    ]
     path.write_text("\n".join(rendered) + "\n", encoding="utf-8")
 
 
@@ -2524,11 +2555,17 @@ def _sync_intelligence_egress_config(layout: RuntimeLayout) -> dict[str, object]
             if isinstance(item, dict) and str(item.get("host") or "").strip()
         }
     )
-    _replace_ironproxy_domains(layout.production_ironproxy_config_path, hosts)
+    unrestricted = allowlist.get("monitor_mode") is True
+    _replace_ironproxy_domains(
+        layout.production_ironproxy_config_path,
+        hosts,
+        warn=unrestricted,
+    )
     return {
         "allowlistPath": str(allowlist_path),
         "proxyConfigPath": str(layout.production_ironproxy_config_path),
         "approvedHosts": registry["approved_hosts"],
+        "egressMode": "unrestricted" if unrestricted else "allowlist",
     }
 
 
@@ -2550,11 +2587,80 @@ def operate_intelligence_egress(args) -> dict[str, object]:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     action = str(getattr(args, "action", "") or "").strip()
     registry = _load_intelligence_egress_registry(layout)
+    if action == "mode":
+        if _active_deployment_profile(layout) != "onprem":
+            raise RuntimeError("Unrestricted egress mode is supported only for customer-operated on-prem deployments.")
+        requested_mode = str(getattr(args, "egress_mode", "") or "").strip().lower()
+        if requested_mode not in EGRESS_MODES:
+            raise RuntimeError(f"Unsupported egress mode: {requested_mode or '<unset>'}")
+        allowlist_path = layout.production_egress_allowlist_path
+        if not allowlist_path.exists():
+            raise RuntimeError(f"Egress allowlist is missing: {allowlist_path}")
+        allowlist = _read_json(allowlist_path, {})
+        if not isinstance(allowlist, dict):
+            raise RuntimeError(f"Egress allowlist is not an object: {allowlist_path}")
+        current_mode = "unrestricted" if allowlist.get("monitor_mode") is True else "allowlist"
+        changed = current_mode != requested_mode
+        proxy_path = layout.production_ironproxy_config_path
+        if not proxy_path.exists():
+            raise RuntimeError(f"Iron proxy configuration is missing: {proxy_path}")
+        previous_allowlist = allowlist_path.read_bytes()
+        previous_proxy_config = proxy_path.read_bytes()
+        allowlist["monitor_mode"] = requested_mode == "unrestricted"
+        restart_attempted = False
+        try:
+            _write_json(allowlist_path, allowlist)
+            synced = _sync_intelligence_egress_config(layout)
+            if changed:
+                restart_attempted = True
+                restarted = _restart_ironproxy_if_running(layout)
+            else:
+                restarted = False
+        except Exception as transition_error:
+            rollback_errors: list[str] = []
+            for path, previous_content in (
+                (allowlist_path, previous_allowlist),
+                (proxy_path, previous_proxy_config),
+            ):
+                try:
+                    path.write_bytes(previous_content)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"restore {path}: {rollback_error}")
+            if restart_attempted:
+                try:
+                    if not _restart_ironproxy_if_running(layout):
+                        rollback_errors.append("IronProxy was not running after the failed restart")
+                except Exception as rollback_error:
+                    rollback_errors.append(f"restart IronProxy with restored config: {rollback_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "Egress mode transition failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from transition_error
+            raise RuntimeError(
+                f"Egress mode transition failed; previous {current_mode} mode was restored."
+            ) from transition_error
+        return {
+            "ok": True,
+            "action": action,
+            "previousMode": current_mode,
+            "egressMode": requested_mode,
+            "changed": changed,
+            "restarted": restarted,
+            "message": (
+                "Unrestricted proxy-routed HTTP(S) egress is active; unmatched destinations are logged as warnings."
+                if requested_mode == "unrestricted"
+                else "Default-deny IronProxy allowlist enforcement is active."
+            ),
+            **synced,
+        }
     if action == "list-intelligence-hosts":
+        allowlist = _read_json(layout.production_egress_allowlist_path, {})
         return {
             "ok": True,
             "registryPath": str(layout.intelligence_egress_registry_path),
             "approvedHosts": registry["approved_hosts"],
+            "egressMode": "unrestricted" if allowlist.get("monitor_mode") is True else "allowlist",
         }
 
     parsed = _parse_intelligence_egress_url(
@@ -4324,6 +4430,7 @@ def configuration_overview(layout: RuntimeLayout) -> dict[str, object]:
         "egress": {
             "allowlistLoaded": bool(allowlist),
             "monitorMode": bool(allowlist.get("monitor_mode")),
+            "mode": "unrestricted" if allowlist.get("monitor_mode") is True else "allowlist",
             "ironProxyConfigured": layout.production_ironproxy_config_path.exists(),
             "upstreamProxyConfigured": bool(upstream_proxy_keys),
             "upstreamProxyKeys": upstream_proxy_keys,

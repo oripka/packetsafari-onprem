@@ -196,9 +196,19 @@ packetsafari-ops onboard schema
 packetsafari-ops config show
 packetsafari-ops egress list-intelligence-hosts
 packetsafari-ops egress approve-intelligence-host --url https://feeds.example.com
+packetsafari-ops egress mode unrestricted
+packetsafari-ops egress mode allowlist
 packetsafari-ops iam show-initial-admin-command --email admin@example.com
 packetsafari-ops diagnostics restart
 ```
+
+Egress mode defaults to `allowlist`. Customer-operated on-prem deployments may
+explicitly select `unrestricted`; proxy-routed HTTP(S) traffic still traverses
+IronProxy and remains logged, but destinations outside the allowlist are
+permitted and recorded as warnings. Direct arbitrary-protocol egress remains
+blocked by the deployment firewall. Select `allowlist` to restore default-deny
+enforcement. The selected mode is retained across upgrades. SaaS deployments
+cannot select unrestricted mode.
 
 The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` during install and does not require the operator to create a venv manually.
 

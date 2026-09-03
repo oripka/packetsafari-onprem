@@ -250,7 +250,14 @@ def build_parser() -> argparse.ArgumentParser:
             "approve-intelligence-host",
             "remove-intelligence-host",
             "list-intelligence-hosts",
+            "mode",
         ],
+    )
+    egress.add_argument(
+        "egress_mode",
+        nargs="?",
+        choices=["allowlist", "unrestricted"],
+        help="Proxy-routed HTTP(S) egress policy for `egress mode`; allowlist remains the default.",
     )
     egress.add_argument("--url", help="HTTPS feed URL or origin to approve or remove.")
     egress.add_argument("--approved-by", default="", help="Operator identity recorded with an approval.")
@@ -524,7 +531,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(configure_required_env(args), indent=2))
         return 0
     if args.command == "egress":
-        if args.action != "list-intelligence-hosts" and not str(args.url or "").strip():
+        if args.action == "mode" and not args.egress_mode:
+            parser.error("egress mode requires allowlist or unrestricted")
+        if args.action not in {"list-intelligence-hosts", "mode"} and not str(args.url or "").strip():
             parser.error(f"egress {args.action} requires --url")
         print(json.dumps(operate_intelligence_egress(args), indent=2))
         return 0
