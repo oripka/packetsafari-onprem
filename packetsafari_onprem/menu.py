@@ -789,8 +789,8 @@ def _show_configuration_overview(ctx: MenuContext) -> None:
             f"  IronProxy            {proxy_state}",
             f"  Upstream proxy       {upstream_state}",
             f"  Proxy secrets        {egress.get('secretVariablesConfigured', 0)} configured · values hidden",
-            f"  Allowlist             {len(destinations)} destinations · "
-            f"monitor mode {'enabled' if egress.get('monitorMode') else 'disabled'}",
+            f"  Egress mode          {egress.get('mode') or ('unrestricted' if egress.get('monitorMode') else 'allowlist')}",
+            f"  Allowlist inventory  {len(destinations)} destinations",
         ]
     )
     service_modes = egress.get("serviceModes") if isinstance(egress.get("serviceModes"), dict) else {}
