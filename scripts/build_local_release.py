@@ -212,7 +212,16 @@ def prepare_infra_images(version: str, *, pull: bool) -> dict[str, str]:
     return images
 
 
-def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str, images: dict[str, str], *, platform: str) -> Path:
+def write_manifest(
+    app_root: Path,
+    output_dir: Path,
+    version: str,
+    channel: str,
+    images: dict[str, str],
+    *,
+    platform: str,
+    security_content: dict[str, object],
+) -> Path:
     tooling_version_path = REPO_ROOT / "VERSION"
     tooling_version = tooling_version_path.read_text(encoding="utf-8").strip() if tooling_version_path.exists() else "local"
     manifest = {
@@ -230,6 +239,7 @@ def write_manifest(app_root: Path, output_dir: Path, version: str, channel: str,
             "minOpsVersion": tooling_version,
         },
         "images": images,
+        "embeddedSecurityContent": security_content,
     }
     wireshark_metadata_path = app_root / ".packetsafari-build" / "wireshark-source.json"
     if wireshark_metadata_path.exists():
@@ -386,13 +396,38 @@ def main() -> int:
     parser.add_argument("--output-dir")
     parser.add_argument("--platform", default=default_docker_platform(), help="Image platform to build, defaults to native host architecture or DOCKER_PLATFORM.")
     parser.add_argument("--wireshark-cache-bust", default="local-release")
-    parser.add_argument("--skip-build", action="store_true", help="Use existing packetsafari/* image tags.")
+    parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Unsupported for signed-content releases because image provenance cannot be proven.",
+    )
     parser.add_argument("--skip-infra-pull", action="store_true", help="Do not pull postgres/redis before tagging local copies.")
     parser.add_argument("--no-dev-license", action="store_true", help="Do not generate a development license token.")
     parser.add_argument("--customer-email", default="local-dev@packetsafari.com")
     parser.add_argument("--key-dir", help="Private signing key directory. Defaults outside the distributable output directory.")
+    parser.add_argument(
+        "--security-content-pack",
+        default=os.getenv(
+            "PACKETSAFARI_SECURITY_CONTENT_PACK",
+            str(DEFAULT_DATA_ROOT / "security-content" / "release" / "security-content-pack.tar.gz"),
+        ),
+        help="Complete signed security-content pack embedded in images and included for offline import.",
+    )
+    parser.add_argument(
+        "--security-content-public-key",
+        default=os.getenv(
+            "PACKETSAFARI_SECURITY_CONTENT_PUBLIC_KEY",
+            str(DEFAULT_DATA_ROOT / "release-signing" / "packetsafari-release-public.pem"),
+        ),
+        help="Public key used to verify the security-content pack before build.",
+    )
     parser.add_argument("--split-size-mb", type=int, default=0)
     args = parser.parse_args()
+
+    if args.skip_build:
+        raise SystemExit(
+            "--skip-build cannot publish embeddedSecurityContent: rebuild images to bind the verified content pack"
+        )
 
     for command in ("docker", "openssl", "tar"):
         require_command(command)
@@ -400,6 +435,24 @@ def main() -> int:
     if not (app_root / "Dockerfile").exists():
         raise SystemExit(f"PacketSafari app Dockerfile not found under {app_root}")
     version = str(args.version or read_app_version(app_root)).strip()
+    security_content_pack = Path(args.security_content_pack).expanduser().resolve()
+    security_content_public_key = Path(args.security_content_public_key).expanduser().resolve()
+    if not security_content_pack.is_file():
+        raise SystemExit(f"Security-content pack not found: {security_content_pack}")
+    if not security_content_public_key.is_file():
+        raise SystemExit(f"Security-content public key not found: {security_content_public_key}")
+    security_content_output = capture(
+        [
+            sys.executable,
+            str(app_root / "scripts" / "prepare_security_content_seed.py"),
+            "--pack",
+            str(security_content_pack),
+            "--public-key",
+            str(security_content_public_key),
+        ],
+        cwd=app_root,
+    )
+    security_content = json.loads(security_content_output.splitlines()[-1])
     output_dir = Path(args.output_dir or (DEFAULT_DATA_ROOT / "releases" / "local" / version)).expanduser().resolve()
     key_dir = Path(args.key_dir or (DEFAULT_DATA_ROOT / "release-keys" / "local" / version)).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -414,7 +467,15 @@ def main() -> int:
         images = build_app_images(app_root, version, platform=args.platform, wireshark_cache_bust=args.wireshark_cache_bust)
     images.update(prepare_infra_images(version, pull=not args.skip_infra_pull))
 
-    manifest = write_manifest(app_root, output_dir, version, args.channel, images, platform=args.platform)
+    manifest = write_manifest(
+        app_root,
+        output_dir,
+        version,
+        args.channel,
+        images,
+        platform=args.platform,
+        security_content=security_content,
+    )
     notes = output_dir / "release-notes.md"
     if not notes.exists():
         notes.write_text(f"PacketSafari local on-prem release {version}.\n", encoding="utf-8")
@@ -437,6 +498,8 @@ def main() -> int:
         str(release_public_key),
         "--tooling-archive",
         str(tooling_archive),
+        "--security-content-pack",
+        str(security_content_pack),
         "--sign-key",
         str(release_private_key),
         "--no-pull",
