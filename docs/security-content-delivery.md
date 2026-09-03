@@ -11,7 +11,9 @@ the release content pack from the reviewed PacketSafari build spec before it
 builds application images. The required baseline contains:
 
 - PacketSafari-authored Suricata rules;
-- reviewed ET Open and OISF Traffic ID inputs with complete notices;
+- reviewed ET Open and OISF Traffic ID inputs with complete notices: the
+  GPL-2.0/BSD notices shipped in the ET Open archive and the MIT notice in the
+  Traffic ID rule file;
 - the reviewed MIT cloud/CDN taxonomy inputs from
   `tobilg/public-cloud-provider-ip-ranges` and `projectdiscovery/cdncheck`.
 
@@ -69,4 +71,3 @@ grant redistribution approval, accept vendor terms, or publish artifacts as a
 side effect. The content pack signature authenticates bytes; it does not grant
 license rights. Production signing, image publication, customer delivery, and
 deployment remain separately approved release actions.
-
