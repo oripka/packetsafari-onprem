@@ -42,6 +42,10 @@ The frontend intentionally connects directly to sharkd for low-latency packet vi
 
 ## Customer Commands
 
+Security-content distribution and vendor licensing are documented in
+`docs/security-content-delivery.md`. The hosted customer portal is linked from
+**Account → On-prem releases** at `/app/account/releases`.
+
 ```bash
 sudo env HOME=/root packetsafari-ops
 packetsafari-ops status

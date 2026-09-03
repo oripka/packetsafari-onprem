@@ -10,6 +10,7 @@ Customer-facing Python-native installer, operator CLI, and interactive operation
 - `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
 - `docs/upgrade-runbook.md` - connected and air-gapped upgrade/rollback runbook
 - `docs/ai-model-onboarding.md` - customer-managed AI endpoint, model-profile, parser, qualification, and offline onboarding workflow
+- `docs/security-content-delivery.md` - included, vendor-direct, customer-provided, and unavailable security-content delivery
 - `docs/passkeys.md` - canonical public URL, automatic WebAuthn configuration, and safe hostname-change procedure
 - `scripts/render_compose.py` - render pinned on-prem compose files from release manifests
 - `scripts/build_offline_bundle.py` - build signed USB/offline install/upgrade bundles from a release manifest
@@ -354,6 +355,9 @@ release promotion.
 For every profile, doctor also reads intelligence updater state from the backend.
 
 Signed data-only security content is updated independently from container releases:
+
+See `docs/security-content-delivery.md` for the hybrid distribution policy,
+vendor cost/licensing boundary, customer portal path, and air-gap workflow.
 
 ```bash
 packetsafari-ops content check --pack 'https://authenticated.example/security-content.tar.gz'
