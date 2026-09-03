@@ -545,6 +545,13 @@ python3 scripts/build_local_release.py \
   --output-dir /Users/otr/packetsafari-data/releases/local/10.0.0-beta.14
 ```
 
+The command automatically builds and signs the security-content pack from
+`/Users/otr/packetsafari-data/security-content/release/content-pack-build.json`
+before verifying, embedding, and adding those exact bytes to the offline bundle.
+The spec must reference frozen, reviewed local inputs; it never triggers hidden
+feed downloads. Pass `--security-content-pack` only to use an already-built
+reviewed pack instead.
+
 Then serve the generated directory:
 
 ```bash

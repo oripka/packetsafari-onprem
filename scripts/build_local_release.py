@@ -76,6 +76,36 @@ def read_app_version(app_root: Path) -> str:
     return version
 
 
+def prepare_security_content_pack(
+    app_root: Path,
+    *,
+    pack_override: str | None,
+    build_spec: str,
+    signing_key: str,
+) -> Path:
+    pack = Path(
+        pack_override
+        or DEFAULT_DATA_ROOT / "security-content" / "release" / "security-content-pack.tar.gz"
+    ).expanduser().resolve()
+    if not str(pack_override or "").strip():
+        run(
+            [
+                sys.executable,
+                str(app_root / "scripts" / "build_security_content_pack.py"),
+                "--spec",
+                str(Path(build_spec).expanduser().resolve()),
+                "--signing-key",
+                str(Path(signing_key).expanduser().resolve()),
+                "--output",
+                str(pack),
+            ],
+            cwd=app_root,
+        )
+    if not pack.is_file():
+        raise SystemExit(f"Security-content pack not found: {pack}")
+    return pack
+
+
 def required_onprem_env(app_root: Path) -> list[str]:
     registry_path = app_root / "configuration" / "env-registry.json"
     fallback = [
@@ -407,11 +437,24 @@ def main() -> int:
     parser.add_argument("--key-dir", help="Private signing key directory. Defaults outside the distributable output directory.")
     parser.add_argument(
         "--security-content-pack",
+        default=os.getenv("PACKETSAFARI_SECURITY_CONTENT_PACK"),
+        help="Use an already-built reviewed security-content pack instead of automatic construction.",
+    )
+    parser.add_argument(
+        "--security-content-spec",
         default=os.getenv(
-            "PACKETSAFARI_SECURITY_CONTENT_PACK",
-            str(DEFAULT_DATA_ROOT / "security-content" / "release" / "security-content-pack.tar.gz"),
+            "PACKETSAFARI_SECURITY_CONTENT_SPEC",
+            str(DEFAULT_DATA_ROOT / "security-content" / "release" / "content-pack-build.json"),
         ),
-        help="Complete signed security-content pack embedded in images and included for offline import.",
+        help="Reviewed build spec used to create and sign the release content pack.",
+    )
+    parser.add_argument(
+        "--security-content-signing-key",
+        default=os.getenv(
+            "PACKETSAFARI_RELEASE_SIGNING_KEY",
+            str(DEFAULT_DATA_ROOT / "release-signing" / "packetsafari-release-private.pem"),
+        ),
+        help="Private release key used only when automatically building the content pack.",
     )
     parser.add_argument(
         "--security-content-public-key",
@@ -435,10 +478,13 @@ def main() -> int:
     if not (app_root / "Dockerfile").exists():
         raise SystemExit(f"PacketSafari app Dockerfile not found under {app_root}")
     version = str(args.version or read_app_version(app_root)).strip()
-    security_content_pack = Path(args.security_content_pack).expanduser().resolve()
+    security_content_pack = prepare_security_content_pack(
+        app_root,
+        pack_override=args.security_content_pack,
+        build_spec=args.security_content_spec,
+        signing_key=args.security_content_signing_key,
+    )
     security_content_public_key = Path(args.security_content_public_key).expanduser().resolve()
-    if not security_content_pack.is_file():
-        raise SystemExit(f"Security-content pack not found: {security_content_pack}")
     if not security_content_public_key.is_file():
         raise SystemExit(f"Security-content public key not found: {security_content_public_key}")
     security_content_output = capture(
