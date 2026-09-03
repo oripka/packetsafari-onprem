@@ -2601,10 +2601,45 @@ def operate_intelligence_egress(args) -> dict[str, object]:
             raise RuntimeError(f"Egress allowlist is not an object: {allowlist_path}")
         current_mode = "unrestricted" if allowlist.get("monitor_mode") is True else "allowlist"
         changed = current_mode != requested_mode
+        proxy_path = layout.production_ironproxy_config_path
+        if not proxy_path.exists():
+            raise RuntimeError(f"Iron proxy configuration is missing: {proxy_path}")
+        previous_allowlist = allowlist_path.read_bytes()
+        previous_proxy_config = proxy_path.read_bytes()
         allowlist["monitor_mode"] = requested_mode == "unrestricted"
-        _write_json(allowlist_path, allowlist)
-        synced = _sync_intelligence_egress_config(layout)
-        restarted = _restart_ironproxy_if_running(layout) if changed else False
+        restart_attempted = False
+        try:
+            _write_json(allowlist_path, allowlist)
+            synced = _sync_intelligence_egress_config(layout)
+            if changed:
+                restart_attempted = True
+                restarted = _restart_ironproxy_if_running(layout)
+            else:
+                restarted = False
+        except Exception as transition_error:
+            rollback_errors: list[str] = []
+            for path, previous_content in (
+                (allowlist_path, previous_allowlist),
+                (proxy_path, previous_proxy_config),
+            ):
+                try:
+                    path.write_bytes(previous_content)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"restore {path}: {rollback_error}")
+            if restart_attempted:
+                try:
+                    if not _restart_ironproxy_if_running(layout):
+                        rollback_errors.append("IronProxy was not running after the failed restart")
+                except Exception as rollback_error:
+                    rollback_errors.append(f"restart IronProxy with restored config: {rollback_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "Egress mode transition failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from transition_error
+            raise RuntimeError(
+                f"Egress mode transition failed; previous {current_mode} mode was restored."
+            ) from transition_error
         return {
             "ok": True,
             "action": action,
