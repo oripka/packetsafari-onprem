@@ -345,7 +345,7 @@ def test_image_retention_blocks_prune_until_history_has_keep_set(monkeypatch, tm
     monkeypatch.setattr(
         operations,
         "_managed_docker_images",
-        lambda: [
+        lambda _layout: [
             {"id": "sha256:old", "sizeBytes": 1_500_000_000, "size": "1.5GB", "createdSince": "2 weeks ago"},
         ],
     )
@@ -394,7 +394,7 @@ def test_image_retention_prunes_only_unprotected_managed_images(monkeypatch, tmp
     monkeypatch.setattr(
         operations,
         "_managed_docker_images",
-        lambda: [
+        lambda _layout: [
             {"id": "sha256:previous", "sizeBytes": 500_000_000, "size": "500MB"},
             {"id": "sha256:old-unused", "sizeBytes": 700_000_000, "size": "700MB"},
         ],
@@ -458,6 +458,11 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     monkeypatch.setattr(operations, "wait_for_health", lambda timeout_seconds=180: calls.append("health"))
     monkeypatch.setattr(
         operations,
+        "wait_for_agent_stream_gateway",
+        lambda layout, timeout_seconds=180: calls.append("agent_stream_gateway"),
+    )
+    monkeypatch.setattr(
+        operations,
         "wait_for_doctor_ok",
         lambda args, timeout_seconds: calls.append(f"doctor:{timeout_seconds}"),
     )
@@ -491,7 +496,7 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
         )
     )
 
-    assert result == {"message": "ok"}
+    assert result["message"] == "ok"
     assert calls.index("pull") < calls.index("stop:backend,worker")
     assert calls.index("preflight_doctor") < calls.index("render")
     assert calls.index("render") < calls.index("pull")
@@ -499,6 +504,8 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     assert calls.index("validate_security_consumer") < calls.index("stop:backend,worker")
     assert calls.index("stop:backend,worker") < calls.index("migrate")
     assert calls.index("health") < calls.index("doctor:1")
+    assert calls.index("health") < calls.index("agent_stream_gateway")
+    assert calls.index("agent_stream_gateway") < calls.index("doctor:1")
     assert calls.index("doctor:1") < calls.index("promote")
 
 
