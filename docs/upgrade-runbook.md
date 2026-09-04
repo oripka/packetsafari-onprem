@@ -36,9 +36,12 @@ Expose only the ports needed for the deployment:
 - `22/tcp` for operator SSH
 - `3000/tcp` for the frontend if accessed directly
 - `8080/tcp` for backend health/API if accessed directly
-- `4448/tcp` for direct browser-to-sharkd WebSocket traffic
 
-The frontend intentionally connects directly to sharkd for low-latency packet views. If DNS, NAT, or a load balancer changes the externally reachable sharkd address, set `NUXT_PUBLIC_SHARKD_WS_URL` to that explicit `ws://` or `wss://` URL.
+The frontend proxies browser WebSocket traffic from the same-origin `/sharkd`
+path to the internal sharkd service. Do not expose `4448/tcp` publicly. Set
+`NUXT_PUBLIC_SHARKD_WS_URL` only when an exceptional deployment intentionally
+bypasses that proxy and provides its own externally reachable `ws://` or
+`wss://` endpoint.
 
 ## Customer Commands
 
