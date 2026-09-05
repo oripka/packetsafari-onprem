@@ -12,7 +12,12 @@
 ## Scope
 
 - This repo owns the customer-facing on-prem bootstrap, signed entitlement tooling, release manifest handling, compose rendering, and host install / upgrade / rollback operations.
-- The main app repo lives at `../packetsafari` and owns backend/frontend behavior, Docker image builds, and `docker-compose-production.yml` for SaaS/self-hosted app repo deployments.
+- The main app repo lives at `../packetsafari` and owns backend/frontend behavior
+  and Docker image builds. PacketSafari-operated SaaS Compose is rendered by
+  `packetsafari-ops`; the app repo's `docker-compose-production.yml` is not that
+  production runtime. Follow
+  `../packetsafari/documentation/internal/5.release-and-deployment/3.saas-build-push-and-update.md`
+  for SaaS releases.
 
 ## Compose Templates
 
