@@ -5,6 +5,8 @@ import json
 import tarfile
 from types import SimpleNamespace
 
+import pytest
+
 from packetsafari_onprem import operations
 
 
@@ -98,6 +100,42 @@ def test_install_parser_and_runtime_env_activate_airgap_before_start(tmp_path):
     runtime_env = operations.parse_env_file(layout.runtime_env_path)
     assert args.connectivity_policy == "airgapped"
     assert runtime_env["PACKETSAFARI_CONNECTIVITY_POLICY"] == "airgapped"
+
+
+def test_fresh_runtime_env_generates_organization_secret(tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+
+    operations.write_runtime_env(layout, {}, onboarding_mode=True)
+
+    value = operations.parse_env_file(layout.runtime_env_path)[
+        "PACKETSAFARI_ORGANIZATION_SECRET_KEY"
+    ]
+    assert len(value) >= 64
+
+
+@pytest.mark.parametrize("profile", ["onprem", "saas"])
+def test_upgrade_generates_organization_secret_once_and_preserves_it(tmp_path, profile):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    layout.runtime_env_path.write_text(
+        "PACKETSAFARI_PUBLIC_BASE_URL=https://example.test\n"
+        "PACKETSAFARI_AUTH_MFA_SECRET_KEY=existing-mfa-secret\n"
+    )
+
+    first_generated = operations.ensure_generated_upgrade_env(layout, {}, profile=profile)
+    first_value = operations.parse_env_file(layout.runtime_env_path)[
+        "PACKETSAFARI_ORGANIZATION_SECRET_KEY"
+    ]
+    second_generated = operations.ensure_generated_upgrade_env(layout, {}, profile=profile)
+    second_value = operations.parse_env_file(layout.runtime_env_path)[
+        "PACKETSAFARI_ORGANIZATION_SECRET_KEY"
+    ]
+
+    assert first_generated == ["PACKETSAFARI_ORGANIZATION_SECRET_KEY"]
+    assert len(first_value) >= 64
+    assert second_generated == []
+    assert second_value == first_value
 
 
 def test_ensure_journald_retention_config_writes_bounded_policy(tmp_path, monkeypatch):

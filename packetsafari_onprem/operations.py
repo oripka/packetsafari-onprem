@@ -92,6 +92,7 @@ DOCTOR_STARTUP_GRACE_CHECKS = frozenset({
 AUTO_GENERATED_UPGRADE_ENV_KEYS = frozenset({
     "AI_AGENT_STREAM_TICKET_SECRET",
     "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
+    "PACKETSAFARI_ORGANIZATION_SECRET_KEY",
 })
 INTELLIGENCE_EGRESS_REGISTRY_NAME = "approved-intelligence-egress-hosts.json"
 INTELLIGENCE_EGRESS_MANAGED_BY = "packetsafari-egress-intelligence"
@@ -2070,6 +2071,7 @@ def _generated_env_default(key: str) -> str:
     if upper in {
         "PACKETSAFARI_AUTH_JWT_SECRET_KEY",
         "PACKETSAFARI_AUTH_MFA_SECRET_KEY",
+        "PACKETSAFARI_ORGANIZATION_SECRET_KEY",
         "AI_AGENT_STREAM_TICKET_SECRET",
         "PACKETSAFARI_CAPTURE_SHARKD_JWT_SECRET",
         "REDIS_PASSWORD",
@@ -2163,6 +2165,7 @@ def ensure_generated_upgrade_env(
     """
 
     required = set(_merged_required_env_keys(manifest, profile=profile))
+    required.add("PACKETSAFARI_ORGANIZATION_SECRET_KEY")
     if profile == "onprem":
         required.add("PACKETSAFARI_AUTH_MFA_SECRET_KEY")
     values = parse_env_file(layout.runtime_env_path)
@@ -3718,6 +3721,7 @@ def write_runtime_env(
     redis_password = secrets.token_urlsafe(32)
     jwt_secret = secrets.token_urlsafe(64)
     mfa_secret_key = secrets.token_urlsafe(64)
+    organization_secret_key = secrets.token_urlsafe(64)
     agent_stream_ticket_secret = secrets.token_urlsafe(64)
     sharkd_secret = secrets.token_urlsafe(64)
     lines = [
@@ -3765,6 +3769,7 @@ def write_runtime_env(
         'NUXT_PUBLIC_SHARKD_WS_URL=""',
         f"PACKETSAFARI_AUTH_JWT_SECRET_KEY={quote_env_value(jwt_secret)}",
         f"PACKETSAFARI_AUTH_MFA_SECRET_KEY={quote_env_value(mfa_secret_key)}",
+        f"PACKETSAFARI_ORGANIZATION_SECRET_KEY={quote_env_value(organization_secret_key)}",
         f"AI_AGENT_STREAM_TICKET_SECRET={quote_env_value(agent_stream_ticket_secret)}",
         'AI_AGENT_STREAM_GATEWAY_INTERNAL_URL="http://agent-stream-gateway:8091"',
         'AI_AGENT_STREAM_TICKET_TTL_SECONDS="30"',
