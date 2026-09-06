@@ -157,6 +157,28 @@ def test_content_backend_command_delegates_to_app_verifier(
     ]
 
 
+def test_content_backend_command_accepts_pretty_printed_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = operations.runtime_layout(str(tmp_path), "/storage/onprem")
+
+    def run(_command, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{\n  "status": "active",\n  "packages": ["suricata-rules"]\n}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(operations, "_compose_base_command", lambda _layout: ["docker", "compose"])
+    monkeypatch.setattr(operations.subprocess, "run", run)
+
+    assert operations._content_backend_command(layout, ["status"]) == {
+        "status": "active",
+        "packages": ["suricata-rules"],
+    }
+
+
 def test_content_cli_supports_connected_and_air_gapped_actions() -> None:
     parser = cli.build_parser()
     assert parser.parse_args(["content", "check", "--pack", "https://example.test/content.tar.gz"]).action == "check"

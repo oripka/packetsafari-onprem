@@ -2922,9 +2922,12 @@ def _content_backend_command(layout: RuntimeLayout, args: list[str]) -> dict:
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=300)
     output = result.stdout.strip()
     try:
-        payload = json.loads(output.splitlines()[-1] if output else "{}")
+        payload = json.loads(output or "{}")
     except json.JSONDecodeError:
-        payload = {"status": "error", "stdout": output}
+        try:
+            payload = json.loads(output.splitlines()[-1] if output else "{}")
+        except json.JSONDecodeError:
+            payload = {"status": "error", "stdout": output}
     if result.returncode != 0:
         raise RuntimeError(str(payload.get("error") or result.stderr.strip() or "Security-content backend command failed."))
     return payload
