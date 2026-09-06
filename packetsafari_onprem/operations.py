@@ -79,6 +79,7 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 MIN_HOST_VCPUS = 2
 MIN_HOST_MEMORY_BYTES = 16 * GIB
+HOST_MEMORY_VISIBILITY_TOLERANCE_RATIO = 0.05
 RECOMMENDED_SMALL_HOST_VCPUS = 4
 RECOMMENDED_SMALL_HOST_MEMORY_BYTES = 16 * GIB
 SIZING_PROFILES = {"auto", "small", "medium", "large", "none"}
@@ -1072,6 +1073,12 @@ def _gib_label(value: int) -> str:
     return f"{float(value) / float(GIB):.1f} GiB"
 
 
+def _host_memory_meets_requirement(memory_bytes: int, required_bytes: int) -> bool:
+    """Allow for memory reserved by the host before Linux reports MemTotal."""
+    tolerance_bytes = int(required_bytes * HOST_MEMORY_VISIBILITY_TOLERANCE_RATIO)
+    return memory_bytes >= required_bytes - tolerance_bytes
+
+
 def host_requirements_report(layout: RuntimeLayout) -> dict[str, object]:
     host = _host_resource_snapshot(layout)
     vcpus = int(host.get("vcpus") or 0)
@@ -1079,18 +1086,20 @@ def host_requirements_report(layout: RuntimeLayout) -> dict[str, object]:
     warnings: list[str] = []
     if vcpus < MIN_HOST_VCPUS:
         warnings.append(f"host has {vcpus} vCPU; PacketSafari requires at least {MIN_HOST_VCPUS} vCPU")
-    if memory_bytes < MIN_HOST_MEMORY_BYTES:
+    memory_meets_minimum = _host_memory_meets_requirement(memory_bytes, MIN_HOST_MEMORY_BYTES)
+    if not memory_meets_minimum:
         warnings.append(
             f"host has {_gib_label(memory_bytes)} RAM; PacketSafari requires at least {_gib_label(MIN_HOST_MEMORY_BYTES)} RAM"
         )
-    if not warnings and (vcpus < RECOMMENDED_SMALL_HOST_VCPUS or memory_bytes < RECOMMENDED_SMALL_HOST_MEMORY_BYTES):
+    memory_meets_recommended = _host_memory_meets_requirement(memory_bytes, RECOMMENDED_SMALL_HOST_MEMORY_BYTES)
+    if not warnings and (vcpus < RECOMMENDED_SMALL_HOST_VCPUS or not memory_meets_recommended):
         warnings.append(
             "host meets the supported floor but is below the recommended small-production baseline "
             f"of {RECOMMENDED_SMALL_HOST_VCPUS} vCPU and {_gib_label(RECOMMENDED_SMALL_HOST_MEMORY_BYTES)} RAM"
         )
     message = "; ".join(warnings) if warnings else "host satisfies PacketSafari on-prem CPU and RAM requirements"
     return {
-        "ok": not (vcpus < MIN_HOST_VCPUS or memory_bytes < MIN_HOST_MEMORY_BYTES),
+        "ok": not (vcpus < MIN_HOST_VCPUS or not memory_meets_minimum),
         "message": message,
         "host": host,
         "minimum": {

@@ -101,6 +101,47 @@ def test_host_requirements_report_accepts_supported_floor_with_recommendation(mo
     ]
 
 
+def test_host_requirements_report_tolerates_reserved_memory_on_nominal_16_gib_host(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+
+    monkeypatch.setattr(
+        operations,
+        "_host_resource_snapshot",
+        lambda _layout: {
+            "vcpus": 4,
+            "memoryBytes": 16 * operations.GIB - 512 * operations.MIB,
+            "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+        },
+    )
+
+    report = operations.host_requirements_report(layout)
+
+    assert report["ok"] is True
+    assert report["warnings"] == []
+    assert report["minimum"]["memoryBytes"] == 16 * operations.GIB
+
+
+def test_host_requirements_report_rejects_truly_undersized_memory(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+
+    monkeypatch.setattr(
+        operations,
+        "_host_resource_snapshot",
+        lambda _layout: {
+            "vcpus": 4,
+            "memoryBytes": 15 * operations.GIB,
+            "disk": {"path": str(tmp_path), "totalBytes": 1, "usedBytes": 0, "freeBytes": 1},
+        },
+    )
+
+    report = operations.host_requirements_report(layout)
+
+    assert report["ok"] is False
+    assert report["warnings"] == [
+        "host has 15.0 GiB RAM; PacketSafari requires at least 16.0 GiB RAM"
+    ]
+
+
 def test_sizing_state_status_flags_host_resize(monkeypatch, tmp_path):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     layout.state_dir.mkdir(parents=True, exist_ok=True)
