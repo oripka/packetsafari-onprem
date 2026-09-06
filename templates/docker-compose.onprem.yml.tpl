@@ -466,8 +466,7 @@ services:
       SHARKD_IDS_CACHE_DIR: /storage/runtime/sharkd-ids-cache
       SHARKD_IDS_SHARED_CACHE_DIR: /storage/runtime/sharkd-ids-cache
       SHARKD_IDS_ARTIFACT_ROOT: /storage/analysis/runtime/ids-alerts
-    expose:
-      - "4448"
+    {{ sharkd_network_exposure }}
     healthcheck:
       test: ["CMD-SHELL", "/bin/bash -lc 'exec 3<>/dev/tcp/127.0.0.1/4448'"]
       interval: 5s

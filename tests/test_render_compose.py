@@ -21,6 +21,7 @@ def _write_template(path):
     image: "{{ redis_image }}"
   sharkd:
     image: "{{ sharkd_image }}"
+    {{ sharkd_network_exposure }}
   egress-dns:
     image: "{{ egress_dns_image }}"
   egress-ironproxy:
@@ -71,6 +72,8 @@ def test_saas_static_frontend_manifest_omits_frontend_service(tmp_path):
     rendered = output_path.read_text(encoding="utf-8")
     assert "  frontend:" not in rendered
     assert "repo/backend:1" in rendered
+    assert 'ports:\n      - "4448:4448"' in rendered
+    assert 'expose:\n      - "4448"' not in rendered
 
 
 def test_onprem_manifest_still_requires_frontend_image(tmp_path):
@@ -147,6 +150,8 @@ def test_rendered_onprem_compose_uses_journald_logging(tmp_path):
     rendered = output_path.read_text(encoding="utf-8")
     assert "x-packetsafari-journald-logging:" in rendered
     assert "driver: journald" in rendered
+    assert 'expose:\n      - "4448"' in rendered
+    assert 'ports:\n      - "4448:4448"' not in rendered
     assert 'tag: "packetsafari/{{.Name}}/{{.ID}}"' in rendered
     assert rendered.count("logging: *packetsafari-journald-logging") >= 10
     assert '--save "3600 1 300 100 60 10000"' in rendered

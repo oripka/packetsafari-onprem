@@ -33,6 +33,12 @@ def _omit_frontend(manifest: dict, profile: str) -> bool:
     return _truthy(config.get("staticFrontend")) or _truthy(config.get("omitFrontendService"))
 
 
+def _sharkd_network_exposure(manifest: dict, profile: str) -> str:
+    if profile == "saas" and _omit_frontend(manifest, profile):
+        return 'ports:\n      - "4448:4448"'
+    return 'expose:\n      - "4448"'
+
+
 def _remove_service_block(compose_text: str, service: str) -> str:
     lines = compose_text.splitlines()
     output: list[str] = []
@@ -84,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         "ironproxy_env_path": args.ironproxy_env_path,
         "host_runtime_root": args.host_runtime_root,
         "container_runtime_root": args.container_runtime_root,
+        "sharkd_network_exposure": _sharkd_network_exposure(manifest, args.profile),
     }
     required_image_keys = [
         "backend_image",
