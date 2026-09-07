@@ -71,10 +71,15 @@ def main(argv: list[str] | None = None) -> int:
     template = Path(args.template).read_text(encoding="utf-8")
     images = manifest.get("images") or {}
     backend_image = image_ref(images, "backend")
+    agent_cli_image = image_ref(images, "agent-cli-runner")
     values = {
         "frontend_image": image_ref(images, "frontend"),
         "backend_image": backend_image,
         "worker_image": image_ref(images, "worker", backend_image),
+        "agent_cli_runner_image": agent_cli_image,
+        "agent_cli_runner_dependency": (
+            "      agent-cli-runner:\n        condition: service_healthy" if agent_cli_image else ""
+        ),
         "redis_image": image_ref(images, "redis", "redis/redis-stack-server:latest"),
         "postgres_image": image_ref(images, "postgres", "postgres:16"),
         "sharkd_image": image_ref(images, "sharkd"),
@@ -111,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
         template = template.replace(f"{{{{ {key} }}}}", str(value))
     if _omit_frontend(manifest, args.profile):
         template = _remove_service_block(template, "frontend")
+    # Historical signed manifests predate Packet Lab. Preserve their rollback
+    # rendering; new release builders always publish the pinned runner image.
+    if not agent_cli_image:
+        template = _remove_service_block(template, "agent-cli-runner")
     Path(args.output).write_text(template, encoding="utf-8")
     return 0
 

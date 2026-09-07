@@ -4841,10 +4841,13 @@ def _restore_metadata_snapshot(layout: RuntimeLayout, snapshot_dir: Path) -> Non
 
 
 def restore_snapshot(layout: RuntimeLayout, snapshot_dir: Path, *, restore_data: bool) -> None:
+    if restore_data:
+        # Stop against the current Compose before restoring an older manifest
+        # that may not declare newer capture readers such as Packet Lab.
+        docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd", "agent-cli-runner", "egress-firewall", "egress-ironproxy", "egress-dns"], timeout=120)
     _restore_metadata_snapshot(layout, snapshot_dir)
     render_logging_config(layout)
     if restore_data:
-        docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd", "egress-firewall", "egress-ironproxy", "egress-dns"], timeout=120)
         restore_postgres(layout, snapshot_dir)
         restore_storage(layout, snapshot_dir)
     docker_compose_up(layout, pull_policy="never")

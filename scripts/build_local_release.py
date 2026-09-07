@@ -22,6 +22,7 @@ APP_SERVICES = {
     "frontend": "frontend-production",
     "backend": "backend-production",
     "sharkd": "sharkd-production",
+    "agent-cli-runner": "agent-cli-runner-production",
 }
 APP_DOCKERFILE_SERVICES = {
     "egress-ironproxy": "configuration/iron-proxy/Dockerfile",

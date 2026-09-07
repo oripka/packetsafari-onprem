@@ -3,7 +3,43 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+import yaml
+
 from scripts import render_compose
+
+
+@pytest.mark.parametrize("with_runner", [False, True])
+def test_packet_lab_sidecar_is_pinned_isolated_and_rollback_compatible(tmp_path, with_runner):
+    manifest = {"deploymentProfiles": {"saas": {"staticFrontend": True}}, "images": {
+        key: f"repo/{key}@sha256:{'a' * 64}"
+        for key in ["backend", "worker", "sharkd", "egress-ironproxy", "egress-firewall"]
+    }}
+    if with_runner:
+        manifest["images"]["agent-cli-runner"] = f"repo/runner@sha256:{'b' * 64}"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    output = tmp_path / "compose.yml"
+    render_compose.main([
+        "--manifest", str(manifest_path), "--output", str(output), "--profile", "saas",
+        "--template", str(Path(__file__).resolve().parents[1] / "templates/docker-compose.onprem.yml.tpl"),
+    ])
+    services = yaml.safe_load(output.read_text())["services"]
+    assert ("agent-cli-runner" in services) is with_runner
+    assert ("agent-cli-runner" in services["worker"]["depends_on"]) is with_runner
+    assert "packetsafari-agentcli-runtime:/run/packetsafari-cli" in services["worker"]["volumes"]
+    assert not any("agentcli" in mount for mount in services["backend"]["volumes"])
+    if with_runner:
+        runner = services["agent-cli-runner"]
+        assert runner["image"] == manifest["images"]["agent-cli-runner"]
+        assert runner["network_mode"] == "none"
+        assert runner["read_only"] is True and runner["init"] is True
+        assert runner["volumes"] == [
+            "packetsafari-storage:/storage:ro", "packetsafari-agentcli-workspaces:/workspaces",
+            "packetsafari-agentcli-runtime:/run/packetsafari-cli",
+        ]
+        assert "env_file" not in runner and "environment" not in runner
+        assert "ports" not in runner and "networks" not in runner
 
 
 def _write_template(path):

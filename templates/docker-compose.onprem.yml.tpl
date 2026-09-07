@@ -270,6 +270,7 @@ services:
     env_file:
       - "{{ runtime_env_path }}"
     environment:
+      PACKETSAFARI_VANILLA_CLI_SOCKET: /run/packetsafari-cli/runner.sock
       PACKETSAFARI_STORAGE_EXTERNAL_DIR: /storage
       PACKETSAFARI_RUNTIME_POSTGRES_ENABLED: "true"
       POSTGRES_AUTO_RUN_MIGRATIONS: "false"
@@ -386,6 +387,7 @@ services:
     volumes:
       - packetsafari-storage:/storage
       - packetsafari-codexruntime:/var/lib/packetsafari/codex
+      - packetsafari-agentcli-runtime:/run/packetsafari-cli
       - "{{ host_runtime_root }}:{{ container_runtime_root }}"
       - "{{ host_runtime_root }}/configuration/iron-proxy:/app/configuration/iron-proxy"
       - "{{ host_runtime_root }}/configuration/egress-allowlist.production.yaml:/app/configuration/egress-allowlist.production.yaml"
@@ -394,6 +396,7 @@ services:
       - "{{ host_runtime_root }}/configuration/approved-intelligence-egress-hosts.json:/app/configuration/approved-intelligence-egress-hosts.json"
       - packetsafari-egress-proxy-certs:/etc/packetsafari/egress-proxy:ro
     depends_on:
+{{ agent_cli_runner_dependency }}
       storage-init:
         condition: service_completed_successfully
       postgres:
@@ -413,6 +416,36 @@ services:
         ipv4_address: 172.20.0.21
     dns:
       - 172.20.0.3
+
+  agent-cli-runner:
+    image: "{{ agent_cli_runner_image }}"
+    container_name: packetsafari-agent-cli-runner
+    init: true
+    user: "0:4141"
+    restart: always
+    logging: *packetsafari-journald-logging
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, CHOWN, SETUID, SETGID]
+    security_opt: [seccomp=unconfined, apparmor=unconfined]
+    pids_limit: 192
+    mem_limit: 9g
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - packetsafari-storage:/storage:ro
+      - packetsafari-agentcli-workspaces:/workspaces
+      - packetsafari-agentcli-runtime:/run/packetsafari-cli
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/packetsafari-cli/runner.sock"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
 
   postgres:
     image: "{{ postgres_image }}"
@@ -502,6 +535,8 @@ services:
 volumes:
   packetsafari-storage:
   packetsafari-codexruntime:
+  packetsafari-agentcli-runtime:
+  packetsafari-agentcli-workspaces:
   packetsafari-postgres:
   packetsafari-redis:
   packetsafari-egress-proxy-certs:
