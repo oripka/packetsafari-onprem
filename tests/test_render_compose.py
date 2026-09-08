@@ -10,7 +10,7 @@ from scripts import render_compose
 
 
 @pytest.mark.parametrize("with_runner", [False, True])
-def test_packet_lab_sidecar_is_pinned_isolated_and_rollback_compatible(tmp_path, with_runner):
+def test_evidence_runner_is_pinned_isolated_and_rollback_compatible(tmp_path, with_runner):
     manifest = {"deploymentProfiles": {"saas": {"staticFrontend": True}}, "images": {
         key: f"repo/{key}@sha256:{'a' * 64}"
         for key in ["backend", "worker", "sharkd", "egress-ironproxy", "egress-firewall"]
@@ -35,9 +35,10 @@ def test_packet_lab_sidecar_is_pinned_isolated_and_rollback_compatible(tmp_path,
         assert runner["network_mode"] == "none"
         assert runner["read_only"] is True and runner["init"] is True
         assert runner["volumes"] == [
-            "packetsafari-storage:/storage:ro", "packetsafari-agentcli-workspaces:/workspaces",
+            "packetsafari-agentcli-workspaces:/workspaces",
             "packetsafari-agentcli-runtime:/run/packetsafari-cli",
         ]
+        assert "depends_on" not in runner
         assert "env_file" not in runner and "environment" not in runner
         assert "ports" not in runner and "networks" not in runner
 

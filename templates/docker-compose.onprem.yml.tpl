@@ -434,12 +434,8 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     volumes:
-      - packetsafari-storage:/storage:ro
       - packetsafari-agentcli-workspaces:/workspaces
       - packetsafari-agentcli-runtime:/run/packetsafari-cli
-    depends_on:
-      storage-init:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "test", "-S", "/run/packetsafari-cli/runner.sock"]
       interval: 2s
