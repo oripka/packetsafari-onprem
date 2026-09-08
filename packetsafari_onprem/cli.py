@@ -170,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         choices=["onprem", "saas"],
         default="onprem",
-        help="Deployment profile. onprem verifies entitlement and takes an inline full backup by default; saas skips entitlement and requires a recent external backup proof by default.",
+        help="Deployment profile. onprem verifies entitlement and takes an inline full backup by default; manual saas upgrade requires recent external backup proof unless a backup mode is selected.",
     )
     upgrade.add_argument(
         "--backup-mode",
@@ -198,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade.add_argument(
         "--allow-unbacked-upgrade",
         action="store_true",
-        help="Allow --backup-mode skip. Intended only for container-only releases or disposable development hosts.",
+        help="Acknowledge an unbacked non-interactive upgrade. Interactive execution asks for confirmation instead.",
     )
     upgrade.add_argument("--health-timeout", type=int, default=180)
     upgrade.add_argument("--skip-health-check", action="store_true")
@@ -286,7 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument(
         "--backup-mode",
         choices=["inline", "require-recent", "skip"],
-        help="Backup policy for update apply. Defaults to inline for onprem and require-recent for saas.",
+        help="Backup policy for update apply. Defaults to inline for onprem and skip for the managed saas update command.",
     )
     update.add_argument("--backup-proof", help="External backup proof for require-recent mode.")
     update.add_argument("--max-backup-age-minutes", type=int, default=180)
@@ -306,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument(
         "--allow-unbacked-upgrade",
         action="store_true",
-        help="Allow --backup-mode skip. Intended only for container-only releases or disposable development hosts.",
+        help="Acknowledge an unbacked non-interactive update. Interactive managed SaaS update asks for confirmation instead.",
     )
     add_download_args(update)
 
@@ -478,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
             print(format_healthcheck_report(payload))
         return 0 if payload.get("ok") else 1
     if args.command == "upgrade":
+        args.human_output = bool(sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty())
         print(json.dumps(upgrade_release(args), indent=2))
         return 0
     if args.command == "update":

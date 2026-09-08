@@ -506,7 +506,7 @@ def _apply_connected_update(ctx: MenuContext, *, backup_mode: str | None = None,
         print("Create or verify the backup proof, or deliberately choose the inline-backup workflow.")
         _pause()
         return
-    if unbacked:
+    if selected_backup_mode == "skip":
         print()
         print(f"{RED}{BOLD}No PacketSafari PostgreSQL or /storage backup will be captured.{RESET}")
         print("If migrations run, data rollback may require a separately managed external backup.")
@@ -520,7 +520,7 @@ def _apply_connected_update(ctx: MenuContext, *, backup_mode: str | None = None,
         arguments.extend(["--manifest-url", checked_manifest])
     if backup_mode:
         arguments.extend(["--backup-mode", backup_mode])
-    if unbacked:
+    if selected_backup_mode == "skip":
         arguments.extend(["--backup-mode", "skip", "--allow-unbacked-upgrade"])
     _run_cli_action(ctx, f"Update to {target}", arguments, restart_ui=True)
 

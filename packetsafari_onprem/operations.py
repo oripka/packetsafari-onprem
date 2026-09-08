@@ -569,18 +569,46 @@ def supports_upgrade_host_actions(layout: RuntimeLayout, *, profile: str) -> boo
 
 def resolve_backup_mode(args, *, profile: str) -> str:
     raw = str(getattr(args, "backup_mode", "") or "").strip().lower()
-    mode = raw or ("inline" if profile == "onprem" else "require-recent")
+    command = str(getattr(args, "command", "") or "").strip().lower()
+    if raw:
+        mode = raw
+    elif profile == "onprem":
+        mode = "inline"
+    elif command == "update":
+        mode = "skip"
+    else:
+        mode = "require-recent"
     if mode not in BACKUP_MODES:
         raise RuntimeError(f"Unsupported backup mode: {mode}")
-    if mode == "skip" and not (
-        bool(getattr(args, "allow_unbacked_upgrade", False))
-        or _truthy(os.getenv("PACKETSAFARI_ALLOW_UNBACKED_UPGRADE"))
-    ):
-        raise RuntimeError(
-            "Unbacked upgrades are disabled. Pass --allow-unbacked-upgrade only for container-only releases "
-            "or disposable development hosts."
-        )
     return mode
+
+
+def acknowledge_unbacked_upgrade(args, *, backup_mode: str) -> None:
+    if backup_mode != "skip":
+        return
+    if bool(getattr(args, "allow_unbacked_upgrade", False)) or _truthy(
+        os.getenv("PACKETSAFARI_ALLOW_UNBACKED_UPGRADE")
+    ):
+        return
+    if not bool(getattr(args, "human_output", False)):
+        raise RuntimeError(
+            "A non-interactive update without a PacketSafari data backup requires "
+            "--allow-unbacked-upgrade or PACKETSAFARI_ALLOW_UNBACKED_UPGRADE=true."
+        )
+    print(
+        "WARNING: No local PostgreSQL or /storage backup will be created.\n"
+        "Automatic rollback can restore runtime metadata only. Confirm that a VM/EBS backup exists,\n"
+        "or accept that data rollback may require separate recovery.",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        answer = input("Continue without a local PacketSafari data backup? Type yes: ").strip().lower()
+    except EOFError as exc:
+        raise RuntimeError("Update cancelled: no backup confirmation was received.") from exc
+    if answer != "yes":
+        raise RuntimeError("Update cancelled: no local data backup was confirmed.")
+    setattr(args, "allow_unbacked_upgrade", True)
 
 
 def requested_upgrade_simulation_phase(args) -> str:
@@ -4035,9 +4063,10 @@ def apply_update(args) -> dict:
         print(format_update_plan(check_payload, host_requirements), file=sys.stderr, flush=True)
         os.environ[_UPDATE_PLAN_PRINTED_ENV] = "true"
     manifest = _read_json(manifest_path, {})
-    maybe_self_update_tooling(args, layout, manifest)
     if not check_payload["available"] and not bool(getattr(args, "force", False)):
         return _attach_update_summary({"status": "noop", **check_payload}, check_payload, host_requirements, args)
+    acknowledge_unbacked_upgrade(args, backup_mode=str(check_payload.get("backupMode") or ""))
+    maybe_self_update_tooling(args, layout, manifest)
     setattr(args, "manifest", str(manifest_path))
     setattr(args, "bundle", None)
     setattr(args, "_host_requirements_report", host_requirements)
@@ -5791,6 +5820,7 @@ def upgrade_release(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     profile = deployment_profile(args)
     backup_mode = resolve_backup_mode(args, profile=profile)
+    acknowledge_unbacked_upgrade(args, backup_mode=backup_mode)
     if not supports_upgrade_host_actions(layout, profile=profile):
         raise RuntimeError(f"Upgrade profile {profile!r} is only supported for managed runtime roots like /opt/packetsafari.")
     host_requirements = getattr(args, "_host_requirements_report", None)

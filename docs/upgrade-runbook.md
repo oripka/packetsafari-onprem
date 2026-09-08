@@ -166,20 +166,18 @@ sudo env HOME=/root packetsafari-ops update
 sudo env HOME=/root packetsafari-ops healthcheck --profile saas
 ```
 
-For a deliberate container-only fast path, use `--backup-mode skip` together
-with the explicit safety acknowledgement:
+The managed interactive SaaS update defaults to no local PostgreSQL or
+`/storage` backup. It prints the rollback limitation and requires typing `yes`:
 
 ```bash
-packetsafari-ops update \
-  --profile saas \
-  --backup-mode skip \
-  --allow-unbacked-upgrade
+sudo env HOME=/root packetsafari-ops update
 ```
 
-Only use unbacked updates for releases that are known not to require schema or
-storage migrations, or on disposable development hosts. If migrations run,
-rollback may require restoring PostgreSQL and `/storage` from an external
-backup.
+Confirm an external VM/EBS backup exists when rollback safety matters. If
+migrations run, metadata-only automatic rollback cannot restore PostgreSQL or
+`/storage`. Non-interactive automation must still pass
+`--allow-unbacked-upgrade` or set
+`PACKETSAFARI_ALLOW_UNBACKED_UPGRADE=true`.
 
 The cockpit exposes this as **Update without backup** under **Updates &
 recovery**. It displays the target release and rollback limitation and requires
@@ -333,8 +331,8 @@ export PACKETSAFARI_SAAS_OPERATOR_TOKEN_SHA256="<sha256-of-token>"
 Do not publish that token or hash to customer artifacts. This guard prevents a
 customer from selecting `--profile saas` to bypass the on-prem license path.
 
-The SaaS profile defaults to an out-of-band backup policy. By default, the
-upgrade requires a fresh backup proof at
+The lower-level manual SaaS `upgrade` command keeps the out-of-band backup
+policy. By default, it requires a fresh backup proof at
 `/opt/packetsafari/state/latest-backup.json` before migrations run:
 
 ```json
@@ -362,9 +360,9 @@ If the EC2 host does not have a recent external snapshot, use an inline backup:
 packetsafari-ops upgrade --profile saas --backup-mode inline --manifest ./release-manifest.json
 ```
 
-Do not run SaaS upgrades without a data backup. `--backup-mode skip` is blocked
-unless `PACKETSAFARI_ALLOW_UNBACKED_UPGRADE=true` is set for disposable
-development hosts.
+Interactive managed `update` may proceed without a local data backup after its
+warning and confirmation. Manual `upgrade` and non-interactive execution retain
+their explicit acknowledgement requirements.
 
 ## Offline Bundle Requirements
 

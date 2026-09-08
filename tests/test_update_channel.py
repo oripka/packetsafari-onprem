@@ -10,6 +10,38 @@ import pytest
 from packetsafari_onprem import operations
 
 
+def test_managed_saas_update_defaults_to_skip_with_no_switches():
+    args = SimpleNamespace(command="update", backup_mode=None, allow_unbacked_upgrade=False)
+
+    assert operations.resolve_backup_mode(args, profile="saas") == "skip"
+
+
+def test_onprem_and_manual_saas_upgrade_keep_protective_defaults():
+    assert operations.resolve_backup_mode(
+        SimpleNamespace(command="update", backup_mode=None), profile="onprem"
+    ) == "inline"
+    assert operations.resolve_backup_mode(
+        SimpleNamespace(command="upgrade", backup_mode=None), profile="saas"
+    ) == "require-recent"
+
+
+def test_interactive_unbacked_update_requires_plain_yes(monkeypatch, capsys):
+    args = SimpleNamespace(human_output=True, allow_unbacked_upgrade=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+
+    operations.acknowledge_unbacked_upgrade(args, backup_mode="skip")
+
+    assert args.allow_unbacked_upgrade is True
+    assert "No local PostgreSQL or /storage backup" in capsys.readouterr().err
+
+
+def test_noninteractive_unbacked_update_retains_explicit_acknowledgement():
+    args = SimpleNamespace(human_output=False, allow_unbacked_upgrade=False)
+
+    with pytest.raises(RuntimeError, match="non-interactive update"):
+        operations.acknowledge_unbacked_upgrade(args, backup_mode="skip")
+
+
 def test_saas_update_defaults_to_private_s3_channel(tmp_path):
     layout = SimpleNamespace(
         deployment_state_path=tmp_path / "deployment-state.json",

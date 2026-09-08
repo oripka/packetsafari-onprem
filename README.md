@@ -330,7 +330,7 @@ SaaS-specific safety rules:
 - The EC2 role must have private release-channel `s3:GetObject` access.
 - No long-lived AWS keys, signing keys, or upstream API secrets should be copied to the host.
 - `--backup-mode require-recent` is the default for SaaS.
-- `--backup-mode skip --allow-unbacked-upgrade` is only for disposable hosts or known container-only updates.
+- Managed SaaS `packetsafari-ops update` defaults to no local data backup, warns about the rollback limitation, and requires interactive confirmation. Non-interactive automation retains the explicit `--allow-unbacked-upgrade` acknowledgement.
 
 Useful SaaS commands:
 
