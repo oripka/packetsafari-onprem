@@ -534,7 +534,11 @@ def test_image_retention_prunes_only_unprotected_managed_images(monkeypatch, tmp
     assert removed == [["docker", "image", "rm", "sha256:old-unused"]]
 
 
-def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backup_mode,interrupt_phase", [
+    ("skip", ""), ("inline", ""), ("inline", "backup"),
+    ("inline", "migrate"), ("skip", "migrate"), ("inline", "pull"),
+])
+def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatch, tmp_path, backup_mode, interrupt_phase):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     operations.ensure_runtime_dirs(layout)
     layout.release_manifest_path.write_text(
@@ -546,10 +550,23 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     layout.deployment_state_path.write_text('{"deployment":{"installedVersion":"10.0.0-beta.1"}}\n', encoding="utf-8")
     target_manifest = tmp_path / "target-manifest.json"
     target_manifest.write_text(
-        '{"version":"10.0.0-beta.2","images":{"backend":"repo/backend:2","worker":"repo/worker:2"}}\n',
+        json.dumps({"version": "10.0.0-beta.2", "images": {
+            "backend": f"repo/backend:{1 if backup_mode == 'inline' else 2}",
+            "worker": f"repo/worker:{1 if backup_mode == 'inline' else 2}",
+        }}),
         encoding="utf-8",
     )
     calls: list[str] = []
+    restores = []
+
+    def phase(name):
+        calls.append(name)
+        if name == interrupt_phase:
+            raise KeyboardInterrupt("cancelled by operator")
+
+    monkeypatch.setattr(operations, "report_backup_storage_preflight", lambda *a, **kw: None)
+    monkeypatch.setattr(operations, "restore_snapshot", lambda *a, **kw: restores.append(kw))
+    monkeypatch.setattr(operations, "complete_full_backup", lambda *a: phase("backup"))
 
     monkeypatch.setattr(operations, "sync_bundle", lambda layout: None)
     monkeypatch.setattr(operations, "prepare_connected_manifest", lambda layout, manifest_arg, args=None, destination=None: target_manifest)
@@ -562,9 +579,9 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     monkeypatch.setattr(operations, "validate_rendered_security_consumer", lambda layout: calls.append("validate_security_consumer"))
     monkeypatch.setattr(operations, "ensure_ecr_credential_helper_ready", lambda layout: calls.append("ensure_ecr"))
     monkeypatch.setattr(operations, "render_logging_config", lambda layout: calls.append("render_logging"))
-    monkeypatch.setattr(operations, "docker_compose_pull", lambda layout: calls.append("pull"))
+    monkeypatch.setattr(operations, "docker_compose_pull", lambda layout: phase("pull"))
     monkeypatch.setattr(operations, "docker_compose_stop", lambda layout, services=None, timeout=120: calls.append(f"stop:{','.join(services or [])}"))
-    monkeypatch.setattr(operations, "run_target_migrations", lambda layout: calls.append("migrate"))
+    monkeypatch.setattr(operations, "run_target_migrations", lambda layout: phase("migrate"))
     monkeypatch.setattr(operations, "docker_compose_up", lambda layout, services=None, pull_policy=None: calls.append("up"))
     monkeypatch.setattr(operations, "wait_for_health", lambda timeout_seconds=180: calls.append("health"))
     monkeypatch.setattr(
@@ -590,12 +607,11 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
 
     monkeypatch.setattr(operations, "_promote_release", fake_promote)
 
-    result = operations.upgrade_release(
-        SimpleNamespace(
+    args = SimpleNamespace(
             runtime_root=str(tmp_path),
             container_runtime_root=str(tmp_path),
             profile="saas",
-            backup_mode="skip",
+            backup_mode=backup_mode,
             allow_unbacked_upgrade=True,
             bundle=None,
             manifest=str(target_manifest),
@@ -605,15 +621,30 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
             simulate_failure_phase="",
             max_backup_age_minutes=180,
         )
-    )
+    if interrupt_phase:
+        with pytest.raises(RuntimeError, match="Upgrade failed during"):
+            operations.upgrade_release(args)
+        assert "promote" not in calls
+        assert restores == [{
+            "restore_data": interrupt_phase == "migrate" and backup_mode == "inline",
+            "restart_services": not (interrupt_phase == "migrate" and backup_mode == "skip"),
+        }]
+        return
+    result = operations.upgrade_release(args)
 
     assert result["message"] == "ok"
-    assert calls.index("pull") < calls.index("stop:backend,worker")
+    stop = next(call for call in calls if call.startswith("stop:"))
+    assert calls.index("pull") < calls.index(stop)
     assert calls.index("preflight_doctor") < calls.index("render")
     assert calls.index("render") < calls.index("pull")
     assert calls.index("render") < calls.index("validate_security_consumer")
-    assert calls.index("validate_security_consumer") < calls.index("stop:backend,worker")
-    assert calls.index("stop:backend,worker") < calls.index("migrate")
+    assert calls.index("validate_security_consumer") < calls.index(stop)
+    assert calls.index(stop) < calls.index("migrate")
+    if backup_mode == "inline":
+        assert set(stop.removeprefix("stop:").split(",")) == set(operations.BACKUP_QUIESCED_SERVICES)
+        assert calls.index(stop) < calls.index("backup") < calls.index("migrate")
+    else:
+        assert stop == "stop:backend,worker"
     assert calls.index("health") < calls.index("doctor:1")
     assert calls.index("health") < calls.index("agent_stream_gateway")
     assert calls.index("agent_stream_gateway") < calls.index("doctor:1")

@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -3056,6 +3057,26 @@ def operate_security_content(args) -> dict:
 
 
 @contextmanager
+def upgrade_cancellation_guard():
+    """Route operator signals through recovery, protecting recovery from repeats."""
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    def cancel(signum, _frame):
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        print("Upgrade cancellation requested; recovering the previous deployment. Please wait.", file=sys.stderr, flush=True)
+        raise KeyboardInterrupt(f"operator cancellation ({signal.Signals(signum).name})")
+
+    try:
+        for sig in previous:
+            signal.signal(sig, cancel)
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@contextmanager
 def upgrade_lock(layout: RuntimeLayout):
     layout.state_dir.mkdir(parents=True, exist_ok=True)
     with layout.upgrade_lock_path.open("w", encoding="utf-8") as handle:
@@ -3666,6 +3687,8 @@ def _present_compose_services(layout: RuntimeLayout, services: list[str] | None)
 
 def docker_compose_stop(layout: RuntimeLayout, *, services: list[str] | None = None, timeout: int = 120) -> None:
     services = _present_compose_services(layout, services)
+    if services == []:
+        return
     cwd: Path | None = None
     if layout.kind == "local-data-root":
         repo_root = app_repo_root()
@@ -3703,6 +3726,10 @@ def docker_compose_stop(layout: RuntimeLayout, *, services: list[str] | None = N
         subprocess.run(kill_command, check=True, cwd=cwd)
 
 
+class UpgradeProcessNotStopped(RuntimeError):
+    """Automatic restore is unsafe while a one-off may still mutate data."""
+
+
 def docker_compose_run(
     layout: RuntimeLayout,
     service: str,
@@ -3712,10 +3739,12 @@ def docker_compose_run(
     stdin_path: Path | None = None,
     stdout_path: Path | None = None,
 ) -> None:
+    container_name = f"packetsafari-ops-{os.getpid()}-{secrets.token_hex(4)}"
     command = [
         *_compose_base_command(layout),
         "run",
         "--rm",
+        "--name", container_name,
         "--no-deps",
         "--pull",
         "never",
@@ -3727,6 +3756,23 @@ def docker_compose_run(
     stdout = stdout_path.open("wb") if stdout_path else None
     try:
         subprocess.run(command, check=True, stdin=stdin, stdout=stdout)
+    except (Exception, KeyboardInterrupt):
+        # Killing the attached Docker CLI does not prove the one-off stopped.
+        # In particular a migration must stop before rollback touches its DB.
+        try:
+            subprocess.run(["docker", "rm", "-f", container_name], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            remaining = subprocess.run(
+                ["docker", "ps", "-a", "--filter", f"name=^/{container_name}$", "--format", "{{.ID}}"],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+            if remaining.stdout.strip():
+                raise RuntimeError("container is still present")
+        except Exception as cleanup_exc:
+            raise UpgradeProcessNotStopped(
+                f"Cannot verify one-off {container_name} stopped; automatic restore refused."
+            ) from cleanup_exc
+        raise
     finally:
         if stdin:
             stdin.close()
@@ -4568,6 +4614,12 @@ UPGRADE_RECREATED_IMAGE_SERVICES = [
     "egress-dns",
 ]
 
+# PostgreSQL/Redis stay up for backup; every app reader/writer is quiesced.
+BACKUP_QUIESCED_SERVICES = [
+    "frontend", "backend", "worker", "sharkd", "agent-cli-runner",
+    "agent-stream-gateway", "egress-firewall", "egress-ironproxy", "egress-dns",
+]
+
 
 def _manifest_service_image_refs(manifest: dict) -> dict[str, str]:
     images = _manifest_images(manifest)
@@ -4727,6 +4779,11 @@ def complete_full_backup(layout: RuntimeLayout, snapshot_dir: Path) -> None:
             "postgresBackup": "postgres.dump",
             "storageBackup": "storage.tar",
             "completedAt": utc_now(),
+            "dataArtifacts": {
+                name: {"sizeBytes": (snapshot_dir / name).stat().st_size,
+                       "sha256": _sha256(snapshot_dir / name)}
+                for name in ("postgres.dump", "storage.tar")
+            },
         },
     )
 
@@ -4749,7 +4806,12 @@ def _verified_full_backup(snapshot_dir: Path) -> bool:
     manifest_path = snapshot_dir / "snapshot.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
         return False
-    snapshot = _read_json(manifest_path, {})
+    try:
+        snapshot = _read_json(manifest_path, {})
+    except (OSError, ValueError):
+        return False
+    if not isinstance(snapshot, dict):
+        return False
     if (
         not snapshot.get("completedAt")
         or str(snapshot.get("postgresBackup") or "") != "postgres.dump"
@@ -4921,17 +4983,45 @@ def _restore_metadata_snapshot(layout: RuntimeLayout, snapshot_dir: Path) -> Non
             shutil.copy2(src, dest)
 
 
-def restore_snapshot(layout: RuntimeLayout, snapshot_dir: Path, *, restore_data: bool) -> None:
+def validate_data_snapshot(layout: RuntimeLayout, snapshot_dir: Path) -> None:
+    """Fail before stopping services or replacing any runtime/data state."""
+    if not _verified_full_backup(snapshot_dir):
+        raise RuntimeError(f"Incomplete or unverified data backup; restore refused: {snapshot_dir}")
+    snapshot = _read_json(snapshot_dir / "snapshot.json", {})
+    artifacts = snapshot.get("dataArtifacts")
+    if artifacts is not None:
+        for name in ("postgres.dump", "storage.tar"):
+            record = artifacts.get(name, {}) if isinstance(artifacts, dict) else {}
+            path = snapshot_dir / name
+            if (not isinstance(record, dict)
+                    or record.get("sizeBytes") != path.stat().st_size
+                    or record.get("sha256") != _sha256(path)):
+                raise RuntimeError(f"Backup integrity check failed for {name}; restore refused.")
+    else:
+        # Completed older snapshots have no digest inventory. Read both archive
+        # formats fully before allowing a destructive restore, without a DB connection.
+        subprocess.run(["tar", "-tf", str(snapshot_dir / "storage.tar")],
+                       check=True, stdout=subprocess.DEVNULL)
+        docker_compose_run(layout, "postgres",
+                           ["pg_restore", "--file=/dev/null", "/backup/postgres.dump"],
+                           extra_volumes=[f"{snapshot_dir}:/backup:ro"])
+
+
+def restore_snapshot(layout: RuntimeLayout, snapshot_dir: Path, *, restore_data: bool,
+                     restart_services: bool = True) -> None:
     if restore_data:
+        validate_data_snapshot(layout, snapshot_dir)
+    if restore_data or not restart_services:
         # Stop against the current Compose before restoring an older manifest
         # that may not declare newer capture readers such as Packet Lab.
-        docker_compose_stop(layout, services=["frontend", "backend", "worker", "sharkd", "agent-cli-runner", "egress-firewall", "egress-ironproxy", "egress-dns"], timeout=120)
+        docker_compose_stop(layout, services=BACKUP_QUIESCED_SERVICES, timeout=120)
     _restore_metadata_snapshot(layout, snapshot_dir)
     render_logging_config(layout)
     if restore_data:
         restore_postgres(layout, snapshot_dir)
         restore_storage(layout, snapshot_dir)
-    docker_compose_up(layout, pull_policy="never")
+    if restart_services:
+        docker_compose_up(layout, pull_policy="never")
 
 
 def latest_snapshot_dir(layout: RuntimeLayout) -> Path | None:
@@ -5881,7 +5971,7 @@ def upgrade_release(args) -> dict:
     sizing_status = getattr(args, "_sizing_status_report", None)
     if not isinstance(sizing_status, dict):
         sizing_status = warn_if_sizing_state_stale(layout)
-    with upgrade_lock(layout):
+    with upgrade_lock(layout), upgrade_cancellation_guard():
         ensure_runtime_dirs(layout)
         report_backup_storage_preflight(layout, backup_mode=backup_mode)
         sync_bundle(layout)
@@ -5968,12 +6058,14 @@ def upgrade_release(args) -> dict:
                 write_helper_status(layout, status="upgrading", message="Skipping image pull; using images already present on this host.")
 
             if had_active_compose:
+                if backup_mode == "inline":
+                    services_to_recreate = list(dict.fromkeys([*services_to_recreate, *BACKUP_QUIESCED_SERVICES]))
                 if services_to_recreate:
                     write_helper_status(
                         layout,
                         status="upgrading",
                         message=(
-                            f"Stopping services with changed images or startup configuration "
+                            f"Stopping services for upgrade/backup "
                             f"({', '.join(services_to_recreate)}) and "
                             f"{backup_message}."
                         ),
@@ -6052,14 +6144,21 @@ def upgrade_release(args) -> dict:
             result["generatedRuntimeEnvKeys"] = generated_runtime_env_keys
             result["configurationReloadedServices"] = ["egress-ironproxy"] if ironproxy_config_reload_required else []
             return result
-        except Exception as exc:
+        except (Exception, KeyboardInterrupt) as exc:
+            # Recovery can itself replace data. A subsequent Ctrl+C/SIGTERM
+            # must not interrupt it halfway through; the guard restores handlers.
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, signal.SIG_IGN)
             write_helper_status(layout, status="failed", message=f"Upgrade failed during {phase}: {exc}")
+            if isinstance(exc, UpgradeProcessNotStopped):
+                raise
             if snapshot_dir is not None:
                 data_restore_required = phase in {"migration", "healthcheck", "promote"}
                 restore_data = backup_mode == "inline" and data_restore_required
                 mode = "full data restore" if restore_data else "metadata restore"
                 try:
-                    restore_snapshot(layout, snapshot_dir, restore_data=restore_data)
+                    restore_snapshot(layout, snapshot_dir, restore_data=restore_data,
+                                     restart_services=not (data_restore_required and backup_mode != "inline"))
                     record_upgrade_rollback_state(layout, phase=phase, mode=mode, snapshot_dir=snapshot_dir)
                     write_helper_status(layout, status="rolled_back", message=f"Upgrade failed during {phase}; restored previous release with {mode}.")
                 except Exception as restore_exc:
