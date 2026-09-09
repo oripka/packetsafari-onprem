@@ -583,6 +583,58 @@ def resolve_backup_mode(args, *, profile: str) -> str:
     return mode
 
 
+def report_backup_storage_preflight(layout: RuntimeLayout, *, backup_mode: str) -> None:
+    """Show existing data archives and bounded size estimates before upgrade work."""
+    existing_bytes = 0
+    incomplete = 0
+    for snapshot in layout.backup_dir.iterdir() if layout.backup_dir.exists() else ():
+        if snapshot.is_symlink() or not snapshot.is_dir():
+            continue
+        archives = [snapshot / name for name in ("postgres.dump", "storage.tar")]
+        sizes = [path.stat().st_size for path in archives if path.is_file() and not path.is_symlink()]
+        existing_bytes += sum(sizes)
+        if sizes and not _verified_full_backup(snapshot):
+            incomplete += 1
+    free_bytes = shutil.disk_usage(layout.runtime_root).free
+    gib = 1024 ** 3
+    print(
+        f"Backup storage: existing data archives {existing_bytes / gib:.2f} GiB; "
+        f"{incomplete} incomplete/unverified snapshots; free {free_bytes / gib:.2f} GiB. "
+        f"Directory: {layout.backup_dir}",
+        file=sys.stderr, flush=True,
+    )
+    if backup_mode != "inline":
+        return
+    postgres = _postgres_env(layout)
+    try:
+        storage = subprocess.run(
+            [*_compose_base_command(layout), "exec", "-T", "backend", "du", "-sb",
+             "--exclude=/storage/onprem", "/storage"],
+            check=True, capture_output=True, text=True, timeout=20,
+        )
+        database = subprocess.run(
+            [*_compose_base_command(layout), "exec", "-T", "postgres", "psql",
+             "-U", postgres["POSTGRES_USER"], "-d", postgres["POSTGRES_DB"],
+             "-Atc", "SELECT pg_database_size(current_database());"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        storage_bytes = int(storage.stdout.split()[0])
+        database_bytes = int(database.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        print("WARNING: Inline backup selected; size estimate unavailable. PostgreSQL and all capture storage will be copied locally before deployment.", file=sys.stderr, flush=True)
+        return
+    estimate = storage_bytes + database_bytes
+    print(
+        f"WARNING: Inline backup will copy /storage ({storage_bytes / gib:.2f} GiB) "
+        f"and PostgreSQL (database size {database_bytes / gib:.2f} GiB) before deployment. "
+        "Archive size and duration depend on compression and filesystem overhead; "
+        "cancelling can leave incomplete backup files.",
+        file=sys.stderr, flush=True,
+    )
+    if estimate >= free_bytes:
+        print("WARNING: Estimated source bytes exceed available backup disk space. Review capacity or the selected backup mode before continuing.", file=sys.stderr, flush=True)
+
+
 def acknowledge_unbacked_upgrade(args, *, backup_mode: str) -> None:
     if backup_mode != "skip":
         return
@@ -5831,6 +5883,7 @@ def upgrade_release(args) -> dict:
         sizing_status = warn_if_sizing_state_stale(layout)
     with upgrade_lock(layout):
         ensure_runtime_dirs(layout)
+        report_backup_storage_preflight(layout, backup_mode=backup_mode)
         sync_bundle(layout)
         source = "bundle" if getattr(args, "bundle", None) else "manifest"
         snapshot_dir: Path | None = None

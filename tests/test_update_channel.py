@@ -10,6 +10,47 @@ import pytest
 from packetsafari_onprem import operations
 
 
+def test_backup_preflight_reports_incomplete_bytes_and_inline_cost(tmp_path, monkeypatch, capsys):
+    layout = operations.runtime_layout(str(tmp_path), "/storage/onprem")
+    layout.backup_dir.mkdir()
+    cancelled = layout.backup_dir / "cancelled"
+    cancelled.mkdir()
+    (cancelled / "storage.tar").write_bytes(b"partial")
+    (cancelled / "snapshot.json").write_text('{}')
+    monkeypatch.setattr(operations, "_compose_base_command", lambda _layout: ["docker", "compose"])
+    monkeypatch.setattr(operations, "_postgres_env", lambda _layout: {"POSTGRES_USER": "test", "POSTGRES_DB": "test"})
+    monkeypatch.setattr(operations.shutil, "disk_usage", lambda _path: SimpleNamespace(free=1024 ** 3))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout=f"{2 * 1024 ** 3}\t/storage\n" if "du" in command else "1024\n")
+
+    monkeypatch.setattr(operations.subprocess, "run", run)
+    operations.report_backup_storage_preflight(layout, backup_mode="inline")
+    output = capsys.readouterr().err
+    assert "1 incomplete/unverified snapshots" in output
+    assert "/storage (2.00 GiB)" in output
+    assert "exceed available backup disk space" in output
+    assert all(call[1]["timeout"] <= 20 for call in calls)
+    assert "--exclude=/storage/onprem" in calls[0][0]
+    assert (cancelled / "storage.tar").read_bytes() == b"partial"
+    calls.clear()
+    operations.report_backup_storage_preflight(layout, backup_mode="skip")
+    assert calls == []
+
+
+def test_backup_preflight_reports_unknown_estimate_without_claiming_zero(tmp_path, monkeypatch, capsys):
+    layout = operations.runtime_layout(str(tmp_path), "/storage/onprem")
+    monkeypatch.setattr(operations, "_compose_base_command", lambda _layout: ["docker", "compose"])
+    monkeypatch.setattr(operations, "_postgres_env", lambda _layout: {})
+    def unavailable(*_args, **_kwargs):
+        raise operations.subprocess.TimeoutExpired("du", 20)
+    monkeypatch.setattr(operations.subprocess, "run", unavailable)
+    operations.report_backup_storage_preflight(layout, backup_mode="inline")
+    assert "size estimate unavailable" in capsys.readouterr().err
+
+
 def test_managed_saas_update_defaults_to_skip_with_no_switches():
     args = SimpleNamespace(command="update", backup_mode=None, allow_unbacked_upgrade=False)
 
