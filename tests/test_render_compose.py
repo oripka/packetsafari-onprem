@@ -230,6 +230,8 @@ def test_onprem_backend_and_worker_share_persistent_codex_runtime(tmp_path):
     rendered = output_path.read_text(encoding="utf-8")
     assert rendered.count("packetsafari-codexruntime:/var/lib/packetsafari/codex") == 3
     assert "packetsafari-codexruntime:" in rendered.split("\nvolumes:\n", 1)[1]
+    worker = rendered.split("\n  worker:", 1)[1].split("\n  postgres:", 1)[0]
+    assert 'PACKETSAFARI_AI_CONTEXT_LOGGING_ENABLED: "false"' in worker
     storage_init = rendered.split("\n  storage-init:", 1)[1].split("\n  backend:", 1)[0]
     assert 'user: "0:0"' in storage_init
     assert "analysis/runtime/typed-shared" in storage_init
