@@ -50,6 +50,11 @@ sudo env HOME=/root packetsafari-ops
 packetsafari-ops tui
 ```
 
+The interactive operator uses staged Consola/Clack-style prompts without an
+external UI dependency. Arrow keys move, Enter opens the highlighted area or
+action, and Esc returns or exits. Completed navigation and deployment context
+collapse into `◇` summary rows instead of a full-screen tree.
+
 ```bash
 packetsafari-ops update
 ```

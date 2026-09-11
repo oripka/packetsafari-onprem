@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import curses
 import getpass
 import json
 import os
@@ -20,6 +19,7 @@ from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from .api import ApiError, LocalApiClient, detect_api_base_url
+from .prompts import PromptOption, PromptSession
 from .operations import (
     DEFAULT_API_BASE_URL,
     DEFAULT_CONTAINER_RUNTIME_ROOT,
@@ -1144,30 +1144,6 @@ def _main_items(_ctx: MenuContext) -> list[MenuItem]:
     ]
 
 
-def _safe_addstr(stdscr, y: int, x: int, text: str, attr: int = 0) -> None:
-    height, width = stdscr.getmaxyx()
-    if y < 0 or y >= height or x < 0 or x >= width:
-        return
-    available = max(0, width - x - 1)
-    try:
-        stdscr.addnstr(y, x, text, available, attr)
-    except curses.error:
-        pass
-
-
-def _init_colors() -> None:
-    if not curses.has_colors():
-        return
-    curses.start_color()
-    curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN, -1)
-    curses.init_pair(2, curses.COLOR_BLUE, -1)
-    curses.init_pair(3, curses.COLOR_YELLOW, -1)
-    curses.init_pair(4, curses.COLOR_RED, -1)
-    curses.init_pair(5, curses.COLOR_GREEN, -1)
-    curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)
-
-
 def _human_age(seconds: float) -> str:
     seconds = max(0, int(seconds))
     if seconds < 60:
@@ -1288,7 +1264,7 @@ def _start_background_checks(ctx: MenuContext) -> None:
     threading.Thread(target=_worker, name="packetsafari-ops-startup-checks", daemon=True).start()
 
 
-def _dashboard_lines(ctx: MenuContext) -> list[tuple[str, int]]:
+def _dashboard_lines(ctx: MenuContext) -> list[tuple[str, str]]:
     update = ctx.update_status or {}
     app = update.get("app") if isinstance(update.get("app"), dict) else update
     ops = update.get("ops") if isinstance(update.get("ops"), dict) else {}
@@ -1313,114 +1289,24 @@ def _dashboard_lines(ctx: MenuContext) -> list[tuple[str, int]]:
         app_marker = "offline-safe"
         ops_marker = "offline-safe"
     health_label = "checking…" if ctx.health_check_state == "checking" else "not checked"
-    health_attr = curses.A_DIM
     if ctx.health_status is not None:
         if ctx.health_status.get("ok"):
             health_label = "healthy"
-            health_attr = curses.color_pair(5) | curses.A_BOLD
         else:
             health_label = "needs attention"
-            health_attr = curses.color_pair(4) | curses.A_BOLD
     elif ctx.health_check_state == "failed":
         health_label = "check failed"
-        health_attr = curses.color_pair(4) | curses.A_BOLD
-    backup_label, backup_state, _backup_ready = _backup_status(ctx)
-    backup_attr = {
-        "good": curses.color_pair(5) | curses.A_BOLD,
-        "bad": curses.color_pair(4) | curses.A_BOLD,
-    }.get(backup_state, curses.A_DIM)
-    ops_attr = curses.color_pair(5) | curses.A_BOLD if ops.get("available") else 0
+    backup_label, _backup_state, _backup_ready = _backup_status(ctx)
     return [
-        (f"Host        {ctx.profile} · {ctx.channel} · {ctx.platform} · {ctx.runtime_root}", curses.A_BOLD),
-        (f"Application {ctx.installed_version} → {target}  [{app_marker}]", curses.color_pair(5) if app.get("available") else 0),
-        (f"Ops tool    {ctx.ops_version} → {target_ops}  [{ops_marker}]", ops_attr),
-        (f"Health      {health_label}", health_attr),
-        (f"Backup      {backup_label}", backup_attr),
+        ("Host", f"{ctx.profile} · {ctx.channel} · {ctx.platform} · {ctx.runtime_root}"),
+        ("Application", f"{ctx.installed_version} → {target} · {app_marker}"),
+        ("Ops tool", f"{ctx.ops_version} → {target_ops} · {ops_marker}"),
+        ("Health", health_label),
+        ("Backup", backup_label),
     ]
 
 
-def _render_menu(
-    stdscr,
-    parts: list[str],
-    items: list[MenuItem],
-    ctx: MenuContext,
-    selected: int,
-    *,
-    allow_back: bool,
-    allow_quit: bool,
-) -> None:
-    stdscr.erase()
-    height, width = stdscr.getmaxyx()
-    _safe_addstr(stdscr, 1, 2, "PacketSafari Operations", curses.color_pair(1) | curses.A_BOLD)
-    _safe_addstr(stdscr, 2, 2, " › ".join(parts), curses.A_BOLD)
-    _safe_addstr(stdscr, 3, 2, "─" * max(10, width - 4), curses.A_DIM)
-
-    row = 4
-    if len(parts) == 1:
-        for line, attr in _dashboard_lines(ctx):
-            _safe_addstr(stdscr, row, 3, line, attr)
-            row += 1
-        _safe_addstr(stdscr, row, 3, ctx.notice, curses.A_DIM)
-        row += 1
-        _safe_addstr(stdscr, row, 2, "─" * max(10, width - 4), curses.A_DIM)
-        row += 1
-    else:
-        _safe_addstr(stdscr, row, 3, f"{ctx.profile} · {ctx.installed_version} · ops {ctx.ops_version}", curses.A_DIM)
-        row += 1
-        _safe_addstr(stdscr, row, 2, "─" * max(10, width - 4), curses.A_DIM)
-        row += 1
-
-    footer_row = max(row + 1, height - 3)
-    available_rows = max(1, footer_row - row)
-    item_height = 3
-    visible_count = max(1, available_rows // item_height)
-    start = min(max(0, selected - visible_count + 1), max(0, len(items) - visible_count))
-    end = min(len(items), start + visible_count)
-
-    for index in range(start, end):
-        item = items[index]
-        is_selected = index == selected
-        if is_selected:
-            attr = curses.color_pair(6) | curses.A_BOLD
-        elif item.danger:
-            attr = curses.color_pair(4) | curses.A_BOLD
-        else:
-            attr = curses.A_BOLD
-        suffix = "  ›" if item.submenu_factory else ""
-        _safe_addstr(stdscr, row, 2, f" {'>' if is_selected else ' '} {item.name}{suffix}", attr)
-        row += 1
-        description = textwrap.shorten(item.description, width=max(20, width - 8), placeholder="…")
-        _safe_addstr(stdscr, row, 6, description, curses.color_pair(6) if is_selected else curses.A_DIM)
-        row += 2
-
-    if start > 0:
-        _safe_addstr(stdscr, 4, width - 12, "↑ more", curses.A_DIM)
-    if end < len(items):
-        _safe_addstr(stdscr, footer_row - 1, width - 12, "↓ more", curses.A_DIM)
-
-    footer = "[↑/↓] Move   [Enter] Open"
-    if allow_back:
-        footer += "   [Esc] Back"
-    if allow_quit:
-        footer += "   [q] Quit"
-    _safe_addstr(stdscr, height - 2, 2, footer, curses.A_DIM)
-    stdscr.refresh()
-
-
-def _run_action_outside_curses(stdscr, action: Callable[[MenuContext], None], ctx: MenuContext) -> None:
-    curses.def_prog_mode()
-    curses.endwin()
-    try:
-        action(ctx)
-    except Exception as exc:
-        _print_error("Action Error", exc, ctx)
-    finally:
-        curses.reset_prog_mode()
-        stdscr.refresh()
-
-
 def _walk_menu(
-    stdscr,
     parts: list[str],
     items: list[MenuItem],
     ctx: MenuContext,
@@ -1428,26 +1314,29 @@ def _walk_menu(
     allow_back: bool,
     allow_quit: bool = False,
 ) -> bool:
-    selected = 0
     while True:
-        _render_menu(stdscr, parts, items, ctx, selected, allow_back=allow_back, allow_quit=allow_quit)
-        key = stdscr.getch()
-        if key in {curses.KEY_UP, ord("k")}:
-            selected = (selected - 1) % len(items)
-            continue
-        if key in {curses.KEY_DOWN, ord("j")}:
-            selected = (selected + 1) % len(items)
-            continue
-        if key in {27, curses.KEY_LEFT} and allow_back:
-            return False
-        if key in {ord("q"), ord("Q")} and allow_quit:
-            return True
-        if key not in {10, 13, curses.KEY_ENTER, curses.KEY_RIGHT}:
-            continue
-        item = items[selected]
+        completed = (lambda: _dashboard_lines(ctx)) if len(parts) == 1 else [
+            ("Location", " › ".join(parts)),
+            ("Deployment", f"{ctx.profile} · app {ctx.installed_version} · ops {ctx.ops_version}"),
+        ]
+        options = [
+            PromptOption(str(index), item.name + ("  ›" if item.submenu_factory else ""), item.description, "red" if item.danger else "")
+            for index, item in enumerate(items)
+        ]
+        title = "What do you want to manage?" if len(parts) == 1 else parts[-1]
+        with PromptSession() as prompt:
+            choice = prompt.select(
+                title,
+                options,
+                completed=completed,
+                note=(lambda: ctx.notice) if len(parts) == 1 else "",
+                on_idle=(lambda: None) if len(parts) == 1 else None,
+            )
+        if choice is None:
+            return bool(allow_quit)
+        item = items[int(choice)]
         if item.submenu_factory:
             should_quit = _walk_menu(
-                stdscr,
                 parts + [item.name],
                 item.submenu_factory(ctx),
                 ctx,
@@ -1457,7 +1346,10 @@ def _walk_menu(
                 return True
             continue
         if item.action:
-            _run_action_outside_curses(stdscr, item.action, ctx)
+            try:
+                item.action(ctx)
+            except Exception as exc:
+                _print_error("Action Error", exc, ctx)
 
 
 def run_menu(
@@ -1476,14 +1368,4 @@ def run_menu(
     else:
         _start_background_checks(ctx)
 
-    def _main(stdscr) -> None:
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        stdscr.keypad(True)
-        stdscr.timeout(250)
-        _init_colors()
-        _walk_menu(stdscr, ["Operator cockpit"], _main_items(ctx), ctx, allow_back=False, allow_quit=True)
-
-    curses.wrapper(_main)
+    _walk_menu(["Operations"], _main_items(ctx), ctx, allow_back=False, allow_quit=True)

@@ -333,7 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics.add_argument("--since", default="15m")
     diagnostics.add_argument("--tail", type=int, default=200)
 
-    tui = subparsers.add_parser("tui", help="Launch the simple operator menu.")
+    tui = subparsers.add_parser("tui", help="Launch the guided operator prompts.")
     tui.add_argument("--api-base-url")
     return parser
 
