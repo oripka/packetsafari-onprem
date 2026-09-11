@@ -1,10 +1,31 @@
 import unittest
+import os
+import re
 from unittest.mock import patch
 
 from packetsafari_onprem import menu
+from packetsafari_onprem.prompts import PromptSession
 
 
 class MenuPromptTests(unittest.TestCase):
+    def test_raw_input_keeps_enter_after_arrow_and_cancels_control_c(self):
+        reader, writer = os.pipe()
+        try:
+            os.write(writer, b"\x1b[B\r\x03")
+            session = PromptSession()
+            session.fd = reader
+            self.assertEqual(session.read_key(), "down")
+            self.assertEqual(session.read_key(), "\r")
+            with self.assertRaises(KeyboardInterrupt):
+                session.read_key()
+        finally:
+            os.close(reader)
+            os.close(writer)
+
+    def test_wide_text_is_clipped_to_terminal_cells(self):
+        row = PromptSession.clip_row("\x1b[36m◆ " + "界" * 30, 20)
+        self.assertEqual(re.sub(r"\x1b\[[0-9;]*m", "", row), "◆ " + "界" * 8)
+
     def test_prompt_menu_runs_an_action_then_returns_to_the_same_level(self):
         calls = []
 

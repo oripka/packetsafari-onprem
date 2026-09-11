@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import re
+import unicodedata
 import select
 import shutil
 import sys
@@ -35,6 +37,8 @@ class PromptSession:
         return value.lines, value.columns
 
     def style(self, value, *styles):
+        if "NO_COLOR" in os.environ:
+            return str(value)
         codes = []
         for style in styles:
             if style == "bold": codes.append("1")
@@ -46,6 +50,8 @@ class PromptSession:
     def __enter__(self):
         if not self.input.isatty() or not self.output.isatty():
             raise ValueError("interactive prompts need an interactive terminal")
+        if os.environ.get("TERM") == "dumb":
+            raise ValueError("This terminal cannot display interactive prompts; use explicit command options.")
         self.fd = self.input.fileno()
         self.previous = termios.tcgetattr(self.fd)
         tty.setraw(self.fd)
@@ -59,9 +65,27 @@ class PromptSession:
         self.output.write("\x1b[?25h\x1b[?1049l")
         self.output.flush()
 
+    @staticmethod
+    def clip_row(value, width):
+        # Preserve our color escapes while counting terminal cells, not bytes.
+        result, cells = [], 0
+        for token in re.findall(r"\x1b\[[0-9;]*m|[^\x1b]", value):
+            if token.startswith("\x1b["):
+                result.append(token)
+                continue
+            if not token.isprintable():
+                continue
+            size = 0 if unicodedata.combining(token) else 2 if unicodedata.east_asian_width(token) in ("W", "F") else 1
+            if cells + size > max(0, width - 1):
+                break
+            result.append(token)
+            cells += size
+        return "".join(result) + "\x1b[0m"
+
     def draw(self, lines):
-        height, _ = self.size
-        self.output.write("\r\x1b[2J\x1b[H" + "\r\n".join(lines[:height]))
+        height, width = self.size
+        rows = [self.clip_row(line, width) for line in lines[:height]]
+        self.output.write("\r\x1b[2J\x1b[H" + "\r\n".join(rows))
         self.output.flush()
 
     def completed_lines(self, completed, width):
@@ -73,14 +97,25 @@ class PromptSession:
         return lines
 
     def read_key(self, timeout=None):
-        if timeout is not None and not select.select([self.fd], [], [], timeout)[0]: return ""
+        if timeout is not None and not select.select([self.fd], [], [], timeout)[0]:
+            return ""
         first = os.read(self.fd, 1)
+        if first in (b"\x03", b"\x04", b""):
+            raise KeyboardInterrupt()
         if first != b"\x1b":
-            try: return first.decode().lower()
-            except UnicodeDecodeError: return ""
+            return first.decode(errors="ignore").lower()
         sequence = first
-        while len(sequence) < 8 and select.select([self.fd], [], [], 0.02)[0]: sequence += os.read(self.fd, 1)
-        return {b"\x1b[A": "up", b"\x1b[B": "down", b"\x1b[C": "right", b"\x1b[D": "left", b"\x1b": "escape"}.get(sequence, "")
+        while len(sequence) < 8 and select.select([self.fd], [], [], 0.05)[0]:
+            sequence += os.read(self.fd, 1)
+            if len(sequence) >= 3 and 0x40 <= sequence[-1] <= 0x7e:
+                break
+        return {
+            b"\x1b[A": "up", b"\x1b[B": "down",
+            b"\x1b[C": "right", b"\x1b[D": "left",
+            b"\x1bOA": "up", b"\x1bOB": "down",
+            b"\x1bOC": "right", b"\x1bOD": "left",
+            b"\x1b": "escape",
+        }.get(sequence, "")
 
     def select(self, title, options, *, initial=0, completed=(), note="", allow_cancel=True, on_idle=None, navigation=False):
         selected = max(0, min(initial, len(options) - 1))
