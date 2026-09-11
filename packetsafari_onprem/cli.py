@@ -9,6 +9,7 @@ from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from packetsafari_onprem.console import Console
     from packetsafari_onprem.api import LocalApiClient, detect_api_base_url
     from packetsafari_onprem.menu import run_menu
     from packetsafari_onprem.operations import (
@@ -39,6 +40,7 @@ if __package__ in {None, ""}:
         upgrade_release,
     )
 else:
+    from .console import Console
     from .api import LocalApiClient, detect_api_base_url
     from .menu import run_menu
     from .operations import (
@@ -72,6 +74,7 @@ else:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="packetsafari-ops")
+    parser.add_argument("--quiet", action="store_true", help="suppress progress; retain results and errors")
     parser.add_argument("--runtime-root")
     parser.add_argument("--container-runtime-root", default=DEFAULT_CONTAINER_RUNTIME_ROOT)
     subparsers = parser.add_subparsers(dest="command")
@@ -431,6 +434,9 @@ def _format_update_failure(exc: Exception) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    ui = Console(quiet=args.quiet)
+    if args.quiet and args.command is None:
+        parser.error("choose a command when using --quiet")
     args.runtime_root = detect_runtime_root(getattr(args, "runtime_root", None))
     if hasattr(args, "api_base_url"):
         args.api_base_url = detect_api_base_url(getattr(args, "api_base_url", None))
@@ -447,7 +453,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "install":
+        ui.log("start", "Installing release")
         print(json.dumps(install_release(args), indent=2))
+        ui.log("success", "Install command completed; inspect the returned health status")
         return 0
     if args.command == "status":
         payload = status(runtime_layout(args.runtime_root, args.container_runtime_root))
@@ -458,9 +466,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Runtime root: {payload['runtimeRoot']}")
             sizing_status = payload.get("sizingStatus") or {}
             if sizing_status.get("stale"):
-                print(f"WARNING: {sizing_status.get('message')}", file=sys.stderr)
+                ui.log("warn", sizing_status.get("message"))
                 for warning in sizing_status.get("warnings") or []:
-                    print(f"WARNING: {warning}", file=sys.stderr)
+                    ui.log("warn", warning)
             state = payload.get("state") or {}
             if state:
                 print(json.dumps(state, indent=2))
@@ -485,13 +493,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "check":
             print(json.dumps(check_for_update(args), indent=2))
         else:
-            human_output = bool(sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty() and not args.json)
+            human_output = bool(sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty() and not args.json and not args.quiet)
             setattr(args, "human_output", human_output)
             try:
+                ui.log("start", "Applying release update")
                 payload = apply_update(args)
             except Exception as exc:
                 if human_output:
-                    print(_format_update_failure(exc), file=sys.stderr)
+                    ui.log("error", _format_update_failure(exc))
                     return 1
                 raise
             if human_output:
