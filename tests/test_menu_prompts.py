@@ -4,10 +4,33 @@ import re
 from unittest.mock import patch
 
 from packetsafari_onprem import menu
-from packetsafari_onprem.prompts import PromptSession
+from packetsafari_onprem.prompts import PromptOption, PromptSession
 
 
 class MenuPromptTests(unittest.TestCase):
+    def test_descriptions_do_not_shift_menu_rows(self):
+        class Session(PromptSession):
+            size = (18, 64)
+            def __init__(self):
+                self.keys = iter(("down", "down", "\r"))
+                self.frames = []
+            def draw(self, lines):
+                self.frames.append([re.sub(r"\x1b\[[0-9;]*m", "", line) for line in lines])
+            def read_key(self, *_): return next(self.keys)
+        session = Session()
+        options = [PromptOption("health", "Health", "Inspect safely"),
+                   PromptOption("upgrade", "Upgrade", "Review release"),
+                   PromptOption("back", "Back")]
+        self.assertEqual(session.select("Operations", options), "back")
+        for frame in session.frames:
+            self.assertEqual(len(frame), len(session.frames[0]))
+            for option in options:
+                self.assertEqual(next(i for i, row in enumerate(frame) if row.endswith(option.label)),
+                                 next(i for i, row in enumerate(session.frames[0]) if row.endswith(option.label)))
+            self.assertEqual(frame[-1], session.frames[0][-1])
+        self.assertIn("Inspect safely", session.frames[0][-2])
+        self.assertEqual(session.frames[-1][-2].strip(), "│")
+
     def test_raw_input_keeps_enter_after_arrow_and_cancels_control_c(self):
         reader, writer = os.pipe()
         try:

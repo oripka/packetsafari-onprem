@@ -139,8 +139,9 @@ class PromptSession:
                 label = textwrap.shorten(option.label, width=max(10, width - 8), placeholder="…")
                 tone = "cyan" if active else option.tone or "dim"
                 lines.append(self.style(f"│  {marker} {label}", tone, *(('bold',) if active else ())))
-                if active and option.hint:
-                    lines.append(self.style(f"│      {textwrap.shorten(option.hint, width=max(10, width - 7), placeholder='…')}", "dim"))
+            # One fixed description row, even when the focused item has no hint.
+            hint = textwrap.shorten(options[selected].hint, width=max(10, width - 5), placeholder="…")
+            lines.append(self.style(f"│  {hint}", "dim"))
             if current_note:
                 lines += ["│", self.style("│  " + textwrap.shorten(current_note, width=max(10, width - 5), placeholder="…"), "yellow")]
             action = "Open" if navigation else "Select"
