@@ -15,15 +15,27 @@ def monthly_limit(value: str) -> int:
     return parsed
 
 
+def analysis_cpu_slots(value: str) -> int:
+    parsed = int(value)
+    if parsed != -1 and parsed < 1:
+        raise argparse.ArgumentTypeError("Use a positive number of heavy-analysis slots or -1 for unlimited.")
+    return parsed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--private-key", required=True)
     parser.add_argument("--customer-id", required=True)
+    parser.add_argument("--customer-name", default="")
     parser.add_argument("--customer-email", required=True)
     parser.add_argument("--license-id", required=True)
     parser.add_argument("--deployment-id", default="")
     parser.add_argument("--support-tier", default="standard")
     parser.add_argument("--max-users", type=int, default=25)
+    parser.add_argument("--max-host-cpus", type=analysis_cpu_slots, default=-1)
+    parser.add_argument("--max-host-ram-gib", type=analysis_cpu_slots, default=-1)
+    parser.add_argument("--max-analysis-cpu-slots", type=analysis_cpu_slots, default=-1,
+                        help="Concurrent heavy-analysis slots; -1 is unlimited. Does not restrict RAM.")
     parser.add_argument(
         "--max-analysis-runs-per-month",
         type=monthly_limit,
@@ -55,14 +67,18 @@ def main() -> int:
     expires_at = (issued_at + timedelta(days=args.days)).isoformat()
     deployment_id = str(args.deployment_id or args.license_id).strip()
     payload = {
-        "schema_version": 1,
+        "schema_version": 3 if args.max_host_cpus != -1 or args.max_host_ram_gib != -1 else (2 if args.max_analysis_cpu_slots != -1 else 1),
+        "max_host_cpus": args.max_host_cpus,
+        "max_host_ram_gib": args.max_host_ram_gib,
         "agent_enabled": bool(args.agent_enabled),
         "max_users": int(args.max_users),
+        "max_analysis_cpu_slots": args.max_analysis_cpu_slots,
         "max_analysis_runs_per_month": int(args.max_analysis_runs_per_month),
         "max_quick_questions_per_month": int(args.max_quick_questions_per_month),
         "max_prompt_coach_requests_per_month": int(args.max_prompt_coach_requests_per_month),
         "offline_expiry": expires_at,
         "customer_id": args.customer_id,
+        "customer_name": args.customer_name,
         "deployment_id": deployment_id,
         "support_tier": str(args.support_tier or "standard").strip().lower(),
         "customerId": args.customer_id,

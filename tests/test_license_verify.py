@@ -49,6 +49,22 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 class LicenseVerifyTests(unittest.TestCase):
+    def test_host_schema_and_claims(self):
+        payload = _valid_payload(schema_version=3, max_analysis_cpu_slots=-1, max_host_cpus=8, max_host_ram_gib=32)
+        self.assertEqual(self._run_verify(_token(payload)), 0)
+        for key in ('max_host_cpus', 'max_host_ram_gib'):
+            for invalid in (0, -2, None, '8', True, 2.5):
+                self._assert_exits_with(_token({**payload, key: invalid}), key)
+        self._assert_exits_with(_token({**payload, 'schema_version': 2}), 'schema_version 3')
+    def test_capacity_claim_validation_and_version_boundary(self):
+        for slots in (1, 4, -1):
+            self.assertEqual(self._run_verify(_token(_valid_payload(schema_version=2, max_analysis_cpu_slots=slots))), 0)
+        for slots in (0, -2, True, 2.5, "4", None, ""):
+            with self.subTest(slots=slots):
+                self._assert_exits_with(_token(_valid_payload(schema_version=2, max_analysis_cpu_slots=slots)), "max_analysis_cpu_slots")
+        self._assert_exits_with(_token(_valid_payload(schema_version=2)), "max_analysis_cpu_slots")
+        self._assert_exits_with(_token(_valid_payload(max_analysis_cpu_slots=4)), "schema_version 2")
+
     def setUp(self) -> None:
         import tempfile
 

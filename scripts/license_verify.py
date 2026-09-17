@@ -36,6 +36,13 @@ def _blank(value) -> bool:
 
 
 def _require_claims(payload: dict) -> None:
+    for key in ("max_host_cpus", "max_host_ram_gib"):
+        if key in payload and (type(payload[key]) is not int or (payload[key] != -1 and payload[key] < 1)):
+            raise SystemExit(f"Invalid {key}; use a positive integer or -1.")
+    if "max_analysis_cpu_slots" in payload:
+        slots = payload["max_analysis_cpu_slots"]
+        if type(slots) is not int or (slots != -1 and slots < 1):
+            raise SystemExit("License token has invalid max_analysis_cpu_slots; use a positive integer or -1.")
     missing = [names[0] for names in REQUIRED_LICENSE_CLAIMS if _blank(_claim(payload, *names))]
     if missing:
         raise SystemExit(f"License token is missing required claims: {', '.join(missing)}.")
@@ -56,8 +63,16 @@ def _require_claims(payload: dict) -> None:
         parsed_schema_version = int(schema_version)
     except (TypeError, ValueError):
         raise SystemExit("License token has invalid schema_version.")
-    if parsed_schema_version != LICENSE_CLAIM_SCHEMA_VERSION:
+    if parsed_schema_version not in {1, 2, 3}:
         raise SystemExit(f"Unsupported license schema_version: {parsed_schema_version}.")
+    if parsed_schema_version >= 2 and "max_analysis_cpu_slots" not in payload:
+        raise SystemExit("License token is missing required claims: max_analysis_cpu_slots.")
+    if parsed_schema_version == 3 and any(key not in payload for key in ("max_host_cpus", "max_host_ram_gib")):
+        raise SystemExit("Schema 3 requires max_host_cpus and max_host_ram_gib.")
+    if parsed_schema_version < 3 and any(payload.get(key, -1) != -1 for key in ("max_host_cpus", "max_host_ram_gib")):
+        raise SystemExit("Host limits require schema_version 3.")
+    if parsed_schema_version == 1 and payload.get("max_analysis_cpu_slots", -1) != -1:
+        raise SystemExit("Capacity-limited licenses require schema_version 2.")
 
     limit_claims = {"max_users": ("max_users", "maxUsers")}
     if has_canonical_ai_limits:

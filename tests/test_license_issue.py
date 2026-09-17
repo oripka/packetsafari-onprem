@@ -28,6 +28,29 @@ license_renew = _load_script("license_renew")
 
 
 class LicenseCreateTests(unittest.TestCase):
+    def test_host_limits_use_schema_three(self):
+        payload = self._issue('--max-analysis-runs-per-month', '-1', '--max-quick-questions-per-month', '-1',
+                              '--max-prompt-coach-requests-per-month', '-1', '--max-host-cpus', '8', '--max-host-ram-gib', '32')
+        self.assertEqual(payload['schema_version'], 3)
+        self.assertEqual(payload['max_host_cpus'], 8)
+        self.assertEqual(payload['max_host_ram_gib'], 32)
+
+    def test_capacity_claim_is_signed_and_requires_new_schema(self):
+        for slots in (1, 4, -1):
+            with self.subTest(slots=slots):
+                payload = self._issue("--max-analysis-runs-per-month", "-1",
+                                      "--max-quick-questions-per-month", "-1",
+                                      "--max-prompt-coach-requests-per-month", "-1",
+                                      "--max-analysis-cpu-slots", str(slots))
+                self.assertEqual(payload["max_analysis_cpu_slots"], slots)
+                self.assertEqual(payload["schema_version"], 1 if slots == -1 else 2)
+
+    def test_capacity_renewal_rejects_invalid_values(self):
+        import argparse
+        for slots in ("0", "-2"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                license_create.analysis_cpu_slots(slots)
+
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self._tmpdir.name)
@@ -73,6 +96,15 @@ class LicenseCreateTests(unittest.TestCase):
 
 
 class LicenseRenewTests(unittest.TestCase):
+    def test_renewal_preserves_host_limits(self):
+        cmd = self._renew_command({'max_host_cpus': 8, 'max_host_ram_gib': 32})
+        self.assertEqual(cmd[cmd.index('--max-host-cpus') + 1], '8')
+        self.assertEqual(cmd[cmd.index('--max-host-ram-gib') + 1], '32')
+    def test_preserves_capacity_limit_and_legacy_unlimited(self):
+        for payload, expected in (({}, "-1"), ({"max_analysis_cpu_slots": 4}, "4")):
+            cmd = self._renew_command(payload)
+            self.assertEqual(cmd[cmd.index("--max-analysis-cpu-slots") + 1], expected)
+
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self._tmpdir.name)

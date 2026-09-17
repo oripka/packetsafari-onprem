@@ -46,11 +46,15 @@ def main() -> int:
         str(Path(__file__).with_name("license_create.py")),
         "--private-key", args.private_key,
         "--customer-id", str(_claim(payload, "customer_id", "customerId", default="")),
+        "--customer-name", str(_claim(payload, "customer_name", default="")),
         "--customer-email", str(_claim(payload, "customer_email", "customerEmail", default="")),
         "--license-id", str(_claim(payload, "license_id", "licenseId", default="")),
         "--deployment-id", str(_claim(payload, "deployment_id", "deploymentId", "license_id", "licenseId", default="")),
         "--support-tier", str(_claim(payload, "support_tier", "supportTier", default="standard")),
         "--max-users", str(_claim(payload, "max_users", "maxUsers", default=25)),
+        "--max-analysis-cpu-slots", str(payload.get("max_analysis_cpu_slots", -1)),
+        "--max-host-cpus", str(payload.get("max_host_cpus", -1)),
+        "--max-host-ram-gib", str(payload.get("max_host_ram_gib", -1)),
         "--max-analysis-runs-per-month", str(
             _claim(
                 payload,

@@ -21,6 +21,60 @@ PacketSafari public key.
 | `deployment_id` | Stable deployment identifier. |
 | `support_tier` | Support tier, usually `standard`, `priority`, or `enterprise`. |
 
+## Analysis capacity
+
+`max_analysis_cpu_slots` licenses concurrent heavy-analysis slots, not physical
+CPU cores, total process CPU consumption, or RAM. A positive integer sets the
+deployment-wide ceiling; `-1` is unlimited. Existing schema-1 licenses without
+this claim remain unlimited. Zero, null, fractional and string values are invalid.
+
+Issue a restricted license with `--max-analysis-cpu-slots 4` in the creation
+command below. Restricted licenses use schema 2, which requires this claim;
+older installers and runtimes reject schema 2 instead of silently ignoring its
+capacity restriction. Upgrade both installer tooling and application before
+installing one. Renewal preserves the allowance; legacy renewal stays unlimited.
+
+The application locally verifies the signed license on admission, including
+offline expiry. Effective heavy-analysis capacity is the minimum of the signed
+allowance, hardware-derived capacity and administrator/team settings. Restoring
+automatic settings does not remove the signed ceiling. RAM stays adaptive.
+New work queues when licensed slots are occupied or the license is invalid;
+running analyses are not terminated. The administrator capacity panel shows
+the licensed and effective slots. Fast model work has separate provider limits;
+this claim is not a general model-concurrency license or a multi-node CPU quota.
+
+## Maximum host hardware
+
+`max_host_cpus` (logical CPUs) and `max_host_ram_gib` (whole GiB) are optional
+signed host ceilings. Each is a positive integer or `-1` for unlimited. Issue
+them using `--max-host-cpus 8 --max-host-ram-gib 32`. A finite host ceiling uses
+schema 3, which requires both host claims and `max_analysis_cpu_slots`. Older
+installers/apps reject schema 3. Upgrade tooling and application together.
+Legacy schemas 1 and 2 retain unlimited host size. Renewal preserves both limits.
+
+The backend compares the signed ceilings with the Linux host/VM's logical CPU
+count and `/proc/meminfo` total RAM, not the container CPU quota or memory limit.
+Equality is allowed. Exceeding either ceiling, or inability to measure a limited
+resource, invalidates runtime access. Login, MFA completion, token refresh, SSO,
+existing-session API access and new guarded analyses are blocked. Hardware and
+license files are read again on subsequent requests; replacement needs no license
+cache reset. Existing executing analyses are not forcibly killed.
+
+The pre-authentication `/license-required` page reports detected and licensed
+hardware. Its public status endpoint exposes only hardware limits, measurements
+and violations, with no customer identity, token, credentials or filesystem paths.
+Health, logout and existing loopback-only onboarding recovery endpoints remain
+available. A local administrator can verify a replacement token with the updated
+`scripts/license_verify.py`, then atomically replace the deployment's configured
+`state/license-token.json`, preserving its permissions and configured signing key.
+Click **Check again** after replacement. Container quota reductions do not make
+an oversized host eligible; use a qualifying host/VM or a broader license.
+
+CLI signature verification validates the claims, not the signing machine's host
+size. Runtime hardware enforcement is on the deployment's backend/worker host.
+This does not qualify heterogeneous multi-node deployments or physical hardware
+outside the Linux VM visible to the application.
+
 ## Optional upgrade claims
 
 | Claim | Description |
