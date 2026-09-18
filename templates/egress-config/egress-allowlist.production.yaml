@@ -41,6 +41,14 @@
     },
     {
       "classification": "feature-optional",
+      "host": "chatgpt.com",
+      "notes": "Subscription-backed Codex model discovery, usage checks and response transport.",
+      "owners": ["backend", "worker"],
+      "port": 443,
+      "purpose": "Core AI / auth"
+    },
+    {
+      "classification": "feature-optional",
       "dynamic_config": "admin_ai_settings.provider_base_url when provider_type!=openai",
       "notes": "Resolve and record the concrete host for any local or on-prem provider before enforcement.",
       "owners": [

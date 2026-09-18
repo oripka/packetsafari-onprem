@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
+import shutil
 
 import pytest
 
 from packetsafari_onprem import operations
 from packetsafari_onprem.envfile import parse_env_file
+
+
+def test_subscription_endpoint_survives_deployment_egress_sync(tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    source = Path(__file__).resolve().parents[1] / "templates" / "egress-config"
+    shutil.copytree(source, layout.configuration_dir, dirs_exist_ok=True)
+    operations._sync_intelligence_egress_config(layout)
+    proxy = layout.production_ironproxy_config_path.read_text()
+    for host in ("auth.openai.com", "chatgpt.com", "api.openai.com"):
+        assert f'"{host}"' in proxy
+    assert '"*"' not in proxy
 
 
 def _args(tmp_path, **overrides):
