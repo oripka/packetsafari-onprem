@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+from product_capabilities import license_products_error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -61,6 +63,8 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--output", required=True)
     parser.add_argument("--notes", default="")
+    parser.add_argument("--edition", choices=["onprem", "onprem_airgapped"])
+    parser.add_argument("--capabilities", help="Explicit JSON array of product capability IDs (schema 4)")
     args = parser.parse_args()
 
     issued_at = datetime.now(timezone.utc)
@@ -91,6 +95,14 @@ def main() -> int:
         "allowed_versions": [str(item).strip() for item in args.allowed_versions if str(item).strip()],
         "notes": args.notes,
     }
+    if args.edition is not None or args.capabilities is not None:
+        try:
+            payload.update(schema_version=4, edition=args.edition, capabilities=json.loads(args.capabilities or "null"))
+        except ValueError:
+            parser.error("Capabilities must be a JSON array")
+        error = license_products_error(payload)
+        if error:
+            parser.error(error)
     payload_bytes = canonical_bytes(payload)
     signature = openssl_sign(Path(args.private_key), payload_bytes)
     token = {

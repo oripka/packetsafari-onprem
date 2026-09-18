@@ -28,6 +28,14 @@ license_renew = _load_script("license_renew")
 
 
 class LicenseCreateTests(unittest.TestCase):
+    def test_explicit_product_license_requires_schema_four(self):
+        payload = self._issue('--max-analysis-runs-per-month', '-1', '--max-quick-questions-per-month', '-1',
+                              '--max-prompt-coach-requests-per-month', '-1', '--edition', 'onprem_airgapped',
+                              '--capabilities', '["capture.remote", "capture.decrypt"]')
+        self.assertEqual(payload['schema_version'], 4)
+        self.assertEqual(payload['edition'], 'onprem_airgapped')
+        self.assertEqual(payload['capabilities'], ['capture.remote', 'capture.decrypt'])
+
     def test_host_limits_use_schema_three(self):
         payload = self._issue('--max-analysis-runs-per-month', '-1', '--max-quick-questions-per-month', '-1',
                               '--max-prompt-coach-requests-per-month', '-1', '--max-host-cpus', '8', '--max-host-ram-gib', '32')
@@ -96,6 +104,11 @@ class LicenseCreateTests(unittest.TestCase):
 
 
 class LicenseRenewTests(unittest.TestCase):
+    def test_renewal_preserves_explicit_empty_rights_and_edition(self):
+        cmd = self._renew_command({'schema_version': 4, 'edition': 'onprem_airgapped', 'capabilities': []})
+        self.assertEqual(cmd[cmd.index('--capabilities') + 1], '[]')
+        self.assertEqual(cmd[cmd.index('--edition') + 1], 'onprem_airgapped')
+
     def test_renewal_preserves_host_limits(self):
         cmd = self._renew_command({'max_host_cpus': 8, 'max_host_ram_gib': 32})
         self.assertEqual(cmd[cmd.index('--max-host-cpus') + 1], '8')

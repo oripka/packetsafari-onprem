@@ -86,6 +86,12 @@ def main() -> int:
         "--output", args.output,
         "--notes", str(_claim(payload, "notes", default="")),
     ]
+    if "capabilities" in payload or "edition" in payload:
+        from product_capabilities import license_products_error
+        error = license_products_error(payload)
+        if error:
+            raise SystemExit(error)
+        cmd.extend(["--edition", payload["edition"], "--capabilities", json.dumps(payload["capabilities"])])
     for allowed_version in _claim(payload, "allowed_versions", "allowedVersions", default=[]):
         normalized = str(allowed_version).strip()
         if normalized:

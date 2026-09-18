@@ -124,3 +124,34 @@ python3 scripts/license_verify.py \
 ```
 
 The private signing key must stay in internal release tooling only. It is never installed on a customer host.
+
+
+## Product licenses (schema 4)
+
+Source support added 2026-09-18; tests have not been run at the user's request.
+Schema 1–3 issuance and renewal remain available. Explicit product selection uses
+`--edition onprem` or `--edition onprem_airgapped` together with `--capabilities`
+containing a JSON array. Stable IDs are `analysis.rca`, `analysis.security`,
+`capture.remote`, `capture.decrypt`, and `ndr.monitoring`. The product is
+**PacketSafari Capture**, with optional Decryption. Decryption requires Capture.
+An empty array means no products, not unlimited. Unknown/duplicate IDs and
+product claims attached to legacy schemas are rejected.
+
+Schema 4 still includes existing Agent, user, monthly, CPU-slot and host claims.
+Renewal preserves the explicit selection and edition. Older installers and app
+versions reject schema 4: update both before issuing these customer licenses.
+The browser generator in the app uses the same claims and defaults to legacy
+issuance until Explicit product license is selected.
+
+Air-gapped rights are distinct from connectivity configuration and readiness.
+The installer rejects an airgapped configuration for a schema-4 standard on-prem
+license; legacy connectivity semantics remain unchanged. Local model/content,
+egress and offline dependency checks remain necessary. No test, installation,
+production execution or actual license signing was performed for this change.
+
+The standalone `scripts/product_capabilities.py` validator mirrors the app's
+`backend/packetsafari/common/product_capabilities.py`. Keep IDs and schema rules
+aligned when extending either issuer; run app, browser signer and issuer/verifier
+regressions before release. The app implementation record owns policy precedence,
+operation gates and the distinction between SaaS database entitlements and signed
+on-prem installation rights.

@@ -3852,6 +3852,11 @@ def write_runtime_env(
     connectivity_policy = str(connectivity_policy or "connected").strip().lower()
     if connectivity_policy not in CONNECTIVITY_POLICIES:
         raise RuntimeError(f"Unsupported connectivity policy: {connectivity_policy}")
+    if connectivity_policy == "airgapped" and layout.license_token_path.exists():
+        verify_license(layout.license_token_path, layout.license_public_key_path)
+        claims = _license_payload(layout.license_token_path)
+        if claims.get("schema_version") == 4 and claims.get("edition") != "onprem_airgapped":
+            raise RuntimeError("This product license does not include the Air-Gapped edition.")
     onboarding_value = quote_env_value("true" if onboarding_mode else "false")
     postgres_db = "packetsafari"
     postgres_user = "packetsafari"
