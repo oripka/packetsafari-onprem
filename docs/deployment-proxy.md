@@ -1,123 +1,115 @@
-# Local blue/green API deployment proxy
+# Rolling API updates
 
-The opt-in `deployment-proxy` command uses a digest-pinned NGINX container and
-ordinary Docker Compose. It is locally tested development functionality, not
-part of `packetsafari-ops update`, install, or the production Compose template.
-Do not put production behind it and then run the existing stop-first updater.
+`deployment_proxy.py` controls a digest-pinned NGINX proxy. `rolling_update.py`
+adds a two-slot Compose transaction used by normal dev commands and, after
+explicit activation, the signed host updater. This is API-only rolling support;
+worker, schema, gateway and shared-service replacements require maintenance.
 
-## Local development
+## Development
 
-Run from the sibling app repository with its development backend already running:
-
-```bash
-python3 scripts/dev_deployment_proxy.py up \
-  --directory /Users/otr/packetsafari-data/runs/deployment-proxy/my-dev-cutover
-python3 scripts/dev_deployment_proxy.py switch --slot green \
-  --directory /Users/otr/packetsafari-data/runs/deployment-proxy/my-dev-cutover
-python3 scripts/dev_deployment_proxy.py switch --slot blue \
-  --directory /Users/otr/packetsafari-data/runs/deployment-proxy/my-dev-cutover
-```
-
-The new endpoint is `http://127.0.0.1:18080`. Existing port 8080 and the current
-frontend remain unchanged. Normally one slot runs; switching starts the other
-and stops the previous slot only after the proxy workers finish draining.
-`status` shows the containers and receipt; `down` removes only this project's
-containers, leaving shared storage, caches, and retained evidence in place.
-
-Both local slots use the existing backend's immutable image ID and source
-mounts, with one uWSGI process each. They share its network namespace on ports
-18081/18082, preserving the current egress identity instead of adding an
-uncontrolled backend IP. They share PostgreSQL, Redis, storage, and the existing
-stream gateway. This does not copy captures/databases or run migrations or AI.
-The original backend must remain running; rebuilding it requires recreating the
-local proxy experiment in a new directory. This dev namespace arrangement is
-not the proposed production topology.
-
-The generated Compose file contains the existing private runtime environment.
-It is created with mode 0600 in a private directory outside Git. Do not attach
-or publish that file. Receipts contain image/container identities and timing,
-not environment values. Logs may contain request paths; retain them privately.
-
-## Cutover contract
-
-1. Check that the target is running and shares exactly one network with the proxy.
-2. Probe `/api/v2/health` from the proxy network until it returns exactly HTTP 200.
-   Redirects and errors do not qualify. The caller remains responsible for
-   application-specific readiness beyond this HTTP contract.
-3. Validate the candidate NGINX configuration before changing the active file.
-4. Atomically replace the active file, gracefully reload, and read back the new
-   generation through the proxy's loopback-only control listener.
-5. Persist the target container/image, timestamp, configuration hash, and old
-   worker PIDs before waiting for drain. Configuration drift or conflicting
-   operations fail closed. A subsequent cutover is blocked while old workers live.
-6. Return `drained` or `draining`. A drain wait expiring does **not** kill the old
-   worker or backend. SSE, WebSocket, and upload requests may need longer than a
-   normal request. The caller must retain the old slot while draining.
-
-There is no forced worker-shutdown deadline, no upload/response buffering, and
-no automatic retry that could replay an application write. Inactivity timeouts
-are 3600 seconds; this does not promise indefinite survival for idle connections.
-The cutover primitive never stops containers. Rollback is a readiness-checked
-switch to the retained compatible backend. Post-cutover application failures do
-not trigger automatic rollback. Proxy restarts recover the on-disk routing but
-interrupt current connections; single-host/proxy failure is not high availability.
-
-For an explicitly prepared proxy container mounting the initialized directory
-at `/etc/packetsafari-proxy`, the lower-level entry points are:
+From the app repository:
 
 ```bash
-packetsafari-ops deployment-proxy init --state-dir /path/to/private/proxy
-packetsafari-ops deployment-proxy switch --state-dir /path/to/private/proxy \
-  --proxy-container example-proxy --target-container example-green \
-  --target-port 80 --ready-timeout 120 --drain-timeout 120
+./packetsafari dev rolling-enable   # one-time port transfer; briefly interrupts API
+./packetsafari dev update           # reload mounted source through the other slot
+./packetsafari dev update --image backend-dev:latest
+./packetsafari dev rolling-status
+./packetsafari dev rolling-recover  # roll back an unfinished transaction
 ```
 
-Initialization creates configuration only. The app dev helper creates and starts
-the proxy container with the pinned image from `deployment_proxy.py`.
-A failed/uncertain reload leaves both backends running. If a process is interrupted
-between config activation and receipt persistence, generation/hash mismatch
-blocks another operation; inspect live generation, config and containers before
-reconciling. Do not simply delete the receipt to silence the disagreement.
+The proxy owns the existing `127.0.0.1:8080`. Both slots use the real backend
+container entrypoint, NGINX and uWSGI. The frontend's normal localhost backend
+address therefore stays unchanged. Worker, gateway, database and Sharkd are not
+recreated. `dev restart backend` uses this transaction once enabled; an unqualified
+`dev restart` still explicitly restarts the worker too.
+
+For dependency/image changes, build without recreating the stack, then update:
+
+```bash
+PACKETSAFARI_DEV_BUILD_ONLY=1 ./packetsafari dev rebuild
+./packetsafari dev update --image backend-dev:latest
+```
+
+A full legacy dev rebuild is blocked while rolling mode is enabled. Do not run
+the original Compose file directly against this running project: it would bypass
+the proxy topology. The generated runtime is private, mode 0600, under
+`$PACKETSAFARI_DATA_ROOT/runs/deployment-proxy/dev-runtime`; it contains resolved
+configuration and secrets and must not be committed or attached to reports.
+Dev source mounts are shared between slots, so these trials prove deployment
+mechanics, not immutable production application-version isolation.
+
+## Transaction
+
+1. Keep the serving slot running while the inactive image starts. Disable automatic
+   schema migration and database initialization in both API slots.
+2. Compare Alembic and SQL model inputs, then require a direct HTTP 200 from the
+   candidate health endpoint. Redirects and failures do not qualify.
+3. Validate NGINX configuration, persist pending reload state, reload gracefully,
+   and read back its generation through the loopback control listener.
+4. Retain both slots until old NGINX workers drain. A timeout keeps the transaction
+   pending; it never forcibly terminates an upload or stream. Another replacement
+   is blocked. Recovery can return to the exact retained container instance.
+5. Run post-switch health/doctor checks before promoting installed release metadata.
+   Failed checks roll traffic back. Stop the old slot only after successful commit.
+
+A journal tracks preparation, switch, metadata commit and cleanup. A process death
+between NGINX reload and receipt persistence is reconciled from pending state.
+Interrupted metadata commits on a host recover to the old release using the saved
+metadata snapshot; no database restoration is needed because no migrations ran.
+Cleanup failures after commit retain the new release and are retryable via recovery.
+Do not delete state files to bypass drift, drain or recovery checks.
+
+There is no automatic HTTP retry, request/response buffering or forced worker
+shutdown deadline. Idle stream timeouts are 3600 seconds. Proxy restart preserves
+routing but interrupts live connections. This single-host setup is not HA.
+
+## Host activation and release contract
+
+Host activation is opt-in and has not been qualified on production in this work.
+It requires the signed installed manifest to include `images.deployment-proxy`
+with a registry digest and the installed firewall policy to govern `.26` (proxy)
+and `.27` (green backend). The release builder now mirrors the pinned proxy image.
+The existing origin port is transferred once; subsequent updates keep it stable.
+
+```bash
+packetsafari-ops deployment-proxy enable --profile saas --manifest /path/to/signed-installed-manifest.json
+# Subsequent updates use the existing packetsafari-ops update command and its backup policy.
+packetsafari-ops deployment-proxy recover --profile saas
+```
+
+The normal signature, profile, entitlement, authorization and backup gates still
+run before the rolling branch. A signed target must declare:
+
+```json
+{"rollingUpdate":{"compatibleFrom":["exact-installed-version"]}}
+```
+
+Only the backend image may change, and it must be digest-pinned. The gateway image
+must be explicitly retained when legacy manifests inherited it from backend.
+Changes to other images, deployment profiles, required environment, schema inputs,
+or frozen runtime configuration are rejected. Inline backups and skipped health
+checks are rejected. Legacy stop-first updates and legacy rollback are blocked
+once activated; there is no silent maintenance fallback.
+
+The normal full-release builder does not yet produce API-only compatibility
+manifests. Do not enable this on a production host until that release path, a
+maintenance transition, CloudFront/TLS/client-address forwarding, resource headroom,
+authenticated uploads and real continuing investigations have been qualified on
+a representative host. Local timings are not a production downtime guarantee.
+Frontend/CDN publication and worker draining remain separate work.
 
 ## Verification
 
-Deterministic checks, from this repository:
-
 ```bash
-python3 -m unittest discover -s tests -p test_deployment_proxy.py -v
-python3 scripts/test_deployment_proxy_local.py
+python3 -m pytest tests/test_rolling_update.py tests/test_deployment_proxy.py tests/test_render_compose.py tests/test_update_channel.py
+# From the app workspace, where local test ports are allowed:
+python3 ../packetsafari-onprem/scripts/test_deployment_proxy_local.py
+python3 scripts/test_dev_rolling_update.py
 ```
 
-The Docker test creates a unique project and records evidence beneath
-`$PACKETSAFARI_DATA_ROOT/runs/deployment-proxy/<run>/`. It tests a refused unhealthy
-candidate, successful cutover, a byte-verified slow upload, complete SSE and
-WebSocket sequences across cutover, refusal to reuse a draining slot, rollback,
-and proxy restart recovery. Availability polling excludes the deliberate proxy
-restart. It removes only its own fixture containers/network. If a local execution
-policy restricts loopback ports, run it from the app workspace where local dev
-ports are allowed; do not disable security controls.
-
-From the app repository, with the local helper initialized:
-
-```bash
-python3 scripts/test_dev_deployment_proxy.py \
-  --directory /Users/otr/packetsafari-data/runs/deployment-proxy/my-dev-cutover
-```
-
-This tests cold starts and cutover using the real development API, stops the old
-slot to prove traffic moved, switches back, and retains availability samples.
-It leaves blue serving through the proxy and green stopped. It does not create
-an investigation or establish signed-release compatibility: both slots use the
-same development image/source mounts. Synthetic transport coverage does not
-qualify authenticated production uploads or ongoing Agent investigations.
-
-## Production integration boundary
-
-Before enabling the normal host update transaction, integrate signed target
-selection and proxy image delivery with the manifest, choose an egress-governed
-slot topology, validate trusted ingress/TLS headers, and implement recovery of
-interrupted update transactions. First installation requires moving the existing
-public port; that is separate from subsequent graceful cutovers. Database changes
-must permit version overlap, and worker/stream-gateway lifecycle must preserve
-active investigations. Worker draining, incompatible migrations, CloudFront
-publication, and production timing are not covered by this local API feature.
+The transport fixture checks complete SSE/WebSocket sequences, a byte-verified
+slow upload, readiness rejection, drain protection, retained-instance rollback
+and proxy restart. The real dev test checks alternating cold updates, post-switch
+failure rollback, interrupted staging/reload recovery and unchanged shared-service
+start times. It samples the normal API port and retains receipts and availability
+records under the data root. It does not consume models or deploy production.

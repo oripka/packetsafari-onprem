@@ -142,10 +142,14 @@ def main():
             assert result['status'] == 'draining', result
             assert request() == 'green'
             try:
-                deploy('blue')
+                deploy('green')
                 raise AssertionError('Reused a draining slot')
             except ValueError as exc:
                 assert 'still draining' in str(exc)
+            # Returning to the exact retained instance is safe even while its
+            # existing streams drain; replacing that instance remains forbidden.
+            assert deploy('blue', drain_timeout=0)['status'] == 'draining'
+            assert request() == 'blue'
             events.extend({'case': future.result(), 'status': 'passed'} for future in futures)
         # Existing keep-alive worker shutdown can complete just after the final byte.
         time.sleep(.3)

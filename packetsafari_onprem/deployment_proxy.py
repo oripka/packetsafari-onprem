@@ -97,6 +97,28 @@ def generation(proxy: str) -> str:
     return docker("exec", proxy, "wget", "-qO-", "-T", "2", "http://127.0.0.1:8099/generation").stdout.strip()
 
 
+def reconcile(directory: Path, proxy: str) -> None:
+    """Caller holds proxy lock. Resolve a process death around NGINX reload."""
+    pending_path = directory / 'pending.json'
+    if not pending_path.exists():
+        return
+    pending = json.loads(pending_path.read_text())
+    live = generation(proxy)
+    if live not in (pending['next']['generation'], pending['previous']['generation']):
+        raise ValueError('Interrupted reload has an unknown live generation; keep both backends running')
+    # Complete the already-validated reload. A prior SIGHUP may still be queued,
+    # so observing the old generation once is not proof that reload was aborted.
+    atomic_write(directory / 'nginx.conf', pending['nextConfig'])
+    docker('exec', proxy, 'nginx', '-s', 'reload', '-c', '/etc/packetsafari-proxy/nginx.conf')
+    deadline = time.monotonic() + 10
+    while generation(proxy) != pending['next']['generation']:
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Interrupted reload did not settle; retain both backends')
+        time.sleep(.05)
+    atomic_write(directory / 'state.json', json.dumps(pending['next'], indent=2))
+    pending_path.unlink()
+
+
 def address(proxy_info: dict, target_info: dict, port: int) -> str:
     if not target_info["State"]["Running"] or not 1 <= port <= 65535:
         raise ValueError("Target must be running and port must be valid")
@@ -124,6 +146,7 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
     directory = directory.resolve()
     with (directory / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        reconcile(directory, proxy)
         state = json.loads((directory / "state.json").read_text())
         config_hash = hashlib.sha256((directory / "nginx.conf").read_bytes()).hexdigest()
         if state.get("configSha256") != config_hash:
@@ -135,7 +158,10 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
             raise ValueError("Proxy does not mount this configuration directory")
         if generation(proxy) != state["generation"]:
             raise ValueError("Live proxy and receipt disagree; inspect before another cutover")
-        if set(state.get("retiringWorkers", [])) & workers(proxy):
+        pending = set(state.get("retiringWorkers", [])) & workers(proxy)
+        returning_to_retained = (target_info['Id'] == state.get('previousContainerId') and
+                                 target_info['State']['StartedAt'] == state.get('previousStartedAt'))
+        if pending and not returning_to_retained:
             raise ValueError("Previous backend still draining; keep both slots running")
         endpoint = address(proxy_info, target_info, port)
         started = time.monotonic()
@@ -160,6 +186,15 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
         candidate = directory / "candidate.conf"
         atomic_write(candidate, configuration(endpoint, next_generation))
         docker("exec", proxy, "nginx", "-t", "-c", "/etc/packetsafari-proxy/candidate.conf")
+        next_state = {"generation": next_generation, "target": target, "endpoint": endpoint,
+                      "containerId": target_info['Id'], "imageId": target_info['Image'],
+                      "targetStartedAt": target_info['State']['StartedAt'],
+                      "previousContainerId": state.get('containerId'),
+                      "previousStartedAt": state.get('targetStartedAt'),
+                      "previousTarget": state.get('target'), "retiringWorkers": sorted(old_workers),
+                      "configSha256": hashlib.sha256(candidate.read_bytes()).hexdigest()}
+        atomic_write(directory / 'pending.json', json.dumps({'previous': state, 'next': next_state,
+                     'previousConfig': old_config, 'nextConfig': candidate.read_text()}))
         atomic_write(directory / "nginx.conf", candidate.read_text())
         try:
             docker("exec", proxy, "nginx", "-s", "reload", "-c", "/etc/packetsafari-proxy/nginx.conf")
@@ -177,10 +212,14 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
                  "switchedAt": datetime.now(timezone.utc).isoformat(),
                  "configSha256": hashlib.sha256((directory / "nginx.conf").read_bytes()).hexdigest(),
                  "containerId": target_info["Id"], "imageId": target_info["Image"],
+                 "targetStartedAt": target_info['State']['StartedAt'],
+                 "previousContainerId": state.get('containerId'),
+                 "previousStartedAt": state.get('targetStartedAt'),
                  "previousTarget": state.get("target"), "retiringWorkers": sorted(old_workers),
                  "readinessAndSwitchSeconds": round(time.monotonic() - started, 3)}
         # Persist before waiting: an interrupted CLI must remember pending drain.
         atomic_write(directory / "state.json", json.dumps(state, indent=2))
+        (directory / 'pending.json').unlink()
         until = time.monotonic() + drain_timeout
         while old_workers & workers(proxy) and time.monotonic() < until:
             time.sleep(0.1)

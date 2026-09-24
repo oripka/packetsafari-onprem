@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     values = {
         "frontend_image": image_ref(images, "frontend"),
         "backend_image": backend_image,
+        "agent_stream_gateway_image": image_ref(images, "agent-stream-gateway", backend_image),
         "worker_image": image_ref(images, "worker", backend_image),
         "agent_cli_runner_image": agent_cli_image,
         "agent_cli_runner_dependency": (

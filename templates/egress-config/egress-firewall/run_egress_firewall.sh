@@ -11,10 +11,12 @@ SHUTTING_DOWN=0
 
 MONITORED=(
   "backend:172.20.0.20"
+  "backend-green:172.20.0.27"
   "worker:172.20.0.21"
 )
 
 NO_EGRESS=(
+  "deployment-proxy:172.20.0.26"
   "egress-dns:172.20.0.3"
   "postgres:172.20.0.10"
   "redis:172.20.0.11"

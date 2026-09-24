@@ -113,8 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     proxy = subparsers.add_parser("deployment-proxy", help="Opt-in backend cutover; does not run an upgrade.")
-    proxy.add_argument("action", choices=["init", "switch"])
-    proxy.add_argument("--state-dir", type=Path, required=True)
+    proxy.add_argument("action", choices=["init", "switch", "enable", "recover"])
+    proxy.add_argument("--state-dir", type=Path)
+    proxy.add_argument("--profile", choices=["saas", "onprem"], default="onprem")
+    proxy.add_argument("--manifest", help="Signed installed manifest required for first proxy activation")
+    proxy.add_argument("--manifest-signature")
     proxy.add_argument("--proxy-container")
     proxy.add_argument("--target-container")
     proxy.add_argument("--target-port", type=int, default=80)
@@ -465,6 +468,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "deployment-proxy":
         from packetsafari_onprem.deployment_proxy import initialize, switch
+        if args.action in {"enable", "recover"}:
+            from packetsafari_onprem.rolling_update import manage_host
+            print(json.dumps(manage_host(args), indent=2))
+            return 0
+        if not args.state_dir:
+            parser.error("init/switch requires --state-dir")
         if args.action == "init":
             initialize(args.state_dir)
             print(json.dumps({"status": "initialized", "directory": str(args.state_dir)}))

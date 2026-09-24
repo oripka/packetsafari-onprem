@@ -125,7 +125,7 @@ services:
       - 172.20.0.3
 
   agent-stream-gateway:
-    image: "{{ backend_image }}"
+    image: "{{ agent_stream_gateway_image }}"
     container_name: packetsafari-agent-stream-gateway
     user: backendu
     init: true

@@ -610,7 +610,7 @@ def report_backup_storage_preflight(layout: RuntimeLayout, *, backup_mode: str) 
     postgres = _postgres_env(layout)
     try:
         storage = subprocess.run(
-            [*_compose_base_command(layout), "exec", "-T", "backend", "du", "-sb",
+            [*_compose_base_command(layout), "exec", "-T", active_backend_service(layout), "du", "-sb",
              "--exclude=/storage/onprem", "/storage"],
             check=True, capture_output=True, text=True, timeout=20,
         )
@@ -1936,7 +1936,15 @@ def _apply_profile_egress_overlay(layout: RuntimeLayout, source_root: Path, *, p
     _write_json(allowlist_path, allowlist)
 
 
+def active_backend_service(layout: RuntimeLayout) -> str:
+    from .rolling_update import active_service
+    return active_service(layout)
+
+
 def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> dict[str, bool]:
+    from .rolling_update import enabled
+    if enabled(layout):
+        raise ValueError('Rolling runtime enabled; refuse to overwrite its active Compose topology')
     root = source_root or layout.tooling_root
     ironproxy_config_before = (
         layout.production_ironproxy_config_path.read_bytes()
@@ -3000,7 +3008,7 @@ def _verify_content_pack(pack_dir: Path, public_key: Path) -> dict:
 
 
 def _content_backend_command(layout: RuntimeLayout, args: list[str]) -> dict:
-    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-m", "packetsafari.common.security_content_channel", *args]
+    command = [*_compose_base_command(layout), "exec", "-T", active_backend_service(layout), "python3", "-m", "packetsafari.common.security_content_channel", *args]
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=300)
     output = result.stdout.strip()
     try:
@@ -3045,15 +3053,15 @@ def operate_security_content(args) -> dict:
         container_root = f"/tmp/packetsafari-content-{secrets.token_hex(8)}"
         compose = _compose_base_command(layout)
         try:
-            subprocess.run([*compose, "exec", "-T", "backend", "mkdir", "-p", container_root], check=True)
-            subprocess.run([*compose, "cp", f"{pack_dir}/.", f"backend:{container_root}/pack"], check=True)
-            subprocess.run([*compose, "cp", str(public_key), f"backend:{container_root}/release-public.pem"], check=True)
+            subprocess.run([*compose, "exec", "-T", active_backend_service(layout), "mkdir", "-p", container_root], check=True)
+            subprocess.run([*compose, "cp", f"{pack_dir}/.", f"{active_backend_service(layout)}:{container_root}/pack"], check=True)
+            subprocess.run([*compose, "cp", str(public_key), f"{active_backend_service(layout)}:{container_root}/release-public.pem"], check=True)
             command_args = ["apply", "--pack-dir", f"{container_root}/pack", "--public-key", f"{container_root}/release-public.pem"]
             if bool(getattr(args, "allow_downgrade", False)):
                 command_args.append("--allow-downgrade")
             activated = _content_backend_command(layout, command_args)
         finally:
-            subprocess.run([*compose, "exec", "-T", "backend", "rm", "-rf", container_root], check=False)
+            subprocess.run([*compose, "exec", "-T", active_backend_service(layout), "rm", "-rf", container_root], check=False)
         return {"verified": verified, "activated": activated}
 
 
@@ -3840,7 +3848,7 @@ def docker_compose_restart(layout: RuntimeLayout, *, services: list[str] | None 
 
 
 def docker_exec_backend(layout: RuntimeLayout, args: list[str]) -> None:
-    subprocess.run(["docker", "exec", "-i", "packetsafari-backend", *args], check=True)
+    subprocess.run([*_compose_base_command(layout), "exec", "-T", active_backend_service(layout), *args], check=True)
 
 
 def write_runtime_env(
@@ -5637,7 +5645,7 @@ except Exception as exc:
     print(json.dumps({"ok": False, "error": str(exc)}))
     sys.exit(1)
 """.strip()
-    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-c", probe]
+    command = [*_compose_base_command(layout), "exec", "-T", active_backend_service(layout), "python3", "-c", probe]
     try:
         result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -5711,7 +5719,7 @@ except Exception as exc:
     print(json.dumps({"ok": False, "error": str(exc)}))
     sys.exit(1)
 """.strip()
-    command = [*_compose_base_command(layout), "exec", "-T", "backend", "python3", "-c", probe]
+    command = [*_compose_base_command(layout), "exec", "-T", active_backend_service(layout), "python3", "-c", probe]
     try:
         result = subprocess.run(command, check=False, text=True, capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -6081,6 +6089,13 @@ def upgrade_release(args) -> dict:
                     max_age_minutes=int(getattr(args, "max_backup_age_minutes", 180) or 180),
                 )
 
+            from . import rolling_update
+            if rolling_update.enabled(layout):
+                import sys as _sys
+                return rolling_update.upgrade(layout, args, manifest, source=source,
+                    backup_mode=backup_mode, backup_proof=external_backup_proof,
+                    ops=_sys.modules[__name__])
+
             backup_message = {
                 "inline": "creating pre-upgrade backup",
                 "require-recent": "recording verified external backup proof",
@@ -6236,6 +6251,9 @@ def rollback_release(args) -> dict:
     profile = deployment_profile(args)
     if not supports_upgrade_host_actions(layout, profile=profile):
         raise RuntimeError(f"Rollback profile {profile!r} is only supported for managed runtime roots like /opt/packetsafari.")
+    from .rolling_update import enabled
+    if enabled(layout):
+        raise RuntimeError("Rolling deployments use a signed compatible rollback release; use deployment-proxy recover for an unfinished update")
     with upgrade_lock(layout):
         snapshot_dir = latest_snapshot_dir(layout)
         if snapshot_dir is not None:
