@@ -21,10 +21,9 @@ transforms:
         - "chatgpt.com"
         - "crt.sh"
         - "email.eu-central-1.amazonaws.com"
-        - "oidc.external.test"
+        - "eu.openrouter.ai"
         - "openrouter.ai"
         - "rules.emergingthreats.net"
-        - "saml.external.test"
         - "sandbox-api.paddle.com"
         - "sslbl.abuse.ch"
         - "ti.stamus-networks.io"
@@ -53,6 +52,7 @@ transforms:
           match_body: false
           rules:
             - host: "openrouter.ai"
+            - host: "eu.openrouter.ai"
         - source:
             type: "env"
             var: PACKETSAFARI_PADDLE_API_KEY

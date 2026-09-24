@@ -1952,11 +1952,11 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
         else None
     )
     config_source = root / "templates" / "egress-config"
-    preserved_intelligence_registry = (
-        _read_json(layout.intelligence_egress_registry_path, {"approved_hosts": [], "version": 1})
-        if layout.intelligence_egress_registry_path.exists()
-        else None
-    )
+    preserved_registries = {}
+    for purpose in ("intelligence", "ai", "identity"):
+        path = layout.configuration_dir / f"approved-{purpose}-egress-hosts.json"
+        if path.exists():
+            preserved_registries[path] = _load_endpoint_egress_registry(layout, purpose)
     previous_allowlist = _read_json(layout.production_egress_allowlist_path, {})
     preserved_monitor_mode = (
         previous_allowlist.get("monitor_mode")
@@ -1965,8 +1965,8 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
     )
     if config_source.exists():
         shutil.copytree(config_source, layout.configuration_dir, dirs_exist_ok=True)
-    if isinstance(preserved_intelligence_registry, dict):
-        _write_json(layout.intelligence_egress_registry_path, preserved_intelligence_registry)
+    for path, registry in preserved_registries.items():
+        _write_json(path, registry)
     if profile == "onprem" and preserved_monitor_mode is not None:
         installed_allowlist = _read_json(layout.production_egress_allowlist_path, {})
         if not isinstance(installed_allowlist, dict):
@@ -1974,7 +1974,8 @@ def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: P
         installed_allowlist["monitor_mode"] = preserved_monitor_mode
         _write_json(layout.production_egress_allowlist_path, installed_allowlist)
     _apply_profile_egress_overlay(layout, root, profile=profile)
-    _sync_intelligence_egress_config(layout)
+    for purpose in ("intelligence", "ai", "identity"):
+        _sync_intelligence_egress_config(layout, purpose=purpose)
     _run_script(
         root,
         "render_compose.py",

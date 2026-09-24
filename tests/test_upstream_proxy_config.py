@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from pathlib import Path
 import shutil
+import json
 
 import pytest
 
@@ -20,6 +21,30 @@ def test_subscription_endpoint_survives_deployment_egress_sync(tmp_path):
     for host in ("auth.openai.com", "chatgpt.com", "api.openai.com"):
         assert f'"{host}"' in proxy
     assert '"*"' not in proxy
+
+
+def test_openrouter_eu_key_mapping_survives_endpoint_sync(tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    source = Path(__file__).resolve().parents[1] / "templates" / "egress-config"
+    shutil.copytree(source, layout.configuration_dir, dirs_exist_ok=True)
+    for purpose in ("ai", "identity", "intelligence"):
+        operations._sync_intelligence_egress_config(layout, purpose=purpose)
+    destinations = json.loads(layout.production_egress_allowlist_path.read_text())["destinations"]
+    eu = [entry for entry in destinations if entry.get("host") == "eu.openrouter.ai"]
+    assert len(eu) == 1
+    assert eu[0]["port"] == 443
+    assert eu[0]["classification"] == "feature-optional"
+    proxy = layout.production_ironproxy_config_path.read_text()
+    assert '        - "eu.openrouter.ai"' in proxy
+    mapping = proxy.split("var: OPENROUTER_API_KEY", 1)[1].split("        - source:", 1)[0]
+    assert 'proxy_value: "ps_proxy_openrouter_api_key"' in mapping
+    assert 'host: "openrouter.ai"' in mapping
+    assert 'host: "eu.openrouter.ai"' in mapping
+    assert mapping.count("- host:") == 2
+    assert '"*"' not in mapping
+    # Network support must not manufacture application approval or customer evidence.
+    assert json.loads((source / "approved-ai-egress-hosts.json").read_text())["approved_hosts"] == []
 
 
 def _args(tmp_path, **overrides):
@@ -358,3 +383,36 @@ def test_render_compose_preserves_explicit_unrestricted_mode(tmp_path, monkeypat
 
     assert operations._read_json(layout.production_egress_allowlist_path)["monitor_mode"] is True
     assert "      warn: true\n      domains:\n" in layout.production_ironproxy_config_path.read_text()
+
+
+def test_fresh_install_and_upgrade_render_preserve_customer_egress(tmp_path, monkeypatch):
+    from scripts import render_compose
+    root = Path(__file__).resolve().parents[1]
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    operations.ensure_runtime_dirs(layout)
+    operations._write_json(layout.release_manifest_path, {"images": {
+        name: f"example/{name}@sha256:{'a' * 64}"
+        for name in ("frontend", "backend", "worker", "sharkd", "egress-ironproxy", "egress-firewall")
+    }})
+    monkeypatch.setattr(operations, "_run_script", lambda root, script, args: render_compose.main(args))
+    operations.render_compose(layout, layout.release_manifest_path, source_root=root)
+    assert layout.compose_file.exists()
+    proxy = layout.production_ironproxy_config_path.read_text()
+    assert 'host: "eu.openrouter.ai"' in proxy
+    assert '"eu.openrouter.ai"' in proxy.split("  - name: secrets")[0]
+    assert "oidc.external.test" not in proxy and "saml.external.test" not in proxy
+    expected = {}
+    for purpose, host in (("ai", "eu.openrouter.ai"), ("identity", "login.customer.example"), ("intelligence", "feeds.customer.example")):
+        path = layout.configuration_dir / f"approved-{purpose}-egress-hosts.json"
+        expected[path] = {"approved_hosts": [{"host": host, "scheme": "https", "port": 443, "organization_ids": ["customer-team"] if purpose == "ai" else []}], "version": 1}
+        operations._write_json(path, expected[path])
+    # The same template application is used by upgrade; repeat to check idempotence.
+    for _ in range(2):
+        operations.render_compose(layout, layout.release_manifest_path, source_root=root)
+        for path, registry in expected.items():
+            assert operations._read_json(path) == registry
+        proxy = layout.production_ironproxy_config_path.read_text()
+        assert 'host: "eu.openrouter.ai"' in proxy
+        assert '"login.customer.example"' in proxy
+        assert '"feeds.customer.example"' in proxy
+        assert "oidc.external.test" not in proxy and "saml.external.test" not in proxy

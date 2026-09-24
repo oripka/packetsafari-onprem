@@ -30,6 +30,17 @@
     },
     {
       "classification": "feature-optional",
+      "host": "eu.openrouter.ai",
+      "notes": "OpenRouter EU endpoint; requires separately configured account controls and approved connection.",
+      "owners": [
+        "backend",
+        "worker"
+      ],
+      "port": 443,
+      "purpose": "Core AI / auth"
+    },
+    {
+      "classification": "feature-optional",
       "host": "auth.openai.com",
       "notes": "Codex device login flow.",
       "owners": [
@@ -43,7 +54,10 @@
       "classification": "feature-optional",
       "host": "chatgpt.com",
       "notes": "Subscription-backed Codex model discovery, usage checks and response transport.",
-      "owners": ["backend", "worker"],
+      "owners": [
+        "backend",
+        "worker"
+      ],
       "port": 443,
       "purpose": "Core AI / auth"
     },
@@ -185,30 +199,6 @@
       ],
       "port": 443,
       "purpose": "TLS certificate trust enrichment"
-    },
-    {
-      "classification": "feature-optional",
-      "host": "oidc.external.test",
-      "managed_by": "packetsafari-egress-identity",
-      "notes": "Host-approved external identity provider endpoint routed through the egress proxy.",
-      "owners": [
-        "backend",
-        "worker"
-      ],
-      "port": 19090,
-      "purpose": "Approved external identity providers"
-    },
-    {
-      "classification": "feature-optional",
-      "host": "saml.external.test",
-      "managed_by": "packetsafari-egress-identity",
-      "notes": "Host-approved external identity provider endpoint routed through the egress proxy.",
-      "owners": [
-        "backend",
-        "worker"
-      ],
-      "port": 19100,
-      "purpose": "Approved external identity providers"
     }
   ],
   "monitor_mode": false,

@@ -396,6 +396,16 @@ health/config, checks frontend `runtime-config.json`, and inspects Compose
 service state. SaaS upgrades run this readiness check after startup and before
 release promotion.
 
+The connected egress template supports both `openrouter.ai` and the exact EU
+hostname `eu.openrouter.ai`. Both substitute the existing `OPENROUTER_API_KEY`
+from `env/ironproxy.env`; no second key or wildcard host rule is needed. Complete
+host approval with `packetsafari-ops egress approve-ai-host --url https://eu.openrouter.ai/api/v1`
+and save the application connection in PacketSafari. This network setup does not
+select a default model, enable AI in an air-gapped installation, or establish
+EU processing/ZDR: configure and attest the provider account controls separately.
+Existing installations need the updated operations templates applied through the
+normal upgrade process; editing a connection alone does not update the proxy.
+
 For every profile, doctor also reads intelligence updater state from the backend.
 
 Signed data-only security content is updated independently from container releases:
