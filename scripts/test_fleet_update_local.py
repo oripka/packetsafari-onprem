@@ -129,9 +129,11 @@ worker_wait
             return next(line[5:] for line in output.splitlines() if line.startswith('TASK='))
         task_id = task(old['worker'], 40)
         def result(task_id):
-            script = f"import json; from packetsafari.celery_app import celery; r=celery.AsyncResult('{task_id}'); print('RESULT='+json.dumps({{'state':r.state,'result':r.result}}))"
-            output = proxy.docker('exec', runtime.container(read(root/'stack.json')['active']), 'python3', '-c', script).stdout
-            return json.loads(next(line[7:] for line in output.splitlines() if line.startswith('RESULT=')))
+            # Result storage survives maintenance while both API slots are stopped.
+            output = proxy.docker('exec', runtime.container('redis'), 'redis-cli', '-n', '1', '--raw',
+                                  'GET', 'celery-task-meta-' + task_id).stdout.strip()
+            stored = json.loads(output) if output else {}
+            return {'state': stored.get('status', 'PENDING'), 'result': stored.get('result')}
         for _ in range(100):
             if result(task_id)['state'] == 'STARTED':
                 break
@@ -198,7 +200,77 @@ worker_wait
         assert read(root/'stack.json')['active'] == 'backend-green'
         assert not runtime.dc('ps', '-q', 'worker')
         events.append({'check': 'unhealthy candidate rejected and cleaned before its workers could start; serving generation unchanged'})
+        # Workers can already own tasks when their final readiness check fails.
+        # The same abort path must preserve those tasks without requiring readiness.
+        original_ready = fleet.ready
+        abort_tasks = []
+        def fail_worker_readiness(runtime_arg, services, timeout=120):
+            original_ready(runtime_arg, services, timeout)
+            if 'worker' in services:
+                abort_tasks.append(task(runtime.container('worker'), 20, direct=True))
+                for _ in range(100):
+                    if result(abort_tasks[-1])['state'] == 'STARTED':
+                        break
+                    time.sleep(.1)
+                raise RuntimeError('injected worker readiness failure')
+        fleet.ready = fail_worker_readiness
+        try:
+            fleet.deploy(runtime, base, timeout=60)
+            raise AssertionError('Failed worker readiness accepted')
+        except RuntimeError as exc:
+            assert 'worker readiness failure' in str(exc), str(exc)
+        finally:
+            fleet.ready = original_ready
+        assert read(runtime.journal_file)['phase'] == 'starting-workers'
+        assert fleet.abort(runtime, timeout=1)['status'] == 'draining'
+        assert proxy.inspect(runtime.container('agent-cli-runner'))['State']['Running']
+        assert fleet.abort(runtime, timeout=60)['status'] == 'rolled_back'
+        assert result(abort_tasks[0])['state'] == 'SUCCESS'
+        assert read(runtime.stack_file)['active'] == 'backend-green'
+        events.append({'check': 'abort after worker readiness failure drained candidate-owned job and retained its dependencies'})
         assert not any(sample['error'] for sample in samples)
+        stop.set()
+        poller.join()
+        # Explicit maintenance is allowed to return 503, but may not kill work.
+        from packetsafari_onprem import maintenance_update as maintenance
+        maintenance_task = task(runtime.container('worker-green'), 20, direct=True)
+        for _ in range(100):
+            if result(maintenance_task)['state'] == 'STARTED':
+                break
+            time.sleep(.1)
+        prepared, starts = [], []
+        def prepare_maintenance(target):
+            assert result(maintenance_task)['state'] == 'SUCCESS'
+            prepared.append(True)
+            return target
+        def start_maintenance():
+            starts.append(True)
+            if len(starts) == 1:
+                raise RuntimeError('injected interruption before maintenance startup')
+            runtime.dc('up', '-d', '--pull', 'never')
+        kwargs = dict(target=base, prepare=prepare_maintenance, start=start_maintenance)
+        assert maintenance.deploy(runtime, **kwargs, timeout=1)['status'] == 'draining'
+        with closing(http.client.HTTPConnection('127.0.0.1', port, timeout=2)) as connection:
+            connection.request('GET', '/')
+            response = connection.getresponse()
+            assert response.status == 503
+            response.read()
+        assert proxy.inspect(runtime.container('sharkd-green'))['State']['Running']
+        try:
+            maintenance.deploy(runtime, **kwargs, timeout=60)
+            raise AssertionError('Injected startup failure did not propagate')
+        except RuntimeError as exc:
+            assert 'interruption before maintenance startup' in str(exc), str(exc)
+        assert read(runtime.journal_file)['phase'] == 'starting'
+        assert maintenance.deploy(runtime, **kwargs, timeout=60)['status'] == 'ok'
+        assert prepared == [True], 'Interrupted startup must not redo backup/target preparation'
+        assert not runtime.journal_file.exists()
+        assert read(runtime.stack_file)['active'] == 'backend'
+        with closing(http.client.HTTPConnection('127.0.0.1', port, timeout=2)) as connection:
+            connection.request('GET', '/')
+            response = connection.getresponse()
+            assert response.status == 200 and json.loads(response.read())['slot'] == 'blue'
+        events.append({'check': 'maintenance returned 503, drained the active job, resumed interrupted startup without re-preparing, and restored blue ingress'})
         save(root/'result.json', {'events': events, 'task': task_id, 'newTask': new_task, 'evidence': str(root),
                                  'requests': len(samples), 'errors': 0, 'maxRequestSeconds': max(s['seconds'] for s in samples)})
         print(json.dumps({'events': events, 'evidence': str(root)}, indent=2))

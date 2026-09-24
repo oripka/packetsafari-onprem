@@ -1,9 +1,11 @@
 # Application generation updates
 
 `deployment_proxy.py` controls a digest-pinned NGINX proxy. `rolling_update.py`
-adds a two-slot Compose transaction used by normal dev commands and, after
-explicit activation, the signed host updater. `fleet_update.py` extends this to
-backend, Celery worker, Agent stream gateway, Agent runner and Sharkd together.
+owns shared topology, activation and retained legacy recovery. Two procedures use
+that runtime and one transaction journal: `fleet_update.py` replaces backend,
+Celery worker, Agent stream gateway, Agent runner and Sharkd together;
+`maintenance_update.py` drains and pauses the fleet for schema/shared-service changes.
+New API-only transactions are retired; historical journals remain recoverable.
 
 ## Normal release workflow integration
 
@@ -23,7 +25,7 @@ owns publication, signatures, frontend/CloudFront and host update procedures.
 This document owns the proxy transaction and its integration boundary.
 
 The normal builder now records an image-derived `runtimeContract` in the signed
-manifest. Ops 0.2.39 selects full-generation updates for this contract on an
+manifest. Ops 0.2.40 selects full-generation updates for this contract on an
 activated host. It refuses partial promotion or silent maintenance fallback.
 This implementation has local deterministic and real Celery transaction tests;
 it has **not** been deployed or qualified on production.
@@ -92,12 +94,14 @@ For dependency/image changes, use one command:
 ./packetsafari dev update --build --all  # compatibility alias; --all unnecessary
 ```
 
-First bootstrap and changes to shared dev services use maintenance: build first,
-then stop services, recreate from resolved image IDs, initialize/migrate and verify.
-Jobs/connections may be interrupted on that explicitly local path.
-Optional fixture/test profiles are excluded. Pinned third-party images are reused,
-not rebuilt. Repeat the same command after failure to resume its saved plan;
-`rolling-recover` is for API transactions, not maintenance or database restoration.
+First bootstrap transfers ports and may interrupt existing work. Once activated,
+shared-service or immutable image schema/protocol changes use the shared maintenance
+procedure: build first, pause ingress with HTTP 503, drain connections/jobs, apply
+resolved images and migrations, verify and reopen. Force it with
+`./packetsafari dev rebuild --maintenance`. Optional fixture/test profiles are
+excluded. Pinned third-party images are reused, not rebuilt. Repeat the same
+command after failure to resume its saved plan. `rolling-recover` safely aborts
+application updates before commit; it cannot restore a database after maintenance.
 The [development guide](../../packetsafari/documentation/DEVELOPMENT.md#development-updates)
 owns the command reference. On 2026-09-24, the real dev stack completed a full
 rebuild/bootstrap and a five-service generation update: 405 health probes saw
@@ -128,11 +132,16 @@ mechanics, not immutable production application-version isolation.
 
 A journal tracks preparation, worker start, switch, drain, metadata commit and
 cleanup. Repeat the exact update to resume full-generation transactions, including
-an interrupted metadata commit or cleanup. Before workers start, failed preparation
-can discard the idle candidate. After they start, never use an API-only recovery
-or stop candidate dependencies: those workers may already own jobs. Failed
-post-switch checks return traffic to the retained generation and drain the failed
-candidate's jobs before stopping it. Drain timeout retains both generations.
+an interrupted metadata commit or cleanup. Pending connected updates use the saved
+exact manifest bytes and detached signature, reverified on each attempt; channel
+discovery is deferred until completion. Offline bundles or older transactions
+without a saved detached signature require the original signed upgrade/bundle input.
+Before metadata commit, recovery can abort: restore original traffic, stop candidate
+intake, drain its jobs/connections, then retire dependencies. This also handles
+failed readiness after a candidate worker accepted a job. Repeat recovery on exit 3.
+Changed container identities fail closed. Once commit begins, finish the update;
+use a subsequent signed release for application rollback. Failed post-switch checks
+use the same drain path automatically. Drain timeout retains both generations.
 Do not delete state files to bypass drift, drain or recovery checks.
 
 There is no automatic HTTP retry, request/response buffering or forced worker
@@ -153,7 +162,7 @@ The API and Sharkd origin ports transfer once; subsequent updates keep them stab
 ```bash
 packetsafari-ops deployment-proxy enable --profile saas --manifest /path/to/signed-installed-manifest.json --ingress-policy /path/to/ingress.json
 # Full-generation recovery: repeat the exact normal update command.
-# The recovery command below is only for legacy API-only/pre-worker transactions.
+# Or abort an application transaction before metadata commit (repeat on exit 3).
 packetsafari-ops deployment-proxy recover --profile saas
 ```
 
@@ -170,11 +179,17 @@ for incompatible task/interprocess messages. Matching hashes do not prove semant
 compatibility by themselves. All five application images must be digest-pinned;
 the gateway inherits backend when omitted. Changes outside this cohort, deployment
 profiles, required environment, schema or frozen runtime configuration are rejected.
-Inline backups and skipped health checks are rejected. `--maintenance` is an
-unactivated-host bootstrap option, not an implemented conversion of an activated
-fleet to maintenance. Shared infrastructure/schema upgrades on activated fleets
-still require a reviewed maintenance transition. This limitation also prevents
-claiming general on-prem full-stack zero-downtime support.
+Inline backups and skipped health checks are rejected for overlapping application
+updates. For explicit maintenance on an activated fleet, use the usual update
+command plus `--maintenance` and the chosen backup policy. The controller pauses
+new ingress with HTTP 503, waits for existing proxy connections and warm worker
+drain, then runs the existing backup, rendering, migration and verification owners.
+Inline backups are supported after drain. It retains generation mode afterward.
+Timeout leaves ingress paused and dependencies alive; repeat update to resume.
+Startup/migration failures retain their saved plan. Verification failure re-pauses
+ingress. Maintenance never automatically rolls back database changes: resume forward
+or use the established backup restoration procedure. This is an interruption, not
+general on-prem full-stack zero-downtime support.
 
 ### Trusted ingress
 
@@ -214,24 +229,24 @@ or establish frontend/API compatibility.
 ## Verification
 
 ```bash
-python3 -m pytest tests/test_rolling_update.py tests/test_deployment_proxy.py tests/test_render_compose.py tests/test_update_channel.py
+python3 -m pytest tests/test_deployment_lifecycle.py tests/test_fleet_update.py tests/test_rolling_update.py tests/test_deployment_proxy.py tests/test_render_compose.py tests/test_update_channel.py tests/test_signed_release_manifest.py
 # From the app workspace, where local test ports are allowed:
 python3 ../packetsafari-onprem/scripts/test_deployment_proxy_local.py
 python3 ../packetsafari-onprem/scripts/test_deployment_ingress_local.py
 python3 ../packetsafari-onprem/scripts/test_workload_drain_local.py
 python3 ../packetsafari-onprem/scripts/test_fleet_update_local.py
-python3 scripts/test_dev_rolling_update.py
+python3 -m unittest discover -s scripts/tests -p test_dev_maintenance_update.py
 ```
 
 The transport fixture checks complete SSE/WebSocket sequences, a byte-verified
 slow upload, readiness rejection, drain protection, retained-instance rollback
-and proxy restart. The real dev test checks alternating cold updates, post-switch
-failure rollback, interrupted staging/reload recovery and unchanged shared-service
-start times. It samples the normal API port and retains receipts and availability
+and proxy restart. The shared fleet fixture retains receipts and availability
 records under the data root. It does not consume models or deploy production.
 
 The fleet fixture runs real Celery/Redis with synthetic long jobs and separate
 runner/Sharkd/gateway fixtures. It covers pending drain and resume, replacement
 image identities, post-switch rollback with a candidate job in flight, and early
-readiness rejection. It does not execute a real Agent or Triage analysis, nor
+readiness rejection. It also checks abort after candidate worker readiness failure,
+maintenance job drain/HTTP 503, and interrupted maintenance startup resume without
+re-preparing. It does not execute a real Agent or Triage analysis, nor
 qualify signed ECR delivery, CloudFront, on-prem ingress or production RAM headroom.

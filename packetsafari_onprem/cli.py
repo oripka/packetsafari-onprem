@@ -218,7 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Acknowledge an unbacked non-interactive upgrade. Interactive execution asks for confirmation instead.",
     )
     upgrade.add_argument("--health-timeout", type=int, default=180)
-    upgrade.add_argument("--maintenance", action="store_true", help="Explicitly allow an interrupting upgrade on a host without generation activation (including the initial drain-capable release).")
+    upgrade.add_argument("--maintenance", action="store_true", help="Explicitly allow schema/shared-service maintenance. Activated generations pause ingress and drain work first; initial bootstrap may interrupt work.")
     upgrade.add_argument("--skip-health-check", action="store_true")
     upgrade.add_argument(
         "--skip-image-pull",
@@ -323,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove unprotected PacketSafari images without prompting.")
     update.add_argument("--skip-image-retention-check", action="store_true")
     update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
-    update.add_argument("--maintenance", action="store_true", help="Explicitly allow an interrupting upgrade on a host without generation activation; not a silent fallback for an active generation deployment.")
+    update.add_argument("--maintenance", action="store_true", help="Explicitly allow schema/shared-service maintenance. Activated generations pause ingress and drain work first; initial bootstrap may interrupt work.")
     update.add_argument(
         "--json",
         action="store_true",
@@ -486,8 +486,9 @@ def main(argv: list[str] | None = None) -> int:
         from packetsafari_onprem.deployment_proxy import initialize, switch
         if args.action in {"enable", "recover"}:
             from packetsafari_onprem.rolling_update import manage_host
-            print(json.dumps(manage_host(args), indent=2))
-            return 0
+            result = manage_host(args)
+            print(json.dumps(result, indent=2))
+            return 3 if result.get('status') == 'draining' else 0
         if not args.state_dir:
             parser.error("init/switch requires --state-dir")
         if args.action == "init":

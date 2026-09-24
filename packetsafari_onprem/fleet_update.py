@@ -7,6 +7,7 @@ import subprocess
 import time
 import uuid
 import sys
+import shutil
 
 from . import deployment_proxy as proxy
 from . import workload_drain
@@ -15,6 +16,16 @@ from .rolling_update import read, save, compose_config
 COHORT = ('backend', 'worker', 'agent-stream-gateway', 'agent-cli-runner', 'sharkd')
 GREEN_IP = {'backend': '172.20.0.27', 'worker': '172.20.0.28',
             'agent-stream-gateway': '172.20.0.29', 'sharkd': '172.20.0.31'}
+
+
+def pin_release(runtime, manifest_path):
+    """Retain exact verified bytes and detached signature, never reserialize them."""
+    from pathlib import Path
+    source = Path(manifest_path)
+    signature = Path(str(source) + '.sig')
+    if signature.is_file():
+        shutil.copy2(source, runtime.directory / 'pinned-release.json')
+        shutil.copy2(signature, runtime.directory / 'pinned-release.json.sig')
 
 
 def release_images(current, target, backup_mode):
@@ -69,6 +80,7 @@ def upgrade(layout, args, current, manifest, *, source, backup_mode, backup_proo
         if saved['manifest'] != manifest:
             raise RuntimeError('An earlier release is still draining; repeat its exact release before applying another')
     else:
+        pin_release(runtime, layout.target_release_manifest_path)
         snapshot = ops.snapshot_runtime(layout)
         if backup_proof:
             ops.record_external_backup_proof(snapshot, backup_proof)
@@ -219,6 +231,40 @@ def deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: 
         raise
 
 
+def abort(runtime, timeout=120):
+    """Return traffic, warm-drain candidate jobs, then use the normal retirement path."""
+    if not runtime.journal_file.exists():
+        return {'status': 'noop'}
+    journal = read(runtime.journal_file)
+    if journal.get('mode') != 'fleet':
+        raise RuntimeError('This is not an application generation transaction')
+    if journal['phase'] == 'preparing':
+        return recover_preparing(runtime)
+    if journal['phase'] in ('committing', 'committed'):
+        raise RuntimeError('Release commit has begun; repeat update to finish, then deploy a signed rollback release')
+    if not journal.get('rollback'):
+        if 'candidateContainers' not in journal:
+            # The process may have died just before/after Compose started workers.
+            worker = runtime.dc('ps', '-a', '-q', name('worker', journal['candidate']))
+            if not worker:
+                journal['phase'] = 'preparing'
+                save(runtime.journal_file, journal)
+                return recover_preparing(runtime)
+            workload_drain.begin_worker(worker)  # Refuse unproven/failed workers.
+            journal['candidateContainers'] = {s: runtime.container(name(s, journal['candidate']))
+                                               for s in COHORT if s in journal['targetBase']['services']}
+            journal['candidateStarts'] = {s: proxy.inspect(c)['State']['StartedAt']
+                                          for s, c in journal['candidateContainers'].items()}
+        for service, container in journal['candidateContainers'].items():
+            current = proxy.inspect(container)
+            if (proxy.inspect(name(journal['targetBase']['services'][service].get('container_name', service), journal['candidate']))['Id'] != container
+                    or current['State']['StartedAt'] != journal['candidateStarts'][service]):
+                raise RuntimeError('Candidate identity changed; abort cannot prove ownership')
+        journal.update(phase='rollback-switching', failure=journal.get('failure', 'Operator aborted update'))
+        save(runtime.journal_file, journal)
+    return deploy(runtime, journal['targetBase'], timeout=timeout)
+
+
 def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=120):
     """Caller holds the deployment lock and verifies signed compatibility first."""
     if runtime.journal_file.exists():
@@ -265,13 +311,21 @@ def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt:
         journal['phase'] = 'starting-workers'
         save(runtime.journal_file, journal)
     if journal['phase'] == 'starting-workers':
-        runtime.dc('up', '-d', '--no-deps', '--pull', 'never', name('worker', candidate))
-        proxy.docker('update', '--restart=' + target_base['services']['worker'].get('restart', 'always'),
-                     runtime.container(name('worker', candidate)))
+        if journal.get('candidateContainers'):
+            for service, container in journal['candidateContainers'].items():
+                info = proxy.inspect(container)
+                actual = runtime.container(name(service, candidate))
+                if actual != container or info['State']['StartedAt'] != journal['candidateStarts'][service]:
+                    raise RuntimeError('Candidate restarted or was replaced; retain dependencies and inspect before resuming')
+        else:
+            runtime.dc('up', '-d', '--no-deps', '--pull', 'never', name('worker', candidate))
+            proxy.docker('update', '--restart=' + target_base['services']['worker'].get('restart', 'always'),
+                         runtime.container(name('worker', candidate)))
+            journal['candidateContainers'] = {s: runtime.container(name(s, candidate)) for s in COHORT if s in target_base['services']}
+            journal['candidateStarts'] = {s: proxy.inspect(c)['State']['StartedAt'] for s, c in journal['candidateContainers'].items()}
+            save(runtime.journal_file, journal)
         ready(runtime, candidate_services, timeout)
         workload_drain.begin_worker(runtime.container(name('worker', candidate)))
-        journal['candidateContainers'] = {s: runtime.container(name(s, candidate)) for s in COHORT if s in target_base['services']}
-        journal['candidateStarts'] = {s: proxy.inspect(c)['State']['StartedAt'] for s, c in journal['candidateContainers'].items()}
         journal['phase'] = 'switching'
         save(runtime.journal_file, journal)
     if journal['phase'] == 'switching':

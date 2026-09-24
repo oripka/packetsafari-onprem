@@ -1,4 +1,4 @@
-"""Compose API-only rolling updates. No schema migration or worker replacement."""
+"""Compose topology, activation and recovery of legacy API-only transactions."""
 from __future__ import annotations
 
 import copy
@@ -43,38 +43,6 @@ def image_ref(value):
 def fingerprints(paths):
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
             for path in paths}
-
-
-def validate_release(current, target, backup_mode):
-    if backup_mode == 'inline':
-        raise ValueError('Rolling updates require a verified external backup or an explicit unbacked-upgrade acknowledgement; inline backup quiesces services.')
-    compatible = target.get('rollingUpdate', {}).get('compatibleFrom', [])
-    if not isinstance(compatible, list) or current.get('version') not in compatible:
-        raise ValueError('Signed target manifest must declare rollingUpdate.compatibleFrom for the exact installed version')
-    previous, upcoming = current.get('images', {}), target.get('images', {})
-    for key in set(previous) | set(upcoming):
-        if key == 'backend':
-            continue
-        old = image_ref(previous.get(key))
-        new = image_ref(upcoming.get(key))
-        if key == 'agent-stream-gateway':
-            old = old or image_ref(previous.get('backend'))
-        if old != new:
-            raise ValueError(f'Rolling API update cannot change {key}; use the maintenance deployment path')
-    # Gateway historically inherits backend; it must now be independently frozen.
-    old_gateway = image_ref(previous.get('agent-stream-gateway')) or image_ref(previous.get('backend'))
-    new_gateway = image_ref(upcoming.get('agent-stream-gateway')) or image_ref(upcoming.get('backend'))
-    if old_gateway != new_gateway:
-        raise ValueError('Rolling API update must retain the agent-stream-gateway image explicitly')
-    if current.get('deploymentProfiles') != target.get('deploymentProfiles'):
-        raise ValueError('Rolling update cannot change deployment profiles')
-    for field in ['requiredEnv', 'requiredEnvByProfile']:
-        if current.get(field) != target.get(field):
-            raise ValueError(f'Rolling update cannot change {field}')
-    backend = image_ref(upcoming.get('backend'))
-    if not re.fullmatch(r'.+@sha256:[a-f0-9]{64}', backend):
-        raise ValueError('Rolling target backend must be pinned by registry digest')
-    return backend
 
 
 def compose_config(base, stack, directory):
@@ -159,55 +127,7 @@ print(h.hexdigest())
             target = copy.deepcopy(stack['fleetBases'][stack['active']])
             target['services']['backend']['image'] = image
             return deploy(self, target, verify=verify, commit=commit, timeout=timeout)
-        if self.journal_file.exists():
-            raise RuntimeError('An unfinished rolling transaction exists; recover it before another update')
-        active = stack['active']
-        inactive = 'backend-green' if active == 'backend' else 'backend'
-        controller = stack['proxyName']
-        proxy_state = read(self.directory / 'proxy/state.json')
-        if set(proxy_state.get('retiringWorkers', [])) & proxy.workers(controller):
-            raise RuntimeError('Previous connections are still draining; no slot can be replaced')
-        old_container = self.container(active)
-        journal = {'phase': 'preparing', 'oldStack': stack, 'candidate': inactive, 'image': image,
-                   'oldContainer': old_container, 'context': context or {}}
-        save(self.journal_file, journal)
-        try:
-            print(f'Rolling API: starting {inactive}; {active} continues serving', file=sys.stderr, flush=True)
-            staged = copy.deepcopy(stack)
-            staged['images'][inactive] = image
-            self.render(staged)
-            self.dc('up', '-d', '--no-deps', '--pull', 'never', inactive)
-            candidate = self.container(inactive)
-            journal['candidateContainer'] = candidate
-            save(self.journal_file, journal)
-            if self.schema(old_container) != self.schema(candidate):
-                raise RuntimeError('Schema/model inputs changed; rolling path does not run migrations')
-            print('Rolling API: waiting for candidate readiness, then switching and draining', file=sys.stderr, flush=True)
-            receipt = proxy.switch(self.directory / 'proxy', controller, candidate,
-                                   ready_timeout=timeout, drain_timeout=timeout)
-            journal.update(phase='switched', receipt=receipt)
-            save(self.journal_file, journal)
-            staged['active'] = inactive
-            save(self.stack_file, staged)
-            self.render(staged)
-            if receipt['status'] != 'drained':
-                # Keep both versions alive; retry/recovery must not recreate either.
-                return {'status': 'draining', 'rollingUpdate': receipt}
-            print('Rolling API: traffic switched; verifying before release commit', file=sys.stderr, flush=True)
-            verify()
-            journal['phase'] = 'committing'
-            save(self.journal_file, journal)
-            commit(receipt)
-            journal['phase'] = 'committed'
-            save(self.journal_file, journal)
-            self.dc('stop', active)
-            self.journal_file.unlink()
-            print(f'Rolling API: {inactive} active; {active} stopped', file=sys.stderr, flush=True)
-            return {'status': 'ok', 'rollingUpdate': receipt}
-        except BaseException:
-            if read(self.journal_file)['phase'] not in ('committing', 'committed'):
-                self.recover()
-            raise
+        raise RuntimeError('Legacy API-only mode is recovery-only; use dev rebuild or a maintenance upgrade to migrate')
 
     def recover(self):
         """Roll back traffic first. Never restart or overwrite the serving old slot."""
@@ -215,8 +135,10 @@ print(h.hexdigest())
             return {'status': 'noop'}
         journal = read(self.journal_file)
         if journal.get('mode') == 'fleet':
-            from .fleet_update import recover_preparing
-            return recover_preparing(self)
+            from .fleet_update import abort
+            return abort(self)
+        if journal.get('mode') == 'maintenance':
+            raise RuntimeError('Maintenance may have changed schema; repeat update to resume. Database restoration requires its backup procedure.')
         if journal['phase'] == 'committing':
             raise RuntimeError('Release metadata commit was interrupted; reconcile installed manifest before recovery')
         if journal['phase'] == 'committed':
@@ -245,53 +167,9 @@ print(h.hexdigest())
 
 def upgrade(layout, args, manifest, *, source, backup_mode, backup_proof, ops):
     """Called only after the normal signature, profile, entitlement and env gates."""
-    current = read(layout.release_manifest_path)
-    if manifest.get('runtimeContract'):
-        from .fleet_update import upgrade as fleet_upgrade
-        return fleet_upgrade(layout, args, current, manifest, source=source,
-                             backup_mode=backup_mode, backup_proof=backup_proof, ops=ops)
-    image = validate_release(current, manifest, backup_mode)
-    if getattr(args, 'skip_health_check', False):
-        raise ValueError('Rolling updates cannot skip health checks')
-    directory = layout.state_dir / 'rolling'
-    runtime = Runtime(directory, layout.compose_file, ops._compose_base_command(layout))
-    recorded = read(runtime.stack_file).get('configurationFingerprint')
-    if not recorded or fingerprints([Path(path) for path in recorded]) != recorded:
-        raise ValueError('Runtime configuration changed since proxy activation; maintenance reconciliation required')
-    if runtime.journal_file.exists():
-        raise RuntimeError('Unfinished rolling update; run deployment-proxy recover before retrying')
-    snapshot = ops.snapshot_runtime(layout)
-    if backup_proof:
-        ops.record_external_backup_proof(snapshot, backup_proof)
-    if source == 'manifest' and not getattr(args, 'skip_image_pull', False):
-        if ops.deployment_profile(args) == 'saas':
-            ops.ensure_ecr_credential_helper_ready(layout)
-        subprocess.run(['docker', 'pull', image], check=True)
-    result = {}
-
-    def verify():
-        ops.wait_for_health(timeout_seconds=getattr(args, 'health_timeout', 180))
-        ops.wait_for_doctor_ok(args, timeout_seconds=getattr(args, 'health_timeout', 180))
-
-    def commit(receipt):
-        result.update(ops._promote_release(layout, manifest, snapshot, source=source,
-                                          profile=ops.deployment_profile(args), backup_mode=backup_mode))
-        state = ops._read_json(layout.deployment_state_path, {})
-        state['rollback']['note'] = 'API-only rolling update; no migrations ran. Use a signed compatible rollback release or recover an unfinished transaction.'
-        ops._write_json(layout.deployment_state_path, state)
-
-    try:
-        receipt = runtime.deploy(image, verify=verify, commit=commit,
-                                 timeout=getattr(args, 'health_timeout', 180),
-                                 context={'metadataSnapshot': str(snapshot)})
-    except BaseException:
-        # No migration ran. Restore metadata only; never stop shared services.
-        phase = read(runtime.journal_file)['phase'] if runtime.journal_file.exists() else ''
-        if phase not in ('committing', 'committed'):
-            ops._restore_metadata_snapshot(layout, snapshot)
-            runtime.render(read(runtime.stack_file))
-        raise
-    return {**result, **receipt}
+    from .fleet_update import upgrade as fleet_upgrade
+    return fleet_upgrade(layout, args, read(layout.release_manifest_path), manifest, source=source,
+                         backup_mode=backup_mode, backup_proof=backup_proof, ops=ops)
 
 
 def manage_host(args):
@@ -302,7 +180,7 @@ def manage_host(args):
     with ops.upgrade_lock(layout):
         if args.action == 'recover':
             journal = read(runtime.journal_file) if runtime.journal_file.exists() else {}
-            if journal.get('phase') == 'committing':
+            if journal.get('mode') not in ('fleet', 'maintenance') and journal.get('phase') == 'committing':
                 # Old slot cannot have been stopped before the durable committed phase.
                 journal['phase'] = 'switched'
                 save(runtime.journal_file, journal)
@@ -320,6 +198,8 @@ def manage_host(args):
         if args.profile == 'saas' and ingress['mode'] != 'cloudfront-https':
             raise ValueError('SaaS activation requires cloudfront-https ingress policy')
         manifest = read(layout.release_manifest_path)
+        if not manifest.get('runtimeContract'):
+            raise ValueError('New activation requires a drain-capable generation release; API-only activation is retired')
         if not args.manifest:
             raise ValueError('Enable requires --manifest pointing to the signed installed release')
         verified = read(ops.materialize_verified_release_manifest(layout, args.manifest, args))

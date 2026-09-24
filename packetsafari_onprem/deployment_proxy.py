@@ -198,6 +198,35 @@ def address(proxy_info: dict, target_info: dict, port: int) -> str:
     return f"{ip}:{port}"
 
 
+def quiesce(directory: Path, controller: str) -> dict:
+    """Reject new ingress with 503 while existing NGINX connections finish."""
+    with (directory / 'lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        reconcile(directory, controller)
+        state = json.loads((directory / 'state.json').read_text())
+        current = (directory / 'nginx.conf').read_text()
+        if generation(controller) != state['generation'] or hashlib.sha256(current.encode()).hexdigest() != state['configSha256']:
+            raise ValueError('Proxy receipt/configuration drift; refusing maintenance')
+        if not state.get('maintenance'):
+            next_generation = uuid.uuid4().hex
+            config = configuration(None, next_generation, state.get('ingressPolicy'))
+            atomic_write(directory / 'candidate.conf', config)
+            docker('exec', controller, 'nginx', '-t', '-c', '/etc/packetsafari-proxy/candidate.conf')
+            target = {'generation': next_generation, 'maintenance': True,
+                      'ingressPolicy': state.get('ingressPolicy'),
+                      'previousContainerId': state.get('containerId'),
+                      'previousStartedAt': state.get('targetStartedAt'),
+                      'previousSharkdEndpoint': state.get('sharkdEndpoint'),
+                      'retiringWorkers': sorted(workers(controller)),
+                      'configSha256': hashlib.sha256(config.encode()).hexdigest()}
+            atomic_write(directory / 'pending.json', json.dumps({'previous': state, 'next': target,
+                         'previousConfig': current, 'nextConfig': config}))
+            reconcile(directory, controller)
+            state = target
+        remaining = set(state.get('retiringWorkers', [])) & workers(controller)
+        return {**state, 'status': 'draining' if remaining else 'drained', 'retiringWorkers': sorted(remaining)}
+
+
 def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
            health_path: str = "/api/v2/health", ready_timeout: float = 120,
            drain_timeout: float = 120, sharkd: str | None = None) -> dict:
@@ -279,7 +308,7 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
             atomic_write(directory / "nginx.conf", old_config)
             docker("exec", proxy, "nginx", "-s", "reload", "-c", "/etc/packetsafari-proxy/nginx.conf", check=False)
             raise
-        state = {"generation": next_generation, "target": target, "endpoint": endpoint, "ingressPolicy": policy,
+        state = {**next_state, "generation": next_generation, "target": target, "endpoint": endpoint, "ingressPolicy": policy,
                  "switchedAt": datetime.now(timezone.utc).isoformat(),
                  "configSha256": hashlib.sha256((directory / "nginx.conf").read_bytes()).hexdigest(),
                  "containerId": target_info["Id"], "imageId": target_info["Image"],

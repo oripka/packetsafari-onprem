@@ -5,42 +5,6 @@ import pytest
 from packetsafari_onprem import rolling_update as rolling
 
 
-def manifests():
-    current = {'version': 'v1', 'images': {'backend': 'repo/api@sha256:'+'a'*64,
-               'worker': 'repo/worker@sha256:'+'b'*64}}
-    target = copy.deepcopy(current)
-    target['version'] = 'v2'
-    target['images']['agent-stream-gateway'] = current['images']['backend']
-    target['images']['backend'] = 'repo/api@sha256:'+'c'*64
-    target['rollingUpdate'] = {'compatibleFrom': ['v1']}
-    return current, target
-
-
-def test_exact_compatible_api_release():
-    current, target = manifests()
-    assert rolling.validate_release(current, target, 'skip') == target['images']['backend']
-
-
-@pytest.mark.parametrize('change', ['worker', 'gateway', 'schema-declaration', 'tag', 'profile', 'inline'])
-def test_unsafe_rolling_release_rejected(change):
-    current, target = manifests()
-    mode = 'skip'
-    if change == 'worker':
-        target['images']['worker'] = 'different'
-    elif change == 'gateway':
-        target['images'].pop('agent-stream-gateway')
-    elif change == 'schema-declaration':
-        target['rollingUpdate']['compatibleFrom'] = ['other-release']
-    elif change == 'tag':
-        target['images']['backend'] = 'repo/api:latest'
-    elif change == 'profile':
-        target['deploymentProfiles'] = {'saas': {}}
-    elif change == 'inline':
-        mode = 'inline'
-    with pytest.raises(ValueError):
-        rolling.validate_release(current, target, mode)
-
-
 def test_compose_retains_public_port_and_isolates_candidate():
     base = {'services': {'backend': {'image': 'old', 'container_name': 'backend',
             'networks': {'app': {'ipv4_address': '172.20.0.20'}},
@@ -60,13 +24,6 @@ def test_compose_retains_public_port_and_isolates_candidate():
     assert config['services']['backend-green']['networks']['app']['ipv4_address'] == '172.20.0.27'
     assert config['services']['deployment-proxy']['ports'][0]['published'] == '8080'
     assert config['services']['frontend']['environment']['NUXT_INTERNAL_API_BASE'] == 'http://deployment-proxy:8080'
-
-
-def test_compatibility_must_be_exact_list():
-    current, target = manifests()
-    target['rollingUpdate']['compatibleFrom'] = 'v10'
-    with pytest.raises(ValueError):
-        rolling.validate_release(current, target, 'skip')
 
 
 @pytest.fixture
@@ -89,46 +46,35 @@ def runtime(tmp_path, monkeypatch):
     return instance, calls
 
 
-def test_schema_change_never_switches(runtime, monkeypatch):
+def test_legacy_mode_cannot_create_new_transactions(runtime):
     instance, calls = runtime
-    monkeypatch.setattr(instance, 'schema', lambda container: container)
-    with pytest.raises(RuntimeError, match='Schema/model'):
+    with pytest.raises(RuntimeError, match='recovery-only'):
         instance.deploy('new')
-    assert rolling.read(instance.stack_file)['active'] == 'backend'
-    assert rolling.read(instance.directory/'proxy/state.json')['containerId'] == 'old-container'
-    assert ('stop', 'backend') not in calls
+    assert calls == []
     assert not instance.journal_file.exists()
 
 
-def test_failed_verification_restores_traffic_before_stopping_candidate(runtime):
+def test_existing_legacy_transaction_can_restore_traffic(runtime):
     instance, calls = runtime
-    def verify():
-        assert rolling.read(instance.directory/'proxy/state.json')['containerId'] == 'new-container'
-        raise ValueError('doctor failed')
-    with pytest.raises(ValueError, match='doctor failed'):
-        instance.deploy('new', verify=verify)
-    assert rolling.read(instance.directory/'proxy/state.json')['containerId'] == 'old-container'
-    assert ('stop', 'backend') not in calls
-    assert calls[-1] == ('stop', 'backend-green')
+    old = rolling.read(instance.stack_file)
+    rolling.save(instance.journal_file, {'phase': 'switched', 'oldStack': old,
+                 'oldContainer': 'old-container', 'candidate': 'backend-green'})
+    rolling.save(instance.directory/'proxy/state.json', {'containerId': 'new-container'})
+    assert instance.recover()['status'] == 'rolled_back'
+    assert calls == [('stop', 'backend-green')]
+    assert not instance.journal_file.exists()
 
 
-def test_cleanup_failure_does_not_undo_committed_release(runtime, monkeypatch):
+def test_legacy_committed_cleanup_remains_resumable(runtime, monkeypatch):
     instance, calls = runtime
-    def command(*args):
-        calls.append(args)
-        if args == ('stop', 'backend'):
-            raise RuntimeError('stop failed')
-    monkeypatch.setattr(instance, 'dc', command)
-    committed = []
+    rolling.save(instance.journal_file, {'phase': 'committed', 'oldStack': {'active': 'backend'}})
+    monkeypatch.setattr(instance, 'dc', lambda *args: (_ for _ in ()).throw(RuntimeError('stop failed')))
     with pytest.raises(RuntimeError, match='stop failed'):
-        instance.deploy('new', commit=lambda receipt: committed.append(receipt))
-    assert committed
+        instance.recover()
     assert rolling.read(instance.journal_file)['phase'] == 'committed'
-    assert rolling.read(instance.stack_file)['active'] == 'backend-green'
     monkeypatch.setattr(instance, 'dc', lambda *args: calls.append(args))
     assert instance.recover()['status'] == 'committed'
-    assert ('stop', 'backend-green') not in calls
-    assert not instance.journal_file.exists()
+    assert calls == [('stop', 'backend')]
 
 
 def test_configuration_fingerprint_detects_env_changes(tmp_path):

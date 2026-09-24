@@ -1947,9 +1947,10 @@ def active_runtime_service(layout: RuntimeLayout, service: str) -> str:
     return active_service(layout, service)
 
 
-def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> dict[str, bool]:
+def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem", maintenance: bool = False) -> dict[str, bool]:
     from .rolling_update import enabled
-    if enabled(layout):
+    journal = _read_json(layout.state_dir / 'rolling/transaction.json', {})
+    if enabled(layout) and not (maintenance and journal.get('mode') == 'maintenance' and journal.get('phase') == 'preparing'):
         raise ValueError('Rolling runtime enabled; refuse to overwrite its active Compose topology')
     root = source_root or layout.tooling_root
     ironproxy_config_before = (
@@ -2094,7 +2095,7 @@ def validate_upgrade_path(layout: RuntimeLayout, manifest: dict) -> None:
         raise RuntimeError("Target manifest is missing version.")
     if current and current == target:
         pending = _read_json(layout.state_dir / 'rolling/transaction.json', {})
-        if pending.get('mode') == 'fleet' and pending.get('phase') in ('committing', 'committed'):
+        if pending.get('mode') in ('fleet', 'maintenance') and pending.get('phase') in ('committing', 'committed'):
             return
         raise RuntimeError(f"Release {target} is already active.")
     minimum = str(manifest.get("minUpgradeableFrom") or "").strip()
@@ -3034,10 +3035,15 @@ def materialize_verified_release_manifest(
         raise RuntimeError("PacketSafari release manifest signature verification failed.") from exc
 
     if destination is None:
+        retained_signature = Path(str(manifest_path) + '.sig')
+        if signature_path.resolve() != retained_signature.resolve():
+            shutil.copy2(signature_path, retained_signature)
         return manifest_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     if manifest_path.resolve() != destination.resolve():
         shutil.copy2(manifest_path, destination)
+    if signature_path.resolve() != Path(str(destination) + '.sig').resolve():
+        shutil.copy2(signature_path, str(destination) + '.sig')
     return destination
 
 
@@ -4154,7 +4160,16 @@ def update_progress(args, label: str):
 
 
 def _download_update_manifest(args, layout: RuntimeLayout) -> Path:
-    source = _update_manifest_source(args, layout)
+    pending = _read_json(layout.state_dir / 'rolling/transaction.json', {})
+    if pending.get('mode') in ('fleet', 'maintenance'):
+        source = str(layout.state_dir / 'rolling/pinned-release.json')
+        if not Path(source).is_file() or not Path(source + '.sig').is_file():
+            raise RuntimeError('Pending deployment has no retained connected signature; resume with the original signed manifest/bundle using upgrade')
+        args.manifest_signature = source + '.sig'
+        args.manifest_url = source
+        print('Resuming saved release; channel discovery is deferred until this transaction finishes.', file=sys.stderr)
+    else:
+        source = _update_manifest_source(args, layout)
     with update_progress(args, "Fetching release manifest and verifying signature"):
         manifest_path = materialize_verified_release_manifest(layout, source, args)
     setattr(args, "_release_signature_verified", True)
@@ -4297,6 +4312,8 @@ def _attach_update_summary(
         installed_app = str(app.get('currentVersion') or '')
         verification = 'pending drain; release not promoted' if result['status'] == 'draining' else 'failed; previous release retained'
         rollback = 'both generations retained until drain' if result['status'] == 'draining' else 'traffic restored to previous generation'
+        if result.get('scope') == 'maintenance':
+            rollback = 'ingress paused; old connections, jobs and dependencies retained until drain'
     elif bool(getattr(args, "skip_health_check", False)):
         installed_app = str(result.get("version") or app.get("targetVersion") or "")
         verification = "skipped by operator"
@@ -4340,7 +4357,7 @@ def apply_update(args) -> dict:
         print(format_update_plan(check_payload, host_requirements), file=sys.stderr, flush=True)
         os.environ[_UPDATE_PLAN_PRINTED_ENV] = "true"
     manifest = _read_json(manifest_path, {})
-    pending_generation = _read_json(layout.state_dir / 'rolling/transaction.json', {}).get('mode') == 'fleet'
+    pending_generation = _read_json(layout.state_dir / 'rolling/transaction.json', {}).get('mode') in ('fleet', 'maintenance')
     if not check_payload["available"] and not bool(getattr(args, "force", False)) and not pending_generation:
         return _attach_update_summary({"status": "noop", **check_payload}, check_payload, host_requirements, args)
     acknowledge_unbacked_upgrade(args, backup_mode=str(check_payload.get("backupMode") or ""))
@@ -5502,6 +5519,9 @@ def prepare_connected_manifest(layout: RuntimeLayout, manifest_arg: str, args=No
     target.parent.mkdir(parents=True, exist_ok=True)
     if manifest_path.resolve() != target.resolve():
         shutil.copy2(manifest_path, target)
+    signature_path = Path(str(manifest_path) + '.sig')
+    if signature_path.is_file() and signature_path.resolve() != Path(str(target) + '.sig').resolve():
+        shutil.copy2(signature_path, str(target) + '.sig')
     return target
 
 
@@ -6171,7 +6191,8 @@ def upgrade_release(args) -> dict:
                 if not manifest_arg:
                     manifest_arg = str(_download_update_manifest(args, layout))
                 target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
-            if layout.compose_file.exists():
+            pending_update = _read_json(layout.state_dir / 'rolling/transaction.json', {})
+            if layout.compose_file.exists() and pending_update.get('mode') != 'maintenance':
                 setattr(args, "_doctor_manifest_path", str(layout.release_manifest_path))
                 assert_upgrade_preflight_doctor(args)
             setattr(args, "_doctor_manifest_path", str(target_manifest_path))
@@ -6210,9 +6231,12 @@ def upgrade_release(args) -> dict:
 
             from . import rolling_update
             if rolling_update.enabled(layout):
-                if getattr(args, 'maintenance', False):
-                    raise ValueError('Active generation deployments cannot silently convert to maintenance; retain the current topology and use a reviewed maintenance transition')
                 import sys as _sys
+                if getattr(args, 'maintenance', False) or pending_update.get('mode') == 'maintenance':
+                    from . import maintenance_update
+                    return maintenance_update.upgrade(layout, args, manifest, source=source,
+                        backup_mode=backup_mode, backup_proof=external_backup_proof,
+                        ops=_sys.modules[__name__])
                 return rolling_update.upgrade(layout, args, manifest, source=source,
                     backup_mode=backup_mode, backup_proof=external_backup_proof,
                     ops=_sys.modules[__name__])
