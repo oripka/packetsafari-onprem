@@ -118,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     proxy.add_argument("--profile", choices=["saas", "onprem"], default="onprem")
     proxy.add_argument("--manifest", help="Signed installed manifest required for first proxy activation")
     proxy.add_argument("--manifest-signature")
+    proxy.add_argument("--ingress-policy", type=Path, help="JSON trusted-ingress policy; required for host activation")
     proxy.add_argument("--proxy-container")
     proxy.add_argument("--target-container")
     proxy.add_argument("--target-port", type=int, default=80)
@@ -475,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.state_dir:
             parser.error("init/switch requires --state-dir")
         if args.action == "init":
-            initialize(args.state_dir)
+            initialize(args.state_dir, json.loads(args.ingress_policy.read_text()) if args.ingress_policy else None)
             print(json.dumps({"status": "initialized", "directory": str(args.state_dir)}))
         else:
             if not args.proxy_container or not args.target_container:

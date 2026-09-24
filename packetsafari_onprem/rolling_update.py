@@ -290,6 +290,11 @@ def manage_host(args):
             return result
         if enabled(layout):
             raise ValueError('Rolling updates already enabled')
+        if not args.ingress_policy:
+            raise ValueError('Host activation requires an explicit --ingress-policy')
+        ingress = proxy.ingress_policy(read(args.ingress_policy))
+        if args.profile == 'saas' and ingress['mode'] != 'cloudfront-https':
+            raise ValueError('SaaS activation requires cloudfront-https ingress policy')
         manifest = read(layout.release_manifest_path)
         if not args.manifest:
             raise ValueError('Enable requires --manifest pointing to the signed installed release')
@@ -306,7 +311,7 @@ def manage_host(args):
         policy = firewall.read_text()
         if 'backend-green:172.20.0.27' not in policy or 'deployment-proxy:172.20.0.26' not in policy:
             raise ValueError('Install the current governed green-slot and proxy firewall policy before activation')
-        result = bootstrap(runtime, base, proxy_name='packetsafari-deployment-proxy', proxy_image=proxy_image)
+        result = bootstrap(runtime, base, proxy_name='packetsafari-deployment-proxy', proxy_image=proxy_image, ingress=ingress)
         stack = read(runtime.stack_file)
         stack['configurationFingerprint'] = fingerprints([
             layout.runtime_env_path, layout.runtime_sizing_env_path, layout.compose_sizing_file,
@@ -315,7 +320,7 @@ def manage_host(args):
         return result
 
 
-def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE):
+def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingress=None):
     """One-time port transfer; caller owns the runtime lock. Existing data is shared."""
     directory = runtime.directory
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -329,7 +334,7 @@ def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE):
     stack = {'active': 'backend', 'images': {'backend': image, 'backend-green': image},
              'ports': ports, 'proxyImage': proxy_image, 'proxyName': proxy_name}
     save(directory / 'base.json', base)
-    proxy.initialize(directory / 'proxy')
+    proxy.initialize(directory / 'proxy', ingress)
     before = runtime.compose_file.read_text()
     save(runtime.stack_file, stack)
     started = False

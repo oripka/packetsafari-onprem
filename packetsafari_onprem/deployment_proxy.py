@@ -5,6 +5,7 @@ import fcntl
 from datetime import datetime, timezone
 import hashlib
 import json
+import ipaddress
 import os
 from pathlib import Path
 import re
@@ -33,7 +34,47 @@ def atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def configuration(target: str | None, generation: str) -> str:
+def ingress_policy(value=None):
+    value = {'mode': 'direct', 'trustedCidrs': []} if value is None else value
+    if not isinstance(value, dict) or set(value) - {'mode', 'trustedCidrs', 'viewerHttpsOnly'}:
+        raise ValueError('Invalid ingress policy fields')
+    mode = value.get('mode')
+    cidrs = value.get('trustedCidrs', [])
+    if mode not in ('direct', 'forwarded', 'cloudfront-https') or not isinstance(cidrs, list):
+        raise ValueError('Ingress mode must be direct, forwarded or cloudfront-https')
+    networks = [ipaddress.ip_network(cidr, strict=True) for cidr in cidrs if isinstance(cidr, str)]
+    if len(networks) != len(cidrs) or any(net.prefixlen == 0 for net in networks):
+        raise ValueError('Ingress requires explicit trusted CIDRs, never a default route')
+    if (mode == 'direct' and cidrs) or (mode != 'direct' and not cidrs):
+        raise ValueError('Only forwarded ingress modes require trusted CIDRs')
+    if mode == 'cloudfront-https' and value.get('viewerHttpsOnly') is not True:
+        raise ValueError('CloudFront mode requires a verified HTTPS-only or redirect-to-HTTPS viewer policy')
+    return {'mode': mode, 'trustedCidrs': [str(net) for net in networks],
+            'viewerHttpsOnly': value.get('viewerHttpsOnly', False)}
+
+
+def ingress_configuration(policy):
+    policy = ingress_policy(policy)
+    trusted = '\n'.join(f'        {cidr} 1;' for cidr in policy['trustedCidrs'])
+    realip = '\n'.join(f'    set_real_ip_from {cidr};' for cidr in policy['trustedCidrs'])
+    if policy['mode'] == 'forwarded':
+        scheme = '''map "$trusted_ingress:$http_x_forwarded_proto" $ingress_scheme {
+        default ""; ~^0: $scheme; "1:http" http; "1:https" https;
+    }'''
+    else:
+        scheme = 'map $trusted_ingress $ingress_scheme { default $scheme; 1 https; }'
+    return f'''{realip}
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive off;
+    geo $realip_remote_addr $trusted_ingress {{ default 0;
+{trusted}
+    }}
+    {scheme}
+    map $trusted_ingress $unresolved_client {{ default ""; 1 $realip_remote_addr; }}
+    map "$trusted_ingress:$http_x_forwarded_for" $missing_client {{ default 0; "1:" 1; }}'''
+
+
+def configuration(target: str | None, generation: str, policy=None) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9-]+", generation):
         raise ValueError("Invalid generation")
     if target is not None and not re.fullmatch(r"[0-9.]+:[0-9]+", target):
@@ -45,7 +86,13 @@ def configuration(target: str | None, generation: str) -> str:
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $ingress_scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Port "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Forwarded "";
+        proxy_set_header CF-Connecting-IP "";
+        proxy_set_header CloudFront-Forwarded-Proto "";
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_next_upstream off;
@@ -58,6 +105,7 @@ pid /tmp/nginx.pid;
 error_log /dev/stderr notice;
 events {{ worker_connections 2048; }}
 http {{
+    {ingress_configuration(policy)}
     access_log /dev/stdout;
     client_body_temp_path /tmp/client_body;
     proxy_temp_path /tmp/proxy;
@@ -65,6 +113,9 @@ http {{
     server {{
         listen 8080;
         client_max_body_size 12g;
+        if ($ingress_scheme = "") {{ return 400; }}
+        if ($missing_client = 1) {{ return 400; }}
+        if ($remote_addr = $unresolved_client) {{ return 400; }}
         location / {{ {route} }}
     }}
     server {{
@@ -76,15 +127,16 @@ http {{
 """
 
 
-def initialize(directory: Path) -> None:
+def initialize(directory: Path, policy=None) -> None:
+    policy = ingress_policy(policy)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (directory / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if (directory / "nginx.conf").exists():
             raise ValueError("Proxy configuration already exists; refusing to overwrite")
-        config = configuration(None, "unconfigured")
+        config = configuration(None, "unconfigured", policy)
         atomic_write(directory / "nginx.conf", config)
-        atomic_write(directory / "state.json", json.dumps({"generation": "unconfigured", "retiringWorkers": [],
+        atomic_write(directory / "state.json", json.dumps({"generation": "unconfigured", "retiringWorkers": [], "ingressPolicy": policy,
                      "configSha256": hashlib.sha256(config.encode()).hexdigest()}))
 
 
@@ -184,9 +236,10 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
         old_config = (directory / "nginx.conf").read_text()
         next_generation = uuid.uuid4().hex
         candidate = directory / "candidate.conf"
-        atomic_write(candidate, configuration(endpoint, next_generation))
+        policy = ingress_policy(state.get('ingressPolicy'))
+        atomic_write(candidate, configuration(endpoint, next_generation, policy))
         docker("exec", proxy, "nginx", "-t", "-c", "/etc/packetsafari-proxy/candidate.conf")
-        next_state = {"generation": next_generation, "target": target, "endpoint": endpoint,
+        next_state = {"generation": next_generation, "target": target, "endpoint": endpoint, "ingressPolicy": policy,
                       "containerId": target_info['Id'], "imageId": target_info['Image'],
                       "targetStartedAt": target_info['State']['StartedAt'],
                       "previousContainerId": state.get('containerId'),
@@ -208,7 +261,7 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
             atomic_write(directory / "nginx.conf", old_config)
             docker("exec", proxy, "nginx", "-s", "reload", "-c", "/etc/packetsafari-proxy/nginx.conf", check=False)
             raise
-        state = {"generation": next_generation, "target": target, "endpoint": endpoint,
+        state = {"generation": next_generation, "target": target, "endpoint": endpoint, "ingressPolicy": policy,
                  "switchedAt": datetime.now(timezone.utc).isoformat(),
                  "configSha256": hashlib.sha256((directory / "nginx.conf").read_bytes()).hexdigest(),
                  "containerId": target_info["Id"], "imageId": target_info["Image"],

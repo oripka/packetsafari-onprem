@@ -9,6 +9,23 @@ from packetsafari_onprem import deployment_proxy as proxy
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_invalid_trust_policy_rejected(self):
+        for policy in [{}, {'mode': 'forwarded', 'trustedCidrs': []},
+                       {'mode': 'forwarded', 'trustedCidrs': ['0.0.0.0/0']},
+                       {'mode': 'forwarded', 'trustedCidrs': ['127.0.0.1; return 200;']},
+                       {'mode': 'cloudfront-https', 'trustedCidrs': ['192.0.2.1/32']},
+                       {'mode': 'direct', 'trustedCidrs': ['192.0.2.1/32']}]:
+            with self.assertRaises(ValueError):
+                proxy.ingress_policy(policy)
+
+    def test_trust_persisted_at_initialization(self):
+        import json
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)
+            policy = {'mode': 'forwarded', 'trustedCidrs': ['192.0.2.1/32']}
+            proxy.initialize(path, policy)
+            self.assertEqual(json.loads((path/'state.json').read_text())['ingressPolicy'], proxy.ingress_policy(policy))
+
     def test_streaming_and_no_automatic_retries(self):
         config = proxy.configuration('172.20.0.20:80', 'abc')
         for option in ['proxy_request_buffering off;', 'proxy_buffering off;',

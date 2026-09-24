@@ -72,7 +72,7 @@ and `.27` (green backend). The release builder now mirrors the pinned proxy imag
 The existing origin port is transferred once; subsequent updates keep it stable.
 
 ```bash
-packetsafari-ops deployment-proxy enable --profile saas --manifest /path/to/signed-installed-manifest.json
+packetsafari-ops deployment-proxy enable --profile saas --manifest /path/to/signed-installed-manifest.json --ingress-policy /path/to/ingress.json
 # Subsequent updates use the existing packetsafari-ops update command and its backup policy.
 packetsafari-ops deployment-proxy recover --profile saas
 ```
@@ -91,9 +91,38 @@ or frozen runtime configuration are rejected. Inline backups and skipped health
 checks are rejected. Legacy stop-first updates and legacy rollback are blocked
 once activated; there is no silent maintenance fallback.
 
+### Trusted ingress
+
+Host activation requires an explicit JSON policy. Direct on-prem ingress uses
+`{"mode":"direct","trustedCidrs":[]}`. An on-prem TLS terminator uses
+`{"mode":"forwarded","trustedCidrs":["192.0.2.10/32"]}` (replace the example
+with its actual immediate-peer address). That terminator must overwrite
+X-Forwarded-Proto with exactly `http` or `https` and append the actual client IP
+to X-Forwarded-For. Multi-hop recursive trust is deliberately not inferred.
+
+SaaS requires `mode: "cloudfront-https"`, explicit current CloudFront
+origin-facing CIDRs, and `viewerHttpsOnly: true`. Verify the distribution's
+HTTPS-only/redirect-to-HTTPS viewer policy before setting that assertion. This
+mode obtains the viewer IP from CloudFront's appended last X-Forwarded-For value
+and normalizes the public scheme to HTTPS without depending on a new CloudFront
+header policy. Preserve the viewer Host through the configured origin path.
+Keep the existing origin firewall/access restrictions; trusting AWS ranges is
+not authentication of a particular distribution. Review range changes before
+updating the policy; no network lookup silently expands trust during deployment.
+
+Untrusted peers cannot supply forwarded IP, scheme, host, port or alternate
+client-address headers. Missing/malformed trusted addresses and invalid/missing
+on-prem schemes fail with HTTP 400. No default-route trust CIDRs are accepted.
+Policy is persisted with routing state and retained through cutover and recovery.
+The backend's Agent gateway route preserves normalized metadata only from the
+managed proxy address `.26`; include the updated backend NGINX template in the
+release. Dev/direct mode needs no trusted addresses. Existing direct dev state
+is upgraded safely on the next cutover; changing an existing host trust policy
+requires explicit maintenance reconciliation, not hand-editing state files.
+
 The normal full-release builder does not yet produce API-only compatibility
 manifests. Do not enable this on a production host until that release path, a
-maintenance transition, CloudFront/TLS/client-address forwarding, resource headroom,
+maintenance transition, live ingress-policy verification, resource headroom,
 authenticated uploads and real continuing investigations have been qualified on
 a representative host. Local timings are not a production downtime guarantee.
 Frontend/CDN publication and worker draining remain separate work.
@@ -104,6 +133,7 @@ Frontend/CDN publication and worker draining remain separate work.
 python3 -m pytest tests/test_rolling_update.py tests/test_deployment_proxy.py tests/test_render_compose.py tests/test_update_channel.py
 # From the app workspace, where local test ports are allowed:
 python3 ../packetsafari-onprem/scripts/test_deployment_proxy_local.py
+python3 ../packetsafari-onprem/scripts/test_deployment_ingress_local.py
 python3 scripts/test_dev_rolling_update.py
 ```
 
