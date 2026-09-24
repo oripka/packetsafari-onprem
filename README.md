@@ -9,6 +9,7 @@ Customer-facing Python-native installer, operator CLI, and interactive operation
 - `scripts/license_*.py` - offline entitlement token tooling
 - `docs/license-claims.md` - signed entitlement claim schema and internal issuance commands
 - `docs/upgrade-runbook.md` - connected and air-gapped upgrade/rollback runbook
+- `docs/deployment-proxy.md` - opt-in local blue/green API proxy and cutover verification
 - `docs/ai-model-onboarding.md` - customer-managed AI endpoint, model-profile, parser, qualification, and offline onboarding workflow
 - `docs/security-content-delivery.md` - included, vendor-direct, customer-provided, and unavailable security-content delivery
 - `docs/passkeys.md` - canonical public URL, automatic WebAuthn configuration, and safe hostname-change procedure

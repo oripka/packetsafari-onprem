@@ -112,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
             help="Detached manifest signature path or URL. Defaults to the manifest source plus '.sig'.",
         )
 
+    proxy = subparsers.add_parser("deployment-proxy", help="Opt-in backend cutover; does not run an upgrade.")
+    proxy.add_argument("action", choices=["init", "switch"])
+    proxy.add_argument("--state-dir", type=Path, required=True)
+    proxy.add_argument("--proxy-container")
+    proxy.add_argument("--target-container")
+    proxy.add_argument("--target-port", type=int, default=80)
+    proxy.add_argument("--health-path", default="/api/v2/health")
+    proxy.add_argument("--ready-timeout", type=float, default=120)
+    proxy.add_argument("--drain-timeout", type=float, default=120)
+
     install = subparsers.add_parser("install", help="Install PacketSafari on-prem into onboarding mode.")
     install_source = install.add_mutually_exclusive_group()
     install_source.add_argument("--manifest", help="Connected install release manifest path or URL.")
@@ -453,6 +463,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "deployment-proxy":
+        from packetsafari_onprem.deployment_proxy import initialize, switch
+        if args.action == "init":
+            initialize(args.state_dir)
+            print(json.dumps({"status": "initialized", "directory": str(args.state_dir)}))
+        else:
+            if not args.proxy_container or not args.target_container:
+                parser.error("switch requires --proxy-container and --target-container")
+            ui.log("start", "Checking candidate, switching traffic, then waiting for old connections")
+            payload = switch(args.state_dir, args.proxy_container, args.target_container,
+                             port=args.target_port, health_path=args.health_path,
+                             ready_timeout=args.ready_timeout, drain_timeout=args.drain_timeout)
+            print(json.dumps(payload, indent=2))
+            ui.log("success" if payload["status"] == "drained" else "warn", payload["status"])
+        return 0
     if args.command == "install":
         ui.log("start", "Installing release")
         print(json.dumps(install_release(args), indent=2))
