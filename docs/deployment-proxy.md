@@ -5,6 +5,53 @@ adds a two-slot Compose transaction used by normal dev commands and, after
 explicit activation, the signed host updater. This is API-only rolling support;
 worker, schema, gateway and shared-service replacements require maintenance.
 
+## Normal release workflow integration
+
+The operator interface remains the existing two commands:
+
+```bash
+# App repository, local workstation: builds/publishes runtime and static frontend
+./packetsafari-saas-release --fast
+# Production host: applies the published signed release
+sudo env HOME=/root packetsafari-ops update --backup-mode skip --allow-unbacked-upgrade
+```
+
+The backup flags explicitly acknowledge proceeding without a data backup made
+by the updater. They do not certify an external backup. The app-owned
+[SaaS release runbook](../../packetsafari/documentation/internal/5.release-and-deployment/3.saas-build-push-and-update.md)
+owns publication, signatures, frontend/CloudFront and host update procedures.
+This document owns the proxy transaction and its integration boundary.
+
+**Current status:** full releases use the existing maintenance updater on hosts
+without proxy activation. On an activated host, the updater enters the strict
+API-only branch. It rejects unsupported full-release changes; it does not apply
+only the API and silently promote a partially updated release. The normal release
+builder mirrors the proxy image but does not produce `rollingUpdate.compatibleFrom`.
+The full-release workflow is therefore not yet integrated with blue/green.
+
+| Component | Implemented behavior | Required before integrated full releases |
+| --- | --- | --- |
+| Backend API | Two slots; readiness, switch, connection drain, commit and old-slot stop. | Signed compatibility from the normal builder, automatic supported strategy selection and qualified host activation. |
+| Worker, Agent runner, Sharkd | Retained during API rolling updates. | Stop new work reaching retiring processes; retain their process-affine jobs and dependencies until completion; verify replacement and cleanup. |
+| Agent stream gateway | Retained; legacy backend-image inheritance must be explicitly frozen. | Version compatibility and live-stream continuity across replacement. |
+| DNS, outbound proxy, firewall, deployment proxy | Retained; changed images/configuration are outside the API transaction. | Ordered replacement, ingress/egress checks and explicit interruption reporting. |
+| Database, Redis, migrations | Shared; no migrations in an API rolling update. | Compatible migration strategy or a clearly reported maintenance transaction; preserve recovery/backup semantics. |
+| Static frontend / CloudFront | Published locally by `--fast`, separately from the host update. | Qualify frontend/API compatibility during version overlap; publication is not atomic with host promotion. |
+
+The integrated updater must apply **every changed image** before declaring the
+release successful, show each service as reused/replaced/draining/failed, and
+retain actionable logs and a recovery receipt. Operators should not manually
+select backend versus full-stack deployment. These are remaining delivery
+requirements, not implemented guarantees. A drain timeout must not become an
+unreported task kill. No full-release three-second downtime target has been
+qualified; running two APIs alone cannot provide it for shared dependencies.
+
+Before production activation, qualify the normal signed release/update path,
+compatible and maintenance changes, failed readiness, failed post-switch checks,
+interrupted recovery, uploads/streams and real continuing jobs, plus resource
+headroom and ingress trust. Keep this boundary current when those checks pass;
+local transport tests do not substitute for full-release qualification.
+
 ## Development
 
 From the app repository:
@@ -23,12 +70,22 @@ address therefore stays unchanged. Worker, gateway, database and Sharkd are not
 recreated. `dev restart backend` uses this transaction once enabled; an unqualified
 `dev restart` still explicitly restarts the worker too.
 
-For dependency/image changes, build without recreating the stack, then update:
+For dependency/image changes, use one command:
 
 ```bash
-PACKETSAFARI_DEV_BUILD_ONLY=1 ./packetsafari dev rebuild
-./packetsafari dev update --image backend-dev:latest
+./packetsafari dev update --build        # build images, replace API only
+./packetsafari dev update --build --all  # build and apply the regular dev stack
 ```
+
+`--all` is maintenance, not blue/green for all containers: it stops services,
+recreates them from resolved image IDs, runs initialization/migrations and verifies
+image identity and configured health. Jobs/connections may be interrupted.
+Optional fixture/test profiles are excluded. Pinned third-party images are reused,
+not rebuilt. Repeat the same command after failure to resume its saved plan;
+`rolling-recover` is for API transactions, not maintenance or database restoration.
+The [development guide](../../packetsafari/documentation/DEVELOPMENT.md#development-updates)
+owns the command reference and current full-stack test boundary. Real full-stack
+dev replacement has not yet been qualified end to end.
 
 A full legacy dev rebuild is blocked while rolling mode is enabled. Do not run
 the original Compose file directly against this running project: it would bypass
@@ -120,12 +177,11 @@ release. Dev/direct mode needs no trusted addresses. Existing direct dev state
 is upgraded safely on the next cutover; changing an existing host trust policy
 requires explicit maintenance reconciliation, not hand-editing state files.
 
-The normal full-release builder does not yet produce API-only compatibility
-manifests. Do not enable this on a production host until that release path, a
-maintenance transition, live ingress-policy verification, resource headroom,
-authenticated uploads and real continuing investigations have been qualified on
-a representative host. Local timings are not a production downtime guarantee.
-Frontend/CDN publication and worker draining remain separate work.
+Do not enable this on production until the
+[normal release integration prerequisites](#normal-release-workflow-integration)
+have been met. Retaining the existing origin address/port avoids an origin-port
+change in CloudFront; it does not remove the ingress-policy verification above
+or establish frontend/API compatibility.
 
 ## Verification
 
