@@ -2497,26 +2497,38 @@ def configure_upstream_proxy(args) -> dict:
     }
 
 
-def _parse_intelligence_egress_url(value: str, *, resolve_dns: bool) -> dict[str, object]:
+def _parse_intelligence_egress_url(value: str, *, resolve_dns: bool, purpose: str = "intelligence", onprem: bool = True) -> dict[str, object]:
     raw = str(value or "").strip()
     if not raw:
         raise RuntimeError("--url is required.")
     if len(raw) > 4096 or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in raw):
         raise RuntimeError("--url must be a bounded URL without whitespace or control characters.")
     parsed = urllib.parse.urlsplit(raw)
-    if str(parsed.scheme or "").lower() != "https":
-        raise RuntimeError("Intelligence feed hosts must use HTTPS.")
+    scheme = str(parsed.scheme or "").lower()
+    allowed_schemes = {"https", "http"} if onprem and purpose != "intelligence" else {"https"}
+    if scheme not in allowed_schemes:
+        raise RuntimeError("Endpoint must use HTTPS (HTTP is supported only for on-prem AI and identity endpoints).")
     if parsed.username or parsed.password:
         raise RuntimeError("Intelligence feed URLs must not embed credentials.")
     if parsed.fragment:
         raise RuntimeError("Intelligence feed URLs must not include a fragment.")
+    if purpose != "intelligence" and parsed.query:
+        raise RuntimeError("AI and identity endpoint URLs must not include a query string.")
     host = str(parsed.hostname or "").strip().lower().rstrip(".")
     if not host:
         raise RuntimeError("Intelligence feed URL must include a hostname.")
     if not host.isascii():
         raise RuntimeError("Intelligence feed URL must use an ASCII hostname or IP address.")
     try:
-        port = int(parsed.port or 443)
+        ipaddress.ip_address(host)
+    except ValueError:
+        if len(host) > 253 or any(not label or len(label) > 63 or not label[0].isalnum()
+                                or not label[-1].isalnum() or any(not (c.isalnum() or c == "-") for c in label)
+                                for label in host.split(".")):
+            raise RuntimeError("Endpoint must use a valid hostname or IP address.")
+    default_port = 443 if scheme == "https" else 80
+    try:
+        port = int(parsed.port if parsed.port is not None else default_port)
     except Exception as exc:
         raise RuntimeError("Intelligence feed URL contains an invalid port.") from exc
     if port < 1 or port > 65535:
@@ -2524,7 +2536,7 @@ def _parse_intelligence_egress_url(value: str, *, resolve_dns: bool) -> dict[str
 
     def unsafe(address: str) -> bool:
         ip = ipaddress.ip_address(address)
-        if ip not in INTELLIGENCE_EGRESS_METADATA_ADDRESSES and any(
+        if onprem and ip not in INTELLIGENCE_EGRESS_METADATA_ADDRESSES and any(
             ip in network for network in INTELLIGENCE_EGRESS_CUSTOMER_PRIVATE_NETWORKS
         ):
             return False
@@ -2569,8 +2581,8 @@ def _parse_intelligence_egress_url(value: str, *, resolve_dns: bool) -> dict[str
     return {
         "host": host,
         "port": port,
-        "scheme": "https",
-        "origin": urllib.parse.urlunsplit(("https", display_host if port == 443 else f"{display_host}:{port}", "", "", "")),
+        "scheme": scheme,
+        "origin": urllib.parse.urlunsplit((scheme, display_host if port == default_port else f"{display_host}:{port}", "", "", "")),
     }
 
 
@@ -2581,6 +2593,89 @@ def _load_intelligence_egress_registry(layout: RuntimeLayout) -> dict[str, objec
         "approved_hosts": [entry for entry in approved_hosts if isinstance(entry, dict)] if isinstance(approved_hosts, list) else [],
         "version": 1,
     }
+
+
+def _load_endpoint_egress_registry(layout: RuntimeLayout, purpose: str) -> dict:
+    path = layout.configuration_dir / f"approved-{purpose}-egress-hosts.json"
+    registry = _read_json(path, {"approved_hosts": [], "version": 1})
+    if not isinstance(registry, dict) or not isinstance(registry.get("approved_hosts"), list):
+        raise RuntimeError(f"Invalid {purpose} approval registry")
+    for entry in registry["approved_hosts"]:
+        if not isinstance(entry, dict) or not entry.get("host"):
+            raise RuntimeError(f"Invalid {purpose} approval entry")
+        if not isinstance(entry.get("organization_ids", []), list):
+            raise RuntimeError("Invalid AI organization scope")
+    return registry
+
+
+def _operate_endpoint_egress(args, layout: RuntimeLayout, purpose: str) -> dict:
+    action = args.action
+    organization_id = str(getattr(args, "organization_id", "") or "").strip()
+    if organization_id and (purpose != "ai" or action.startswith("list-")):
+        raise RuntimeError("--organization-id is supported only for AI endpoint approvals and removals.")
+    registry_path = layout.configuration_dir / f"approved-{purpose}-egress-hosts.json"
+    registry = _load_endpoint_egress_registry(layout, purpose)
+    if action == f"list-{purpose}-hosts":
+        return {"ok": True, "registryPath": str(registry_path), "approvedHosts": registry["approved_hosts"]}
+    parsed = _parse_intelligence_egress_url(
+        str(getattr(args, "url", "") or ""), resolve_dns=action == f"approve-{purpose}-host",
+        purpose=purpose, onprem=_active_deployment_profile(layout) == "onprem",
+    )
+    target = (parsed["host"], parsed["port"], parsed["scheme"])
+    entries = registry["approved_hosts"]
+    existing = next((entry for entry in entries if (
+        str(entry.get("host") or "").lower(), int(entry.get("port") or 443), entry.get("scheme", "https")
+    ) == target), None)
+    changed = False
+    if action == f"approve-{purpose}-host":
+        entry = dict(existing or {})
+        entry.update({key: parsed[key] for key in ("host", "port", "scheme")})
+        entry.update(approved_at=utc_now(), approved_by=getattr(args, "approved_by", "") or getpass.getuser(),
+                     notes=getattr(args, "notes", "") or "")
+        if purpose == "ai":
+            # An existing platform-wide grant must not silently become team-only.
+            scopes = existing.get("organization_ids", []) if existing else None
+            entry["organization_ids"] = (sorted(set(scopes or []) | {organization_id})
+                                          if organization_id and scopes != [] else [])
+        if existing is not None:
+            entries.remove(existing)
+        entries.append(entry)
+        changed = True
+    elif existing is not None:
+        if organization_id:
+            scopes = existing.get("organization_ids", [])
+            if not scopes:
+                raise RuntimeError("This is a deployment-wide grant; a single team cannot be removed from it.")
+            changed = organization_id in scopes
+            existing["organization_ids"] = [value for value in scopes if value != organization_id]
+            if not existing["organization_ids"]:
+                entries.remove(existing)
+        else:
+            entries.remove(existing)
+            changed = True
+    if not changed:
+        return {"ok": True, "action": action, "changed": False, "restarted": False}
+    paths = (registry_path, layout.production_egress_allowlist_path, layout.production_ironproxy_config_path)
+    previous = {path: path.read_bytes() if path.exists() else None for path in paths}
+    if any(previous[path] is None for path in paths[1:]):
+        raise RuntimeError("Installed egress allowlist and Iron proxy configuration are required.")
+    restart_attempted = False
+    try:
+        _write_json(registry_path, registry)
+        synced = _sync_intelligence_egress_config(layout, purpose=purpose)
+        restart_attempted = True
+        restarted = _restart_ironproxy_if_running(layout)
+    except Exception:
+        for path, content in previous.items():
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(content)
+        if restart_attempted:
+            _restart_ironproxy_if_running(layout)
+        raise
+    return {"ok": True, "action": action, "target": parsed, "changed": True,
+            "restarted": restarted, "registryPath": str(registry_path), **synced}
 
 
 def _replace_ironproxy_domains(path: Path, hosts: list[str], *, warn: bool) -> None:
@@ -2616,7 +2711,7 @@ def _replace_ironproxy_domains(path: Path, hosts: list[str], *, warn: bool) -> N
     path.write_text("\n".join(rendered) + "\n", encoding="utf-8")
 
 
-def _sync_intelligence_egress_config(layout: RuntimeLayout) -> dict[str, object]:
+def _sync_intelligence_egress_config(layout: RuntimeLayout, *, purpose: str = "intelligence") -> dict[str, object]:
     allowlist_path = layout.production_egress_allowlist_path
     if not allowlist_path.exists():
         raise RuntimeError(f"Egress allowlist is missing: {allowlist_path}")
@@ -2629,9 +2724,9 @@ def _sync_intelligence_egress_config(layout: RuntimeLayout) -> dict[str, object]
     retained = [
         item
         for item in destinations
-        if not (isinstance(item, dict) and str(item.get("managed_by") or "") == INTELLIGENCE_EGRESS_MANAGED_BY)
+        if not (isinstance(item, dict) and str(item.get("managed_by") or "") == f"packetsafari-egress-{purpose}")
     ]
-    registry = _load_intelligence_egress_registry(layout)
+    registry = _load_endpoint_egress_registry(layout, purpose)
     for entry in registry["approved_hosts"]:
         host = str(entry.get("host") or "").strip().lower()
         if not host:
@@ -2640,11 +2735,11 @@ def _sync_intelligence_egress_config(layout: RuntimeLayout) -> dict[str, object]
             {
                 "classification": "feature-optional",
                 "host": host,
-                "managed_by": INTELLIGENCE_EGRESS_MANAGED_BY,
-                "notes": "Host-approved custom intelligence feed routed through the egress proxy.",
+                "managed_by": f"packetsafari-egress-{purpose}",
+                "notes": "Host-approved " + {"intelligence": "custom intelligence feed", "ai": "external AI provider endpoint", "identity": "external identity provider endpoint"}[purpose] + " routed through the egress proxy.",
                 "owners": ["backend", "worker"],
                 "port": int(entry.get("port") or 443),
-                "purpose": "Security intelligence",
+                "purpose": {"intelligence": "Security intelligence", "ai": "Approved external AI providers", "identity": "Approved external identity providers"}[purpose],
             }
         )
     allowlist["destinations"] = retained
@@ -2688,6 +2783,11 @@ def _restart_ironproxy_if_running(layout: RuntimeLayout) -> bool:
 def operate_intelligence_egress(args) -> dict[str, object]:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     action = str(getattr(args, "action", "") or "").strip()
+    if action in {f"{verb}-{purpose}-{suffix}" for purpose in ("ai", "identity")
+                  for verb, suffix in (("approve", "host"), ("remove", "host"), ("list", "hosts"))}:
+        return _operate_endpoint_egress(args, layout, action.split("-")[1])
+    if getattr(args, "organization_id", ""):
+        raise RuntimeError("--organization-id is supported only for AI endpoint approvals and removals.")
     registry = _load_intelligence_egress_registry(layout)
     if action == "mode":
         if _active_deployment_profile(layout) != "onprem":

@@ -205,11 +205,32 @@ packetsafari-ops onboard schema
 packetsafari-ops config show
 packetsafari-ops egress list-intelligence-hosts
 packetsafari-ops egress approve-intelligence-host --url https://feeds.example.com
+packetsafari-ops egress list-ai-hosts
+packetsafari-ops egress approve-ai-host --url https://llm.example.com/v1
+packetsafari-ops egress approve-ai-host --url https://llm.example.com/v1 --organization-id TEAM_ID
+packetsafari-ops egress remove-ai-host --url https://llm.example.com/v1 --organization-id TEAM_ID
+packetsafari-ops egress list-identity-hosts
+packetsafari-ops egress approve-identity-host --url https://identity.example.com
 packetsafari-ops egress mode unrestricted
 packetsafari-ops egress mode allowlist
 packetsafari-ops iam show-initial-admin-command --email admin@example.com
 packetsafari-ops diagnostics restart
 ```
+
+AI and identity approvals are host-only operations, also available to SaaS
+platform operators. SaaS endpoints must use public HTTPS destinations. On-prem
+endpoints may use customer-network addresses and HTTP. Metadata, loopback, and
+link-local destinations are rejected. Use `--organization-id` for a SaaS AI team;
+omitting it grants deployment-wide application access. Removing the last scoped
+AI grant removes the destination unless another purpose or baseline retains it.
+Identity approvals apply deployment-wide. `--base-url` is an alias for `--url`.
+The commands preserve unrelated proxy transforms and do not extend secret
+injection to approved hosts. Configure the destination's own API key.
+
+The application’s **Admin → Outbound access** page is read-only. It shows
+configured policy, not confirmed runtime enforcement. After approval, use the
+feature's connection test to check actual access. Updating configuration restarts
+Iron Proxy only if it is running; no services are started by approval commands.
 
 Egress mode defaults to `allowlist`. Customer-operated on-prem deployments may
 explicitly select `unrestricted`; proxy-routed HTTP(S) traffic still traverses
