@@ -46,6 +46,17 @@ requirements, not implemented guarantees. A drain timeout must not become an
 unreported task kill. No full-release three-second downtime target has been
 qualified; running two APIs alone cannot provide it for shared dependencies.
 
+Full-release blue/green must drain every replaced container that owns active
+work or connections, not only the HTTP backend. Stop assigning new work to the
+retiring generation, verify replacements, and keep old workers, Agent runners,
+Sharkd sessions, gateway streams and their required dependencies alive until
+their work completes. HTTP connection drain is not evidence that background work
+has finished. Stop old containers only after service-specific drain checks pass.
+A timeout leaves them running and the release pending; do not silently fall back
+to maintenance or force-stop tasks. Services without a safe overlap/drain contract,
+including incompatible database changes, require an explicitly separate maintenance
+decision. The dev `--all` maintenance helper does not implement this contract.
+
 Before production activation, qualify the normal signed release/update path,
 compatible and maintenance changes, failed readiness, failed post-switch checks,
 interrupted recovery, uploads/streams and real continuing jobs, plus resource
