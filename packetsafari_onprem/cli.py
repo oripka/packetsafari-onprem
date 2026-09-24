@@ -379,6 +379,7 @@ def _format_update_result(payload: dict) -> str:
         title,
         "=" * 76,
         f"Application/backend  {previous_app} -> {installed_app}  [{'updated' if app_updated else 'current'}]",
+        f"Release bundled      {(summary.get('installedRelease') or {}).get('display', 'unknown')}",
         f"Ops tooling          {previous_ops} -> {installed_ops}  [{'updated' if ops_updated else 'current'}]",
         f"Profile              {payload.get('profile') or 'unknown'}",
         f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'none'}",

@@ -274,6 +274,10 @@ The installed wrapper is written to `/opt/packetsafari/bin/packetsafari-ops` dur
 - Finalizing onboarding writes the managed `runtime.env`, flips the deployment out of onboarding mode on the next restart, and then requires manual first-admin creation from inside the backend container.
 - The public HTTPS URL entered during onboarding automatically owns the WebAuthn origin and relying-party ID; see `docs/passkeys.md` before enrolling passkeys or changing the hostname.
 - `update check` discovers the configured release-channel manifest and reports app and ops tooling availability.
+  Current/target releases include their manifest bundling timestamp, UTC display
+  and age; missing legacy dates remain unknown. Update preflight prints elapsed
+  progress to stderr every five seconds, leaving JSON stdout intact. `--quiet`
+  suppresses progress. This does not bypass signature or host checks.
 - `update` downloads the configured release-channel manifest, self-updates `packetsafari-ops` when the manifest advertises newer tooling, re-execs the updated CLI, and then runs the same transaction as `upgrade --manifest`.
 - In an interactive terminal, `update` prints a concise plan before mutation
   showing the application/backend and ops-tool version transitions, changed

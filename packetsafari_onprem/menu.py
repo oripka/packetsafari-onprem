@@ -418,6 +418,8 @@ def _update_review(payload: dict, ctx: MenuContext, *, title: str = "Update Revi
     available = bool(app.get("available"))
     marker = f"{GREEN}AVAILABLE{RESET}" if available else f"{DIM}CURRENT{RESET}"
     print(f"Application       {app.get('currentVersion') or 'not installed'} → {app.get('targetVersion') or 'unknown'}  {marker}")
+    print(f"Current release   {(app.get('currentRelease') or {}).get('display', 'unknown')}")
+    print(f"Target release    {(app.get('targetRelease') or {}).get('display', 'unknown')}")
     print(
         f"Ops tooling      {ops.get('currentVersion') or ctx.ops_version} → "
         f"{ops.get('targetVersion') or ops.get('requiredVersion') or 'current'}"

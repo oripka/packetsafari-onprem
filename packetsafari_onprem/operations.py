@@ -19,6 +19,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3990,9 +3991,54 @@ def _update_manifest_source(args, layout: RuntimeLayout) -> str:
     return f"{base.rstrip('/')}/channels/{profile}/{channel}/{platform}/release-manifest.json"
 
 
+def release_time(value: object) -> dict:
+    """Keep machine time and UTC operator display without inventing legacy dates."""
+    raw = str(value or "")
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            raise ValueError("missing timezone")
+        stamp = stamp.astimezone(timezone.utc)
+        seconds = (datetime.now(timezone.utc) - stamp).total_seconds()
+        amount, unit = (int(abs(seconds) // 86400), "days") if abs(seconds) >= 86400 else (int(abs(seconds) // 3600), "hours") if abs(seconds) >= 3600 else (int(abs(seconds) // 60), "minutes")
+        age = f"{amount} {unit} ago" if seconds >= 0 else f"in {amount} {unit} (check clock)"
+        return {"timestamp": raw, "display": stamp.strftime("%d %b %Y %H:%M:%S UTC") + f" ({age})"}
+    except (ValueError, TypeError, OverflowError):
+        return {"timestamp": None, "display": "unknown (not recorded)"}
+
+
+@contextmanager
+def update_progress(args, label: str):
+    """Progress stays on stderr, leaving JSON stdout consumable."""
+    if bool(getattr(args, "quiet", False)):
+        yield
+        return
+    started = time.monotonic()
+    stopped = threading.Event()
+    print(f"[update] {label}...", file=sys.stderr, flush=True)
+
+    def heartbeat():
+        while not stopped.wait(5):
+            print(f"[update] {label} ({time.monotonic() - started:.0f}s elapsed)...", file=sys.stderr, flush=True)
+
+    worker = threading.Thread(target=heartbeat, daemon=True)
+    worker.start()
+    try:
+        yield
+    except BaseException:
+        print(f"[update] {label}: failed after {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
+        raise
+    else:
+        print(f"[update] {label}: done in {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
+    finally:
+        stopped.set()
+        worker.join()
+
+
 def _download_update_manifest(args, layout: RuntimeLayout) -> Path:
     source = _update_manifest_source(args, layout)
-    manifest_path = materialize_verified_release_manifest(layout, source, args)
+    with update_progress(args, "Fetching release manifest and verifying signature"):
+        manifest_path = materialize_verified_release_manifest(layout, source, args)
     setattr(args, "_release_signature_verified", True)
     return manifest_path
 
@@ -4027,6 +4073,8 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         "reason": reason,
         "currentVersion": current,
         "targetVersion": target,
+        "currentRelease": release_time(active_manifest.get("builtAt")),
+        "targetRelease": release_time(manifest.get("builtAt")),
     }
     ops = tooling_update_status(manifest)
     sizing_status = sizing_state_status(layout)
@@ -4091,6 +4139,8 @@ def format_update_plan(payload: dict, host_requirements: dict[str, object]) -> s
         "PACKETSAFARI UPDATE PLAN",
         "=" * 76,
         f"Application/backend  {app.get('currentVersion') or 'not installed'} -> {app.get('targetVersion') or 'unknown'}  [{app_marker}]",
+        f"Current release      {(app.get('currentRelease') or {}).get('display', 'unknown')}",
+        f"Target release       {(app.get('targetRelease') or {}).get('display', 'unknown')}",
         f"Ops tooling          {ops.get('currentVersion') or version()} -> {ops_target}  [{ops_marker}]",
         f"Deployment           {payload.get('profile') or 'unknown'} / {payload.get('channel') or 'stable'} / {payload.get('platform') or DEFAULT_UPDATE_PLATFORM}",
         f"Changed services     {', '.join(str(item) for item in changed_services) if changed_services else 'no image changes detected'}",
@@ -4138,6 +4188,7 @@ def _attach_update_summary(
     elif backup_mode == "skip":
         rollback += "; no PacketSafari data backup was captured"
     result["updateSummary"] = {
+        "installedRelease": app.get("currentRelease") if result.get("status") == "noop" else app.get("targetRelease"),
         "previousApplicationVersion": str(app.get("currentVersion") or ""),
         "installedApplicationVersion": installed_app,
         "previousOpsVersion": original_ops,
@@ -4156,8 +4207,9 @@ def apply_update(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     ensure_runtime_dirs(layout)
     human_output = bool(getattr(args, "human_output", False))
-    host_requirements = host_requirements_report(layout) if human_output else warn_if_host_below_requirements(layout)
-    sizing_status = sizing_state_status(layout) if human_output else warn_if_sizing_state_stale(layout)
+    with update_progress(args, "Checking host requirements and sizing"):
+        host_requirements = host_requirements_report(layout) if human_output else warn_if_host_below_requirements(layout)
+        sizing_status = sizing_state_status(layout) if human_output else warn_if_sizing_state_stale(layout)
     manifest_path = _download_update_manifest(args, layout)
     check_payload = _update_check_payload(args, layout, manifest_path)
     ops_status = check_payload.get("ops") if isinstance(check_payload.get("ops"), dict) else {}
