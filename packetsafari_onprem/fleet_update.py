@@ -69,22 +69,26 @@ def upgrade(layout, args, current, manifest, *, source, backup_mode, backup_proo
     target = copy.deepcopy(stack['fleetBases'][stack['active']])
     for service, image in images.items():
         target['services'][service]['image'] = image
-    if source == 'manifest' and not getattr(args, 'skip_image_pull', False):
-        if ops.deployment_profile(args) == 'saas':
-            ops.ensure_ecr_credential_helper_ready(layout)
-        for image in set(images.values()):
-            subprocess.run(['docker', 'pull', image], check=True)
     metadata = directory / 'fleet-release.json'
     if runtime.journal_file.exists():
         saved = read(metadata)
         if saved['manifest'] != manifest:
             raise RuntimeError('An earlier release is still draining; repeat its exact release before applying another')
+        if saved.get('backupMode', backup_mode) != backup_mode:
+            raise RuntimeError('Resume with the original backup policy')
+        target = read(runtime.journal_file)['targetBase']
+        print('Resuming saved application generation; images are already staged, no registry pulls.', file=sys.stderr, flush=True)
     else:
+        if source == 'manifest' and not getattr(args, 'skip_image_pull', False):
+            if ops.deployment_profile(args) == 'saas':
+                ops.ensure_ecr_credential_helper_ready(layout)
+            for image in sorted(set(images.values())):
+                subprocess.run(['docker', 'pull', image], check=True)
         pin_release(runtime, layout.target_release_manifest_path)
         snapshot = ops.snapshot_runtime(layout)
         if backup_proof:
             ops.record_external_backup_proof(snapshot, backup_proof)
-        saved = {'manifest': manifest, 'snapshot': str(snapshot)}
+        saved = {'manifest': manifest, 'snapshot': str(snapshot), 'backupMode': backup_mode}
         save(metadata, saved)
     result = {}
     def verify():

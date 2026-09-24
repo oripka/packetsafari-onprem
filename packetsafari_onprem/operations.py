@@ -4183,6 +4183,30 @@ def check_for_update(args) -> dict:
     return _update_check_payload(args, layout, manifest_path)
 
 
+def _deployment_plan(args, layout, current, target, backup_mode):
+    """Explain selection only; execution still enforces all runtime checks."""
+    pending = _read_json(layout.state_dir / 'rolling/transaction.json', {})
+    if pending.get('mode') in ('fleet', 'maintenance'):
+        return {'mode': pending['mode'], 'pending': True, 'phase': pending.get('phase'),
+                'message': 'Resume saved release; channel discovery and new builds wait until completion.'}
+    stack = _read_json(layout.state_dir / 'rolling/stack.json', {})
+    if getattr(args, 'maintenance', False):
+        return {'mode': 'maintenance', 'pending': False,
+                'message': 'Ingress pauses and work drains before changes.' if stack.get('fleetBases') else
+                           'Initial adoption can interrupt jobs and connections.'}
+    if not stack.get('fleetBases'):
+        return {'mode': 'activation-required', 'pending': False,
+                'message': 'Full-generation updates require one-time maintenance bootstrap and proxy activation; see deployment-proxy.md.'}
+    from .fleet_update import release_images
+    try:
+        release_images(current, target, backup_mode)
+    except ValueError as exc:
+        return {'mode': 'maintenance-required', 'pending': False,
+                'message': f'{exc}. Use update --maintenance with your chosen backup policy.'}
+    return {'mode': 'fleet', 'pending': False,
+            'message': 'Replace the application generation, switch traffic, drain and retire old work. Runtime checks still apply.'}
+
+
 def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> dict:
     manifest = _read_json(manifest_path, {})
     active_manifest = _read_json(layout.release_manifest_path, {})
@@ -4219,6 +4243,8 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         "manifest": str(manifest_path),
         "source": _update_manifest_source(args, layout),
         "backupMode": resolve_backup_mode(args, profile=profile),
+        "deploymentPlan": _deployment_plan(args, layout, active_manifest, manifest,
+                                            resolve_backup_mode(args, profile=profile)),
         "releaseSignature": {
             "status": "verified" if bool(getattr(args, "_release_signature_verified", False)) else "unknown",
             "algorithm": "RSA-SHA256",
@@ -4281,6 +4307,10 @@ def format_update_plan(payload: dict, host_requirements: dict[str, object]) -> s
         f"Release source       {_display_release_source(payload.get('source'))}",
         f"Release signature    {signature_status} ({signature.get('algorithm') or 'RSA-SHA256'})",
     ]
+    plan = payload.get('deploymentPlan') or {}
+    if plan:
+        lines.append(f"Update procedure     {plan['mode']}" + (f"; resuming {plan.get('phase')}" if plan.get('pending') else ''))
+        lines.append(f"                     {plan['message']}")
     warnings = [str(item) for item in host_requirements.get("warnings") or [] if str(item).strip()]
     sizing = payload.get("sizingStatus") if isinstance(payload.get("sizingStatus"), dict) else {}
     if sizing.get("stale"):
@@ -6192,7 +6222,10 @@ def upgrade_release(args) -> dict:
                     manifest_arg = str(_download_update_manifest(args, layout))
                 target_manifest_path = prepare_connected_manifest(layout, manifest_arg, args)
             pending_update = _read_json(layout.state_dir / 'rolling/transaction.json', {})
-            if layout.compose_file.exists() and pending_update.get('mode') != 'maintenance':
+            # Pending controllers own phase-specific identity/readiness checks.
+            # The installed-release doctor would reject an intentionally drained
+            # worker or the new active image before metadata promotion.
+            if layout.compose_file.exists() and pending_update.get('mode') not in ('fleet', 'maintenance'):
                 setattr(args, "_doctor_manifest_path", str(layout.release_manifest_path))
                 assert_upgrade_preflight_doctor(args)
             setattr(args, "_doctor_manifest_path", str(target_manifest_path))

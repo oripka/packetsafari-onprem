@@ -176,3 +176,74 @@ def test_host_maintenance_uses_existing_backup_migration_and_promotion_owners(tm
     assert result == {'version': 'target', 'status': 'ok'}
     assert events == ['snapshot', 'drained', 'backup', 'sizing', 'render', 'logging',
                       'migrations', 'up', 'health', 'gateway', 'doctor', 'promote']
+
+
+def test_host_generation_resume_uses_saved_target_without_registry_pulls(tmp_path, monkeypatch):
+    layout = ops.runtime_layout(str(tmp_path), '/storage/onprem')
+    directory = layout.state_dir/'rolling'
+    directory.mkdir(parents=True)
+    base = {'services': {service: {'image': 'old'} for service in fleet.COHORT}}
+    frozen = tmp_path/'runtime.env'
+    frozen.write_text('fixture')
+    from packetsafari_onprem.rolling_update import fingerprints
+    save(directory/'stack.json', {'active': 'backend', 'fleetBases': {'backend': base},
+                                 'configurationFingerprint': fingerprints([frozen])})
+    target = {'services': {service: {'image': 'saved'} for service in fleet.COHORT}}
+    save(directory/'transaction.json', {'mode': 'fleet', 'phase': 'draining', 'targetBase': target})
+    manifest = {'version': 'target'}
+    save(directory/'fleet-release.json', {'manifest': manifest, 'backupMode': 'skip', 'snapshot': str(tmp_path)})
+    monkeypatch.setattr(fleet, 'release_images', lambda *a: dict.fromkeys(fleet.COHORT, 'signed'))
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: pytest.fail('resume must not pull or rediscover'))
+    def resume(runtime, target_base, **kwargs):
+        assert target_base == target
+        return {'status': 'draining'}
+    monkeypatch.setattr(fleet, 'deploy', resume)
+    adapter = SimpleNamespace(_compose_base_command=lambda _: [])
+    kwargs = dict(source='manifest', backup_mode='skip', backup_proof=None, ops=adapter)
+    assert fleet.upgrade(layout, SimpleNamespace(), {}, manifest, **kwargs)['status'] == 'draining'
+    with pytest.raises(RuntimeError, match='original backup policy'):
+        fleet.upgrade(layout, SimpleNamespace(), {}, manifest, **{**kwargs, 'backup_mode': 'require-recent'})
+
+
+def test_update_plan_explains_adoption_maintenance_and_pending_resume(tmp_path):
+    layout = ops.runtime_layout(str(tmp_path), '/storage/onprem')
+    (layout.state_dir/'rolling').mkdir(parents=True)
+    args = SimpleNamespace()
+    manifest = {'runtimeContract': {'protocolVersion': 1, 'workerDrainVersion': 1, 'schemaInputs': 'a'*64},
+                'images': {service: 'repo/'+service+'@sha256:'+'a'*64 for service in fleet.COHORT}}
+    assert ops._deployment_plan(args, layout, manifest, manifest, 'skip')['mode'] == 'activation-required'
+    save(layout.state_dir/'rolling/stack.json', {'fleetBases': {'backend': {}}})
+    assert ops._deployment_plan(args, layout, manifest, manifest, 'skip')['mode'] == 'fleet'
+    assert ops._deployment_plan(args, layout, manifest, manifest, 'inline')['mode'] == 'maintenance-required'
+    save(layout.state_dir/'rolling/transaction.json', {'mode': 'fleet', 'phase': 'committing'})
+    plan = ops._deployment_plan(args, layout, manifest, manifest, 'skip')
+    assert plan['pending'] and plan['phase'] == 'committing'
+    assert 'resuming committing' in ops.format_update_plan({'deploymentPlan': plan}, {})
+
+
+@pytest.mark.parametrize('mode', ['fleet', 'maintenance'])
+def test_pending_host_update_uses_controller_checks_instead_of_installed_release_doctor(tmp_path, monkeypatch, mode):
+    from packetsafari_onprem import rolling_update
+    layout = ops.runtime_layout(str(tmp_path), str(tmp_path))
+    ops.ensure_runtime_dirs(layout)
+    (layout.state_dir/'rolling').mkdir(parents=True)
+    save(layout.state_dir/'rolling/transaction.json', {'mode': mode, 'phase': 'draining'})
+    save(layout.target_release_manifest_path, {'version': 'target', 'images': {}})
+    layout.compose_file.write_text('fixture')
+    for method in ('sync_bundle', 'report_backup_storage_preflight', 'maybe_self_update_tooling',
+                   'validate_tooling_requirement', 'validate_upgrade_path', 'validate_manifest_profile',
+                   'verify_saas_operator_authorization', 'validate_required_env'):
+        monkeypatch.setattr(ops, method, lambda *a, **k: None)
+    monkeypatch.setattr(ops, 'ensure_generated_upgrade_env', lambda *a, **k: [])
+    monkeypatch.setattr(ops, 'supports_upgrade_host_actions', lambda *a, **k: True)
+    monkeypatch.setattr(ops, 'prepare_connected_manifest', lambda *a, **k: layout.target_release_manifest_path)
+    monkeypatch.setattr(ops, 'assert_upgrade_preflight_doctor', lambda *a: pytest.fail('old-release checks reject intentional drain'))
+    monkeypatch.setattr(rolling_update, 'enabled', lambda *a: True)
+    visited = []
+    owner = maintenance if mode == 'maintenance' else rolling_update
+    monkeypatch.setattr(owner, 'upgrade', lambda *a, **k: visited.append(mode) or {'status': 'draining'})
+    args = SimpleNamespace(runtime_root=str(tmp_path), container_runtime_root=str(tmp_path),
+        profile='saas', backup_mode='skip', allow_unbacked_upgrade=True, manifest='saved',
+        _host_requirements_report={}, _sizing_status_report={}, simulate_failure_phase='')
+    assert ops.upgrade_release(args)['status'] == 'draining'
+    assert visited == [mode]

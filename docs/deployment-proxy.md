@@ -25,7 +25,7 @@ owns publication, signatures, frontend/CloudFront and host update procedures.
 This document owns the proxy transaction and its integration boundary.
 
 The normal builder now records an image-derived `runtimeContract` in the signed
-manifest. Ops 0.2.40 selects full-generation updates for this contract on an
+manifest. Ops 0.2.41 selects full-generation updates for this contract on an
 activated host. It refuses partial promotion or silent maintenance fallback.
 This implementation has local deterministic and real Celery transaction tests;
 it has **not** been deployed or qualified on production.
@@ -136,6 +136,11 @@ an interrupted metadata commit or cleanup. Pending connected updates use the sav
 exact manifest bytes and detached signature, reverified on each attempt; channel
 discovery is deferred until completion. Offline bundles or older transactions
 without a saved detached signature require the original signed upgrade/bundle input.
+Resume reuses the saved target Compose plan without pulling images again. The
+original backup policy is retained. Installed-release doctor checks do not run
+against a half-completed transaction; the controller's identity, drain and target
+verification checks remain authoritative. `update check` includes a preliminary
+`deploymentPlan` explaining adoption, maintenance, generation update or pending resume.
 Before metadata commit, recovery can abort: restore original traffic, stop candidate
 intake, drain its jobs/connections, then retire dependencies. This also handles
 failed readiness after a candidate worker accepted a job. Repeat recovery on exit 3.
