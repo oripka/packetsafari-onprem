@@ -1567,7 +1567,7 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "        set -euo pipefail",
         "        PIDS=()",
         "        shutdown() { kill -TERM \"$${PIDS[@]}\" 2>/dev/null || true; }",
-        "        trap shutdown TERM INT",
+        "        if [[ -f /app/scripts/worker_supervisor.sh ]]; then source /app/scripts/worker_supervisor.sh; else trap shutdown TERM INT; fi",
         "        python3 /app/scripts/wait_for_backend_startup.py \\",
         "          --timeout-seconds \"$${PACKETSAFARI_WORKER_BACKEND_STARTUP_WAIT_SECONDS:-45}\"",
         "",
@@ -1636,6 +1636,7 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "          PIDS+=(\"$$!\")",
         "        fi",
         "",
+        "        if declare -F worker_wait >/dev/null; then worker_wait; exit $$?; fi",
         "        wait -n \"$${PIDS[@]}\"",
         "        EXIT_CODE=$$?",
         "        shutdown",
@@ -1941,6 +1942,11 @@ def active_backend_service(layout: RuntimeLayout) -> str:
     return active_service(layout)
 
 
+def active_runtime_service(layout: RuntimeLayout, service: str) -> str:
+    from .rolling_update import active_service
+    return active_service(layout, service)
+
+
 def render_compose(layout: RuntimeLayout, manifest_path: Path, *, source_root: Path | None = None, profile: str = "onprem") -> dict[str, bool]:
     from .rolling_update import enabled
     if enabled(layout):
@@ -2087,6 +2093,9 @@ def validate_upgrade_path(layout: RuntimeLayout, manifest: dict) -> None:
     if not target:
         raise RuntimeError("Target manifest is missing version.")
     if current and current == target:
+        pending = _read_json(layout.state_dir / 'rolling/transaction.json', {})
+        if pending.get('mode') == 'fleet' and pending.get('phase') in ('committing', 'committed'):
+            return
         raise RuntimeError(f"Release {target} is already active.")
     minimum = str(manifest.get("minUpgradeableFrom") or "").strip()
     if minimum and current and _version_key(current) < _version_key(minimum):
@@ -4284,6 +4293,10 @@ def _attach_update_summary(
         installed_app = str(app.get("currentVersion") or "")
         verification = "not needed"
         rollback = "unchanged"
+    elif result.get('status') in ('draining', 'rolled_back'):
+        installed_app = str(app.get('currentVersion') or '')
+        verification = 'pending drain; release not promoted' if result['status'] == 'draining' else 'failed; previous release retained'
+        rollback = 'both generations retained until drain' if result['status'] == 'draining' else 'traffic restored to previous generation'
     elif bool(getattr(args, "skip_health_check", False)):
         installed_app = str(result.get("version") or app.get("targetVersion") or "")
         verification = "skipped by operator"
@@ -4297,7 +4310,7 @@ def _attach_update_summary(
     elif backup_mode == "skip":
         rollback += "; no PacketSafari data backup was captured"
     result["updateSummary"] = {
-        "installedRelease": app.get("currentRelease") if result.get("status") == "noop" else app.get("targetRelease"),
+        "installedRelease": app.get("currentRelease") if result.get("status") in ("noop", "draining", "rolled_back") else app.get("targetRelease"),
         "previousApplicationVersion": str(app.get("currentVersion") or ""),
         "installedApplicationVersion": installed_app,
         "previousOpsVersion": original_ops,
@@ -4327,7 +4340,8 @@ def apply_update(args) -> dict:
         print(format_update_plan(check_payload, host_requirements), file=sys.stderr, flush=True)
         os.environ[_UPDATE_PLAN_PRINTED_ENV] = "true"
     manifest = _read_json(manifest_path, {})
-    if not check_payload["available"] and not bool(getattr(args, "force", False)):
+    pending_generation = _read_json(layout.state_dir / 'rolling/transaction.json', {}).get('mode') == 'fleet'
+    if not check_payload["available"] and not bool(getattr(args, "force", False)) and not pending_generation:
         return _attach_update_summary({"status": "noop", **check_payload}, check_payload, host_requirements, args)
     acknowledge_unbacked_upgrade(args, backup_mode=str(check_payload.get("backupMode") or ""))
     maybe_self_update_tooling(args, layout, manifest)
@@ -4340,7 +4354,7 @@ def apply_update(args) -> dict:
     result = upgrade_release(args)
     result["hostRequirements"] = host_requirements
     result["sizingStatus"] = sizing_status
-    result["imageRetention"] = maybe_offer_docker_image_prune(args, layout)
+    result["imageRetention"] = maybe_offer_docker_image_prune(args, layout) if result.get('status') != 'draining' else {'status': 'deferred_until_drain'}
     return _attach_update_summary(result, check_payload, host_requirements, args)
 
 
@@ -4774,6 +4788,8 @@ UPGRADE_RECREATED_IMAGE_SERVICES = [
     "frontend",
     "backend",
     "worker",
+    "agent-cli-runner",
+    "agent-stream-gateway",
     "sharkd",
     "egress-firewall",
     "egress-ironproxy",
@@ -4794,6 +4810,8 @@ def _manifest_service_image_refs(manifest: dict) -> dict[str, str]:
         "frontend": image_ref(images, "frontend"),
         "backend": backend_image,
         "worker": image_ref(images, "worker", backend_image),
+        "agent-cli-runner": image_ref(images, "agent-cli-runner"),
+        "agent-stream-gateway": image_ref(images, "agent-stream-gateway", backend_image),
         "sharkd": image_ref(images, "sharkd"),
         "egress-firewall": image_ref(images, "egress-firewall"),
         "egress-ironproxy": image_ref(images, "egress-ironproxy"),
@@ -5529,7 +5547,7 @@ except Exception as exc:
     raise
 """
     result = subprocess.run(
-        [*_compose_base_command(layout), "exec", "-T", "agent-stream-gateway", "python3", "-c", probe],
+        [*_compose_base_command(layout), "exec", "-T", active_runtime_service(layout, "agent-stream-gateway"), "python3", "-c", probe],
         check=False,
         text=True,
         capture_output=True,
@@ -5638,7 +5656,7 @@ def _security_queue_consumer_probe(layout: RuntimeLayout) -> dict[str, object]:
 
     try:
         worker = subprocess.run(
-            [*_compose_base_command(layout), "ps", "-q", "worker"],
+            [*_compose_base_command(layout), "ps", "-q", active_runtime_service(layout, "worker")],
             check=False,
             text=True,
             capture_output=True,
@@ -6192,10 +6210,15 @@ def upgrade_release(args) -> dict:
 
             from . import rolling_update
             if rolling_update.enabled(layout):
+                if getattr(args, 'maintenance', False):
+                    raise ValueError('Active generation deployments cannot silently convert to maintenance; retain the current topology and use a reviewed maintenance transition')
                 import sys as _sys
                 return rolling_update.upgrade(layout, args, manifest, source=source,
                     backup_mode=backup_mode, backup_proof=external_backup_proof,
                     ops=_sys.modules[__name__])
+
+            if manifest.get('runtimeContract') and not getattr(args, 'maintenance', False):
+                raise ValueError('This host has not activated full-generation updates. Bootstrap the drain-capable release once with --maintenance (interrupts work), then verify ingress policy and enable deployment-proxy. Normal updates must not silently kill jobs.')
 
             backup_message = {
                 "inline": "creating pre-upgrade backup",

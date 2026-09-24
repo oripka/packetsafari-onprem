@@ -48,6 +48,7 @@ HTTPServer(('0.0.0.0',8000),Handler).serve_forever()
         ips = {name: next(iter(proxy.inspect(cid)['NetworkSettings']['Networks'].values()))['IPAddress'] for name, cid in clients.items()}
         site = (Path(__file__).resolve().parents[2] / 'packetsafari/backend/config/nginx.conf').read_text()
         site = site.replace('__PACKETSAFARI_CLIENT_MAX_BODY_SIZE__', '12G').replace('172.20.0.26', ips['trusted'])
+        site = site.replace('__PACKETSAFARI_AGENT_GATEWAY_HOST__', 'agent-stream-gateway')
         site = site.replace('include uwsgi_params;', 'include /etc/nginx/uwsgi_params;').replace(':8091', ':8000')
         inner_config.write_text('events {}\nhttp {\n' + site + '\n}\n')
         for mode in ['direct', 'forwarded', 'cloudfront-https']:

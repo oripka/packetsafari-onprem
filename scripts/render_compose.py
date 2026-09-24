@@ -97,6 +97,12 @@ def main(argv: list[str] | None = None) -> int:
         "host_runtime_root": args.host_runtime_root,
         "container_runtime_root": args.container_runtime_root,
         "sharkd_network_exposure": _sharkd_network_exposure(manifest, args.profile),
+        "worker_supervisor_init": (
+            "source /app/scripts/worker_supervisor.sh" if (manifest.get('runtimeContract') or {}).get('workerDrainVersion') == 1 else
+            'PIDS=(); shutdown() { kill -TERM "$${PIDS[@]}" 2>/dev/null || true; }; trap shutdown TERM INT'),
+        "worker_supervisor_wait": (
+            'worker_wait' if (manifest.get('runtimeContract') or {}).get('workerDrainVersion') == 1 else
+            'wait -n "$${PIDS[@]}"; EXIT_CODE=$$?; shutdown; wait || true; exit "$$EXIT_CODE"'),
     }
     required_image_keys = [
         "backend_image",

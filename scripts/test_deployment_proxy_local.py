@@ -28,9 +28,9 @@ def main():
     services = {'proxy': {'image': PROXY_IMAGE, 'command': ['nginx', '-g', 'daemon off;', '-c', '/etc/packetsafari-proxy/nginx.conf'],
                          'ports': ['127.0.0.1::8080'], 'networks': ['default', 'edge'],
                          'volumes': [f'{state}:/etc/packetsafari-proxy:ro']}}
-    for slot in ['blue', 'green']:
+    for slot in ['blue', 'green', 'other']:
         services[slot] = {'image': 'python:3.14-slim-bookworm', 'command': ['python', '/fixture.py'],
-                          'environment': {'SLOT': slot}, 'volumes': [f'{fixture}:/fixture.py:ro']}
+                          'environment': {'SLOT': slot, 'STREAM_DELAY': '0.5'}, 'volumes': [f'{fixture}:/fixture.py:ro']}
     compose = run / 'compose.json'
     compose.write_text(json.dumps({'services': services, 'networks': {'default': {'internal': True}, 'edge': {}}}))
     command = ['docker', 'compose', '-p', project, '-f', str(compose)]
@@ -141,9 +141,12 @@ def main():
             result = deploy('green', drain_timeout=0)
             assert result['status'] == 'draining', result
             assert request() == 'green'
+            repeated = deploy('green', drain_timeout=0)
+            assert repeated['generation'] == result['generation']
+            assert repeated['status'] == 'draining'
             try:
-                deploy('green')
-                raise AssertionError('Reused a draining slot')
+                deploy('other', drain_timeout=0)
+                raise AssertionError('Replaced a generation while it was draining')
             except ValueError as exc:
                 assert 'still draining' in str(exc)
             # Returning to the exact retained instance is safe even while its

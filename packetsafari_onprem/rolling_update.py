@@ -26,10 +26,14 @@ def enabled(layout):
     return (layout.state_dir / 'rolling' / 'stack.json').exists()
 
 
-def active_service(layout):
+def active_service(layout, service='backend'):
     if not enabled(layout):
-        return 'backend'
-    return read(layout.state_dir / 'rolling' / 'stack.json')['active']
+        return service
+    stack = read(layout.state_dir / 'rolling' / 'stack.json')
+    if service == 'backend':
+        return stack['active']
+    from .fleet_update import COHORT, name
+    return name(service, stack['active']) if 'fleetBases' in stack and service in COHORT else service
 
 
 def image_ref(value):
@@ -98,6 +102,9 @@ def compose_config(base, stack, directory):
                  'target': '/etc/packetsafari-proxy', 'read_only': True}],
         'command': ['nginx', '-g', 'daemon off;', '-c', '/etc/packetsafari-proxy/nginx.conf'],
     }
+    if stack.get('sharkdPorts'):
+        services['deployment-proxy']['ports'] = [*stack['ports'], *stack['sharkdPorts']]
+        services['sharkd']['ports'] = []
     if 'frontend' in services:
         services['frontend'].setdefault('environment', {})['NUXT_INTERNAL_API_BASE'] = 'http://deployment-proxy:8080'
     return config
@@ -124,7 +131,12 @@ class Runtime:
         return result
 
     def render(self, stack):
-        save(self.compose_file, compose_config(read(self.directory / 'base.json'), stack, self.directory))
+        if 'fleetBases' in stack:
+            from .fleet_update import configuration
+            config = configuration(stack, self.directory)
+        else:
+            config = compose_config(read(self.directory / 'base.json'), stack, self.directory)
+        save(self.compose_file, config)
         self.dc('config', '--quiet')
 
     def schema(self, container):
@@ -142,6 +154,11 @@ print(h.hexdigest())
     def deploy(self, image, *, verify=lambda: None, commit=lambda receipt: None, timeout=120, context=None):
         """Caller holds deployment lock and verifies signed release/backup policy first."""
         stack = read(self.stack_file)
+        if 'fleetBases' in stack:
+            from .fleet_update import deploy
+            target = copy.deepcopy(stack['fleetBases'][stack['active']])
+            target['services']['backend']['image'] = image
+            return deploy(self, target, verify=verify, commit=commit, timeout=timeout)
         if self.journal_file.exists():
             raise RuntimeError('An unfinished rolling transaction exists; recover it before another update')
         active = stack['active']
@@ -197,6 +214,9 @@ print(h.hexdigest())
         if not self.journal_file.exists():
             return {'status': 'noop'}
         journal = read(self.journal_file)
+        if journal.get('mode') == 'fleet':
+            from .fleet_update import recover_preparing
+            return recover_preparing(self)
         if journal['phase'] == 'committing':
             raise RuntimeError('Release metadata commit was interrupted; reconcile installed manifest before recovery')
         if journal['phase'] == 'committed':
@@ -226,6 +246,10 @@ print(h.hexdigest())
 def upgrade(layout, args, manifest, *, source, backup_mode, backup_proof, ops):
     """Called only after the normal signature, profile, entitlement and env gates."""
     current = read(layout.release_manifest_path)
+    if manifest.get('runtimeContract'):
+        from .fleet_update import upgrade as fleet_upgrade
+        return fleet_upgrade(layout, args, current, manifest, source=source,
+                             backup_mode=backup_mode, backup_proof=backup_proof, ops=ops)
     image = validate_release(current, manifest, backup_mode)
     if getattr(args, 'skip_health_check', False):
         raise ValueError('Rolling updates cannot skip health checks')
@@ -311,12 +335,22 @@ def manage_host(args):
         policy = firewall.read_text()
         if 'backend-green:172.20.0.27' not in policy or 'deployment-proxy:172.20.0.26' not in policy:
             raise ValueError('Install the current governed green-slot and proxy firewall policy before activation')
+        if manifest.get('runtimeContract'):
+            if 'frontend' in base['services']:
+                raise ValueError('Container-fronted deployments do not yet have a qualified generation drain contract')
+            from .workload_drain import begin_worker
+            begin_worker(runtime.container('worker'))
+            if any(value not in policy for value in ('worker-green:172.20.0.28', 'agent-stream-gateway-green:172.20.0.29', 'sharkd-green:172.20.0.31')):
+                raise ValueError('Install the full-generation firewall policy before activation')
         result = bootstrap(runtime, base, proxy_name='packetsafari-deployment-proxy', proxy_image=proxy_image, ingress=ingress)
         stack = read(runtime.stack_file)
+        if manifest.get('runtimeContract'):
+            stack['fleetBases'] = {'backend': base, 'backend-green': copy.deepcopy(base)}
         stack['configurationFingerprint'] = fingerprints([
             layout.runtime_env_path, layout.runtime_sizing_env_path, layout.compose_sizing_file,
             firewall, layout.production_egress_allowlist_path, layout.production_ironproxy_config_path])
         save(runtime.stack_file, stack)
+        runtime.render(stack)
         return result
 
 
@@ -333,6 +367,11 @@ def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingre
     image = backend['image']
     stack = {'active': 'backend', 'images': {'backend': image, 'backend-green': image},
              'ports': ports, 'proxyImage': proxy_image, 'proxyName': proxy_name}
+    sharkd_ports = base['services'].get('sharkd', {}).get('ports', [])
+    if sharkd_ports:
+        if any(int(port['target']) != 4448 for port in sharkd_ports):
+            raise ValueError('Unexpected Sharkd published port; cannot transfer it safely')
+        stack['sharkdPorts'] = sharkd_ports
     save(directory / 'base.json', base)
     proxy.initialize(directory / 'proxy', ingress)
     before = runtime.compose_file.read_text()
@@ -343,6 +382,8 @@ def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingre
         if 'egress-firewall' in base['services']:
             runtime.dc('restart', 'egress-firewall')
         started = True
+        if sharkd_ports:
+            runtime.dc('up', '-d', '--no-deps', 'sharkd')
         runtime.dc('up', '-d', '--no-deps', 'backend', 'deployment-proxy')
         # The proxy master may still be starting after Compose returns.
         deadline = time.monotonic() + 15
@@ -354,7 +395,8 @@ def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingre
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(.2)
-        receipt = proxy.switch(directory / 'proxy', proxy_name, runtime.container('backend'))
+        receipt = proxy.switch(directory / 'proxy', proxy_name, runtime.container('backend'),
+                               **({'sharkd': runtime.container('sharkd')} if sharkd_ports else {}))
         if 'frontend' in base['services']:
             runtime.dc('up', '-d', '--no-deps', 'frontend')
         return {'status': 'enabled', 'rollingUpdate': receipt}
@@ -363,5 +405,7 @@ def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingre
         if started:
             proxy.docker('stop', proxy_name, check=False)
             runtime.dc('up', '-d', '--no-deps', 'backend')
+            if sharkd_ports:
+                runtime.dc('up', '-d', '--no-deps', 'sharkd')
         runtime.stack_file.unlink()
         raise

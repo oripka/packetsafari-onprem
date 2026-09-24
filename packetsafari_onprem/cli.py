@@ -218,6 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Acknowledge an unbacked non-interactive upgrade. Interactive execution asks for confirmation instead.",
     )
     upgrade.add_argument("--health-timeout", type=int, default=180)
+    upgrade.add_argument("--maintenance", action="store_true", help="Explicitly allow an interrupting upgrade on a host without generation activation (including the initial drain-capable release).")
     upgrade.add_argument("--skip-health-check", action="store_true")
     upgrade.add_argument(
         "--skip-image-pull",
@@ -322,6 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove unprotected PacketSafari images without prompting.")
     update.add_argument("--skip-image-retention-check", action="store_true")
     update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
+    update.add_argument("--maintenance", action="store_true", help="Explicitly allow an interrupting upgrade on a host without generation activation; not a silent fallback for an active generation deployment.")
     update.add_argument(
         "--json",
         action="store_true",
@@ -368,7 +370,11 @@ def _format_update_result(payload: dict) -> str:
     status_value = str(payload.get("status") or "ok")
     ops_updated = bool(summary.get("opsUpdated"))
     app_updated = previous_app != installed_app and status_value != "noop"
-    if status_value == "noop" and ops_updated:
+    if status_value == 'draining':
+        title = 'PACKETSAFARI UPDATE PENDING — OLD WORK IS STILL DRAINING'
+    elif status_value == 'rolled_back':
+        title = 'PACKETSAFARI UPDATE ROLLED BACK — PREVIOUS RELEASE RETAINED'
+    elif status_value == "noop" and ops_updated:
         title = "✓ OPS TOOL UPDATE SUCCEEDED — APPLICATION ALREADY CURRENT"
     elif status_value == "noop":
         title = "✓ PACKETSAFARI IS ALREADY CURRENT"
@@ -412,6 +418,8 @@ def _format_update_result(payload: dict) -> str:
     ]
     if payload.get("snapshot"):
         lines.append(f"Snapshot             {payload['snapshot']}")
+    if status_value == 'draining':
+        lines.append('Next action          Repeat the same update command; retained work is not force-stopped.')
     warnings = [str(item) for item in summary.get("hostWarnings") or [] if str(item).strip()]
     if warnings:
         lines.append("Warnings             " + warnings[0])
@@ -530,8 +538,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if payload.get("ok") else 1
     if args.command == "upgrade":
         args.human_output = bool(sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty())
-        print(json.dumps(upgrade_release(args), indent=2))
-        return 0
+        payload = upgrade_release(args)
+        print(json.dumps(payload, indent=2))
+        return 3 if payload.get('status') == 'draining' else 1 if payload.get('status') == 'rolled_back' else 0
     if args.command == "update":
         if args.action == "check":
             print(json.dumps(check_for_update(args), indent=2))
@@ -550,6 +559,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_update_result(payload))
             else:
                 print(json.dumps(payload, indent=2))
+            if payload.get('status') in ('draining', 'rolled_back'):
+                return 3 if payload['status'] == 'draining' else 1
         return 0
     if args.command == "content":
         print(json.dumps(operate_security_content(args), indent=2))

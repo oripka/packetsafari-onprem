@@ -74,11 +74,13 @@ def ingress_configuration(policy):
     map "$trusted_ingress:$http_x_forwarded_for" $missing_client {{ default 0; "1:" 1; }}'''
 
 
-def configuration(target: str | None, generation: str, policy=None) -> str:
+def configuration(target: str | None, generation: str, policy=None, sharkd_target=None) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9-]+", generation):
         raise ValueError("Invalid generation")
     if target is not None and not re.fullmatch(r"[0-9.]+:[0-9]+", target):
         raise ValueError("Target must be a resolved IPv4 address and port")
+    if sharkd_target is not None and not re.fullmatch(r"[0-9.]+:[0-9]+", sharkd_target):
+        raise ValueError("Sharkd target must be a resolved IPv4 address and port")
     route = "return 503;" if target is None else f"""
         proxy_pass http://{target};
         proxy_http_version 1.1;
@@ -100,6 +102,7 @@ def configuration(target: str | None, generation: str, policy=None) -> str:
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     """
+    sharkd_route = route.replace(f'http://{target};', f'http://{sharkd_target};') if target and sharkd_target else 'return 503;'
     return f"""worker_processes 1;
 pid /tmp/nginx.pid;
 error_log /dev/stderr notice;
@@ -117,6 +120,13 @@ http {{
         if ($missing_client = 1) {{ return 400; }}
         if ($remote_addr = $unresolved_client) {{ return 400; }}
         location / {{ {route} }}
+    }}
+    server {{
+        listen 4448;
+        if ($ingress_scheme = "") {{ return 400; }}
+        if ($missing_client = 1) {{ return 400; }}
+        if ($remote_addr = $unresolved_client) {{ return 400; }}
+        location / {{ {sharkd_route} }}
     }}
     server {{
         listen 127.0.0.1:8099;
@@ -190,7 +200,7 @@ def address(proxy_info: dict, target_info: dict, port: int) -> str:
 
 def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
            health_path: str = "/api/v2/health", ready_timeout: float = 120,
-           drain_timeout: float = 120) -> dict:
+           drain_timeout: float = 120, sharkd: str | None = None) -> dict:
     if not re.fullmatch(r"/[a-zA-Z0-9/_-]*", health_path):
         raise ValueError("Health path must be a literal absolute path")
     if not 0 < ready_timeout <= 600 or not 0 <= drain_timeout <= 3600:
@@ -213,9 +223,15 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
         pending = set(state.get("retiringWorkers", [])) & workers(proxy)
         returning_to_retained = (target_info['Id'] == state.get('previousContainerId') and
                                  target_info['State']['StartedAt'] == state.get('previousStartedAt'))
-        if pending and not returning_to_retained:
+        already_serving = (target_info['Id'] == state.get('containerId') and
+                           target_info['State']['StartedAt'] == state.get('targetStartedAt'))
+        if pending and not returning_to_retained and not already_serving:
             raise ValueError("Previous backend still draining; keep both slots running")
         endpoint = address(proxy_info, target_info, port)
+        sharkd_endpoint = (address(proxy_info, inspect(sharkd), 4448) if sharkd else
+                          state.get('previousSharkdEndpoint') if returning_to_retained else state.get('sharkdEndpoint'))
+        if already_serving and endpoint == state.get('endpoint') and sharkd_endpoint == state.get('sharkdEndpoint'):
+            return {**state, 'status': 'draining' if pending else 'drained', 'retiringWorkers': sorted(pending)}
         started = time.monotonic()
         deadline = started + ready_timeout
         while True:
@@ -237,9 +253,11 @@ def switch(directory: Path, proxy: str, target: str, *, port: int = 80,
         next_generation = uuid.uuid4().hex
         candidate = directory / "candidate.conf"
         policy = ingress_policy(state.get('ingressPolicy'))
-        atomic_write(candidate, configuration(endpoint, next_generation, policy))
+        atomic_write(candidate, configuration(endpoint, next_generation, policy, sharkd_endpoint))
         docker("exec", proxy, "nginx", "-t", "-c", "/etc/packetsafari-proxy/candidate.conf")
         next_state = {"generation": next_generation, "target": target, "endpoint": endpoint, "ingressPolicy": policy,
+                      "sharkdEndpoint": sharkd_endpoint,
+                      "previousSharkdEndpoint": state.get('sharkdEndpoint'),
                       "containerId": target_info['Id'], "imageId": target_info['Image'],
                       "targetStartedAt": target_info['State']['StartedAt'],
                       "previousContainerId": state.get('containerId'),

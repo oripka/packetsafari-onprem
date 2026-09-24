@@ -13,6 +13,7 @@ MONITORED=(
   "backend:172.20.0.20"
   "backend-green:172.20.0.27"
   "worker:172.20.0.21"
+  "worker-green:172.20.0.28"
 )
 
 NO_EGRESS=(
@@ -21,6 +22,8 @@ NO_EGRESS=(
   "postgres:172.20.0.10"
   "redis:172.20.0.11"
   "sharkd:172.20.0.23"
+  "sharkd-green:172.20.0.31"
+  "agent-stream-gateway-green:172.20.0.29"
   "init:172.20.0.24"
   "frontend:172.20.0.30"
 )

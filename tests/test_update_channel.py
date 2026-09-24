@@ -398,7 +398,8 @@ def test_services_with_changed_images_only_returns_changed_service_images():
         }
     }
 
-    assert operations._services_with_changed_images(active, target) == ["backend", "worker"]
+    # The gateway inherits backend unless the manifest pins it independently.
+    assert operations._services_with_changed_images(active, target) == ["backend", "worker", "agent-stream-gateway"]
 
 
 def test_services_with_changed_images_keeps_unchanged_sharkd_and_firewall_out():
@@ -644,7 +645,7 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
         assert set(stop.removeprefix("stop:").split(",")) == set(operations.BACKUP_QUIESCED_SERVICES)
         assert calls.index(stop) < calls.index("backup") < calls.index("migrate")
     else:
-        assert stop == "stop:backend,worker"
+        assert stop == "stop:backend,worker,agent-stream-gateway"
     assert calls.index("health") < calls.index("doctor:1")
     assert calls.index("health") < calls.index("agent_stream_gateway")
     assert calls.index("agent_stream_gateway") < calls.index("doctor:1")

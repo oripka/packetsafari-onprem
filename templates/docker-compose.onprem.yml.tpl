@@ -310,9 +310,7 @@ services:
       - -lc
       - |
         set -euo pipefail
-        PIDS=()
-        shutdown() { kill -TERM "$${PIDS[@]}" 2>/dev/null || true; }
-        trap shutdown TERM INT
+        {{ worker_supervisor_init }}
         python3 /app/scripts/wait_for_backend_startup.py \
           --timeout-seconds "$${PACKETSAFARI_WORKER_BACKEND_STARTUP_WAIT_SECONDS:-45}"
         CELERY_AICHAT_CONCURRENCY="$$(python3 /app/scripts/resolve_worker_concurrency.py aichat)"
@@ -380,11 +378,7 @@ services:
           PIDS+=("$$!")
         fi
 
-        wait -n "$${PIDS[@]}"
-        EXIT_CODE=$$?
-        shutdown
-        wait || true
-        exit "$${EXIT_CODE}"
+        {{ worker_supervisor_wait }}
     volumes:
       - packetsafari-storage:/storage
       - packetsafari-codexruntime:/var/lib/packetsafari/codex

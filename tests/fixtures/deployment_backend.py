@@ -24,7 +24,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path == '/ready':
+        if self.path in ('/ready', '/api/v2/health'):
             self.reply({'slot': SLOT}, 503 if Path('/tmp/unhealthy').exists() else 200)
         elif self.path == '/stream':
             self.send_response(200)
@@ -34,7 +34,7 @@ class Handler(BaseHTTPRequestHandler):
             for i in range(30):
                 self.wfile.write(f'data: {SLOT}:{i}\n\n'.encode())
                 self.wfile.flush()
-                time.sleep(0.1)
+                time.sleep(float(os.environ.get('STREAM_DELAY', '0.1')))
             self.close_connection = True
         elif self.path == '/ws':
             key = self.headers['Sec-WebSocket-Key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -47,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = f'{SLOT}:{i}'.encode()
                 self.wfile.write(bytes([0x81, len(data)]) + data)
                 self.wfile.flush()
-                time.sleep(0.1)
+                time.sleep(float(os.environ.get('STREAM_DELAY', '0.1')))
             self.wfile.write(b'\x88\x02\x03\xe8')
             self.wfile.flush()
             self.close_connection = True
@@ -66,4 +66,4 @@ class Handler(BaseHTTPRequestHandler):
         self.reply({'slot': SLOT, 'sha256': digest.hexdigest()})
 
 
-ThreadingHTTPServer(('0.0.0.0', 8000), Handler).serve_forever()
+ThreadingHTTPServer(('0.0.0.0', int(os.environ.get('PORT', '8000'))), Handler).serve_forever()

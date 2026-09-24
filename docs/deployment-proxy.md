@@ -1,9 +1,9 @@
-# Rolling API updates
+# Application generation updates
 
 `deployment_proxy.py` controls a digest-pinned NGINX proxy. `rolling_update.py`
 adds a two-slot Compose transaction used by normal dev commands and, after
-explicit activation, the signed host updater. This is API-only rolling support;
-worker, schema, gateway and shared-service replacements require maintenance.
+explicit activation, the signed host updater. `fleet_update.py` extends this to
+backend, Celery worker, Agent stream gateway, Agent runner and Sharkd together.
 
 ## Normal release workflow integration
 
@@ -22,29 +22,31 @@ by the updater. They do not certify an external backup. The app-owned
 owns publication, signatures, frontend/CloudFront and host update procedures.
 This document owns the proxy transaction and its integration boundary.
 
-**Current status:** full releases use the existing maintenance updater on hosts
-without proxy activation. On an activated host, the updater enters the strict
-API-only branch. It rejects unsupported full-release changes; it does not apply
-only the API and silently promote a partially updated release. The normal release
-builder mirrors the proxy image but does not produce `rollingUpdate.compatibleFrom`.
-The full-release workflow is therefore not yet integrated with blue/green.
+The normal builder now records an image-derived `runtimeContract` in the signed
+manifest. Ops 0.2.39 selects full-generation updates for this contract on an
+activated host. It refuses partial promotion or silent maintenance fallback.
+This implementation has local deterministic and real Celery transaction tests;
+it has **not** been deployed or qualified on production.
 
-| Component | Implemented behavior | Required before integrated full releases |
+| Component | Implemented behavior | Boundary |
 | --- | --- | --- |
-| Backend API | Two slots; readiness, switch, connection drain, commit and old-slot stop. | Signed compatibility from the normal builder, automatic supported strategy selection and qualified host activation. |
-| Worker, Agent runner, Sharkd | Retained during API rolling updates. | Stop new work reaching retiring processes; retain their process-affine jobs and dependencies until completion; verify replacement and cleanup. |
-| Agent stream gateway | Retained; legacy backend-image inheritance must be explicitly frozen. | Version compatibility and live-stream continuity across replacement. |
-| DNS, outbound proxy, firewall, deployment proxy | Retained; changed images/configuration are outside the API transaction. | Ordered replacement, ingress/egress checks and explicit interruption reporting. |
-| Database, Redis, migrations | Shared; no migrations in an API rolling update. | Compatible migration strategy or a clearly reported maintenance transaction; preserve recovery/backup semantics. |
-| Static frontend / CloudFront | Published locally by `--fast`, separately from the host update. | Qualify frontend/API compatibility during version overlap; publication is not atomic with host promotion. |
+| Backend API | Candidate readiness, proxy switch, connection drain, retirement. | Same schema and task protocol required. |
+| Worker, Agent runner, Sharkd | Both generations run; TERM stops old Celery intake and waits for every worker child. Old runner/socket/workspaces and Sharkd remain until jobs and proxy connections drain. | No forced termination on timeout. External unmanaged consumers are outside this ownership contract. |
+| Agent stream gateway | Separate generation; old gateway remains while old jobs and proxy connections exist. | Real Agent model-backed continuity remains unqualified. |
+| DNS, outbound proxy, firewall, deployment proxy | Reused when unchanged; changed image/configuration is rejected. | No overlap contract; explicit maintenance transition required. |
+| Database, Redis, migrations | Shared and unchanged; no migrations in a generation update. | Schema drift is rejected, not declared compatible automatically. |
+| Static frontend / CloudFront | Published by `--fast`, separately from host update. | Not atomic with host promotion; frontend/API overlap must remain compatible. Container-fronted on-prem fleets are rejected. |
 
-The integrated updater must apply **every changed image** before declaring the
-release successful, show each service as reused/replaced/draining/failed, and
-retain actionable logs and a recovery receipt. Operators should not manually
-select backend versus full-stack deployment. These are remaining delivery
-requirements, not implemented guarantees. A drain timeout must not become an
-unreported task kill. No full-release three-second downtime target has been
-qualified; running two APIs alone cannot provide it for shared dependencies.
+All changed application images are prepared and identity-checked before promotion;
+changes outside the supported cohort fail before switching. Old job failure,
+restart or OOM is not successful drain. Exit 3 means pending drain: repeat the
+same update to resume, without rebuilding/replacing the retained generations.
+Exit 1 with `rolled_back` means verification failed and traffic returned to the
+retained generation. Neither outcome advances installed release metadata.
+Signed bundled intelligence is activated through the existing idempotent content
+bootstrap after drain, before metadata promotion. The full storage initializer
+and migrations are not run during overlap. No three-second downtime guarantee
+has been established.
 
 Full-release blue/green must drain every replaced container that owns active
 work or connections, not only the HTTP backend. Stop assigning new work to the
@@ -55,7 +57,8 @@ has finished. Stop old containers only after service-specific drain checks pass.
 A timeout leaves them running and the release pending; do not silently fall back
 to maintenance or force-stop tasks. Services without a safe overlap/drain contract,
 including incompatible database changes, require an explicitly separate maintenance
-decision. The dev `--all` maintenance helper does not implement this contract.
+decision. The default dev rebuild uses this same generation transaction when
+shared configuration is unchanged; shared dev changes may use maintenance.
 
 Before production activation, qualify the normal signed release/update path,
 compatible and maintenance changes, failed readiness, failed post-switch checks,
@@ -69,36 +72,39 @@ From the app repository:
 
 ```bash
 ./packetsafari dev rolling-enable   # one-time port transfer; briefly interrupts API
-./packetsafari dev update           # reload mounted source through the other slot
+./packetsafari dev rebuild          # build/apply all regular dev images
+./packetsafari dev update           # current images, no build
 ./packetsafari dev update --image backend-dev:latest
 ./packetsafari dev rolling-status
 ./packetsafari dev rolling-recover  # roll back an unfinished transaction
 ```
 
-The proxy owns the existing `127.0.0.1:8080`. Both slots use the real backend
-container entrypoint, NGINX and uWSGI. The frontend's normal localhost backend
-address therefore stays unchanged. Worker, gateway, database and Sharkd are not
-recreated. `dev restart backend` uses this transaction once enabled; an unqualified
-`dev restart` still explicitly restarts the worker too.
+The proxy owns the existing API port 8080 and, after full-generation bootstrap,
+Sharkd port 4448. The frontend's normal addresses stay unchanged. A legacy
+API-only dev activation gets its full-generation topology through one maintenance
+`dev rebuild`. Subsequent compatible application updates exercise the same
+transaction as the host updater. `dev restart` also uses the update transaction.
 
 For dependency/image changes, use one command:
 
 ```bash
-./packetsafari dev update --build        # build images, replace API only
-./packetsafari dev update --build --all  # build and apply the regular dev stack
+./packetsafari dev update --build        # same as dev rebuild
+./packetsafari dev update --build --all  # compatibility alias; --all unnecessary
 ```
 
-`--all` is maintenance, not blue/green for all containers: it stops services,
-recreates them from resolved image IDs, runs initialization/migrations and verifies
-image identity and configured health. Jobs/connections may be interrupted.
+First bootstrap and changes to shared dev services use maintenance: build first,
+then stop services, recreate from resolved image IDs, initialize/migrate and verify.
+Jobs/connections may be interrupted on that explicitly local path.
 Optional fixture/test profiles are excluded. Pinned third-party images are reused,
 not rebuilt. Repeat the same command after failure to resume its saved plan;
 `rolling-recover` is for API transactions, not maintenance or database restoration.
 The [development guide](../../packetsafari/documentation/DEVELOPMENT.md#development-updates)
-owns the command reference and current full-stack test boundary. Real full-stack
-dev replacement has not yet been qualified end to end.
+owns the command reference. On 2026-09-24, the real dev stack completed a full
+rebuild/bootstrap and a five-service generation update: 405 health probes saw
+zero failures, with a 1.023-second proxy switch receipt. Preparation/drain/cleanup
+took 58 seconds in total. This does not qualify production workload continuity.
 
-A full legacy dev rebuild is blocked while rolling mode is enabled. Do not run
+A normal no-flag dev rebuild uses the managed topology. Do not run
 the original Compose file directly against this running project: it would bypass
 the proxy topology. The generated runtime is private, mode 0600, under
 `$PACKETSAFARI_DATA_ROOT/runs/deployment-proxy/dev-runtime`; it contains resolved
@@ -120,11 +126,13 @@ mechanics, not immutable production application-version isolation.
 5. Run post-switch health/doctor checks before promoting installed release metadata.
    Failed checks roll traffic back. Stop the old slot only after successful commit.
 
-A journal tracks preparation, switch, metadata commit and cleanup. A process death
-between NGINX reload and receipt persistence is reconciled from pending state.
-Interrupted metadata commits on a host recover to the old release using the saved
-metadata snapshot; no database restoration is needed because no migrations ran.
-Cleanup failures after commit retain the new release and are retryable via recovery.
+A journal tracks preparation, worker start, switch, drain, metadata commit and
+cleanup. Repeat the exact update to resume full-generation transactions, including
+an interrupted metadata commit or cleanup. Before workers start, failed preparation
+can discard the idle candidate. After they start, never use an API-only recovery
+or stop candidate dependencies: those workers may already own jobs. Failed
+post-switch checks return traffic to the retained generation and drain the failed
+candidate's jobs before stopping it. Drain timeout retains both generations.
 Do not delete state files to bypass drift, drain or recovery checks.
 
 There is no automatic HTTP retry, request/response buffering or forced worker
@@ -135,13 +143,17 @@ routing but interrupts live connections. This single-host setup is not HA.
 
 Host activation is opt-in and has not been qualified on production in this work.
 It requires the signed installed manifest to include `images.deployment-proxy`
-with a registry digest and the installed firewall policy to govern `.26` (proxy)
-and `.27` (green backend). The release builder now mirrors the pinned proxy image.
-The existing origin port is transferred once; subsequent updates keep it stable.
+with a registry digest, the image-derived runtime contract, warm-drain worker
+support and firewall rules for `.26` through `.29` and `.31`. Existing hosts first
+need an explicitly interrupting `update --maintenance` to install these prerequisites
+(with their normal backup flags), then proxy activation. Existing API-only host
+activations require a reviewed topology migration; do not hand-edit their state.
+The API and Sharkd origin ports transfer once; subsequent updates keep them stable.
 
 ```bash
 packetsafari-ops deployment-proxy enable --profile saas --manifest /path/to/signed-installed-manifest.json --ingress-policy /path/to/ingress.json
-# Subsequent updates use the existing packetsafari-ops update command and its backup policy.
+# Full-generation recovery: repeat the exact normal update command.
+# The recovery command below is only for legacy API-only/pre-worker transactions.
 packetsafari-ops deployment-proxy recover --profile saas
 ```
 
@@ -149,15 +161,20 @@ The normal signature, profile, entitlement, authorization and backup gates still
 run before the rolling branch. A signed target must declare:
 
 ```json
-{"rollingUpdate":{"compatibleFrom":["exact-installed-version"]}}
+{"runtimeContract":{"protocolVersion":1,"workerDrainVersion":1,"schemaInputs":"<SHA256 of image Alembic and SQL models>"}}
 ```
 
-Only the backend image may change, and it must be digest-pinned. The gateway image
-must be explicitly retained when legacy manifests inherited it from backend.
-Changes to other images, deployment profiles, required environment, schema inputs,
-or frozen runtime configuration are rejected. Inline backups and skipped health
-checks are rejected. Legacy stop-first updates and legacy rollback are blocked
-once activated; there is no silent maintenance fallback.
+The builder reads this from both backend and worker images and requires equality;
+resuming old images without the helper fails. Maintainers must bump protocolVersion
+for incompatible task/interprocess messages. Matching hashes do not prove semantic
+compatibility by themselves. All five application images must be digest-pinned;
+the gateway inherits backend when omitted. Changes outside this cohort, deployment
+profiles, required environment, schema or frozen runtime configuration are rejected.
+Inline backups and skipped health checks are rejected. `--maintenance` is an
+unactivated-host bootstrap option, not an implemented conversion of an activated
+fleet to maintenance. Shared infrastructure/schema upgrades on activated fleets
+still require a reviewed maintenance transition. This limitation also prevents
+claiming general on-prem full-stack zero-downtime support.
 
 ### Trusted ingress
 
@@ -201,6 +218,8 @@ python3 -m pytest tests/test_rolling_update.py tests/test_deployment_proxy.py te
 # From the app workspace, where local test ports are allowed:
 python3 ../packetsafari-onprem/scripts/test_deployment_proxy_local.py
 python3 ../packetsafari-onprem/scripts/test_deployment_ingress_local.py
+python3 ../packetsafari-onprem/scripts/test_workload_drain_local.py
+python3 ../packetsafari-onprem/scripts/test_fleet_update_local.py
 python3 scripts/test_dev_rolling_update.py
 ```
 
@@ -210,3 +229,9 @@ and proxy restart. The real dev test checks alternating cold updates, post-switc
 failure rollback, interrupted staging/reload recovery and unchanged shared-service
 start times. It samples the normal API port and retains receipts and availability
 records under the data root. It does not consume models or deploy production.
+
+The fleet fixture runs real Celery/Redis with synthetic long jobs and separate
+runner/Sharkd/gateway fixtures. It covers pending drain and resume, replacement
+image identities, post-switch rollback with a candidate job in flight, and early
+readiness rejection. It does not execute a real Agent or Triage analysis, nor
+qualify signed ECR delivery, CloudFront, on-prem ingress or production RAM headroom.
