@@ -348,6 +348,8 @@ def test_maybe_self_update_tooling_installs_archive_without_reexec(monkeypatch, 
     package_dir.mkdir(parents=True)
     (package_dir / "cli.py").write_text("print('new cli')\n", encoding="utf-8")
     (package_dir / "__init__.py").write_text("__version__ = '99.0.0'\n", encoding="utf-8")
+    (source_root / "VERSION").write_text("99.0.0\n", encoding="utf-8")
+    (source_root / "pyproject.toml").write_text('[project]\nversion = "99.0.0"\n', encoding="utf-8")
 
     archive = tmp_path / "packetsafari-onprem-99.0.0.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
@@ -374,6 +376,49 @@ def test_maybe_self_update_tooling_installs_archive_without_reexec(monkeypatch, 
     assert result["updated"] is True
     assert (layout.tooling_root / "packetsafari_onprem" / "cli.py").read_text(encoding="utf-8") == "print('new cli')\n"
     assert layout.wrapper_path.exists()
+
+
+def test_self_update_rejects_reexec_loop_before_download(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path / "runtime"), str(tmp_path / "runtime"))
+    monkeypatch.setenv("PACKETSAFARI_OPS_SELF_UPDATE_REEXEC", "1")
+    monkeypatch.setattr(operations, "materialize_source", lambda *a, **kw: pytest.fail("must not download"))
+    with pytest.raises(RuntimeError, match=r"running=.*installed=.*target=99.0.0"):
+        operations.maybe_self_update_tooling(SimpleNamespace(), layout,
+                                              {"tooling": {"version": "99.0.0", "minOpsVersion": "99.0.0"}})
+
+
+def test_self_update_rejects_inconsistent_signed_archive(monkeypatch, tmp_path):
+    source = tmp_path / "source" / "packetsafari-onprem"
+    package = source / "packetsafari_onprem"
+    package.mkdir(parents=True)
+    (package / "cli.py").write_text("pass\n")
+    (package / "__init__.py").write_text("__version__ = '98.0.0'\n")
+    (source / "VERSION").write_text("99.0.0\n")
+    (source / "pyproject.toml").write_text('[project]\nversion = "99.0.0"\n')
+    archive = tmp_path / "tooling.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(source, arcname=source.name)
+    layout = operations.runtime_layout(str(tmp_path / "runtime"), str(tmp_path / "runtime"))
+    with pytest.raises(RuntimeError, match="Ops archive version mismatch"):
+        operations._install_tooling_archive(layout, archive, "99.0.0")
+    assert not layout.tooling_root.exists()
+
+
+def test_activation_report_names_interruption_jobs_and_exact_command(monkeypatch, tmp_path):
+    layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
+    policy = layout.state_dir / 'rolling' / 'ingress-policy.json'
+    policy.parent.mkdir(parents=True)
+    policy.write_text(json.dumps({'mode': 'cloudfront-https', 'trustedCidrs': ['192.0.2.10/32'],
+                                  'viewerHttpsOnly': True}))
+    monkeypatch.setattr(operations.subprocess, 'run', lambda command, **kw:
+                        SimpleNamespace(returncode=0, stdout=json.dumps({'worker': [{}]})))
+    manifest = {'version': '10.0.0-test', 'runtimeContract': {'workerDrainVersion': 1},
+                'images': {'deployment-proxy': 'repo/proxy@sha256:' + 'a' * 64}}
+    report = operations._activation_report(layout, manifest, {}, 'skip')
+    assert report['jobsNow'] == {'active': 1, 'reserved': 1}
+    assert report['prerequisites']['trustedCidrs'] == ['192.0.2.10/32']
+    assert '--activate-deployment-proxy --ingress-policy' in report['nextCommand']
+    assert '--allow-unbacked-upgrade' in report['nextCommand']
 
 
 def test_services_with_changed_images_only_returns_changed_service_images():

@@ -155,12 +155,24 @@ routing but interrupts live connections. This single-host setup is not HA.
 
 ## Host activation and release contract
 
-Host activation is opt-in and has not been qualified on production in this work.
+Host activation is opt-in. Local tests do not qualify the live CloudFront path;
+verify the origin peer and public routes during first adoption.
 It requires the signed installed manifest to include `images.deployment-proxy`
 with a registry digest, the image-derived runtime contract, warm-drain worker
-support and firewall rules for `.26` through `.29` and `.31`. Existing hosts first
-need an explicitly interrupting `update --maintenance` to install these prerequisites
-(with their normal backup flags), then proxy activation. Existing API-only host
+support and firewall rules for `.26` through `.29` and `.31`. Existing SaaS hosts
+use one explicitly interrupting, resumable command to install these prerequisites
+and activate the proxy with a reviewed ingress policy:
+
+```bash
+sudo env HOME=/root packetsafari-ops update --maintenance --backup-mode skip --allow-unbacked-upgrade --activate-deployment-proxy --ingress-policy /opt/packetsafari/state/rolling/ingress-policy.json
+```
+
+The command pins the signed release and policy in `state/rolling/activation.json`
+before maintenance. If activation fails after the app is installed, repeat the
+same command; it resumes activation without another maintenance replacement.
+The merged Compose configuration, including dormant profiles and sizing overlays,
+is checked before maintenance stops services and again before port transfer.
+Do not delete the activation journal to bypass recovery. Existing API-only host
 activations require a reviewed topology migration; do not hand-edit their state.
 The API and Sharkd origin ports transfer once; subsequent updates keep them stable.
 

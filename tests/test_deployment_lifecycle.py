@@ -7,12 +7,12 @@ import pytest
 
 from packetsafari_onprem import operations as ops, maintenance_update as maintenance
 from packetsafari_onprem import fleet_update as fleet
-from packetsafari_onprem.rolling_update import Runtime, activation_base, save, read
+from packetsafari_onprem.rolling_update import Runtime, activation_base, initialize_bootstrap_proxy, save, read
 
 
 def test_activation_snapshot_keeps_dormant_logging_service(monkeypatch):
     def config(command, **kwargs):
-        assert command[-5:] == ['--profile', 'logging', 'config', '--format', 'json']
+        assert command[-5:] == ['--profile', '*', 'config', '--format', 'json']
         assert kwargs['check'] is True
         return SimpleNamespace(stdout=json.dumps({'services': {
             'backend': {'image': 'backend'},
@@ -22,6 +22,38 @@ def test_activation_snapshot_keeps_dormant_logging_service(monkeypatch):
     monkeypatch.setattr('packetsafari_onprem.rolling_update.subprocess.run', config)
     services = activation_base(['docker', 'compose'])['services']
     assert services['audit-forwarder'] == {'image': 'forwarder', 'profiles': ['logging']}
+
+
+def test_candidate_validation_includes_sizing_and_all_profiles_before_replace(tmp_path, monkeypatch):
+    current = tmp_path / 'compose.yml'
+    sizing = tmp_path / 'sizing.yml'
+    current.write_text('serving')
+    sizing.write_text('sizing')
+    runtime = Runtime(tmp_path / 'rolling', current,
+                      ['docker', 'compose', '-f', str(current), '-f', str(sizing)])
+
+    def validate(command, **kwargs):
+        assert command[-4:] == ['--profile', '*', 'config', '--quiet']
+        assert str(sizing) in command
+        candidate = Path(command[command.index('-f') + 1])
+        assert candidate != current
+        assert json.loads(candidate.read_text())['services']['audit-forwarder']['image'] == 'forwarder'
+        assert current.read_text() == 'serving'
+        return SimpleNamespace(returncode=0, stderr='')
+
+    monkeypatch.setattr('packetsafari_onprem.rolling_update.subprocess.run', validate)
+    runtime.validate_config({'services': {'audit-forwarder': {'image': 'forwarder'}}})
+    assert current.read_text() == 'serving'
+
+
+def test_failed_activation_can_reuse_only_unchanged_unconfigured_proxy(tmp_path):
+    policy = {'mode': 'cloudfront-https', 'trustedCidrs': ['192.0.2.10/32'], 'viewerHttpsOnly': True}
+    initialize_bootstrap_proxy(tmp_path, policy)
+    original = (tmp_path / 'nginx.conf').read_bytes()
+    initialize_bootstrap_proxy(tmp_path, policy)
+    assert (tmp_path / 'nginx.conf').read_bytes() == original
+    with pytest.raises(RuntimeError, match='refusing to overwrite'):
+        initialize_bootstrap_proxy(tmp_path, {**policy, 'trustedCidrs': ['192.0.2.11/32']})
 
 
 @pytest.mark.parametrize('mode', ['fleet', 'maintenance'])

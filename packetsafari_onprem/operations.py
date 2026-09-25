@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import fcntl
+import ast
+import copy
 import base64
 import getpass
 import hashlib
@@ -20,6 +22,7 @@ import tarfile
 import tempfile
 import time
 import threading
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -390,7 +393,19 @@ def _copy_tooling_tree(source: Path, destination: Path) -> None:
     )
 
 
-def _install_tooling_archive(layout: RuntimeLayout, archive: Path) -> None:
+def _tooling_archive_identity(source_root: Path) -> dict[str, str]:
+    tree = ast.parse((source_root / "packetsafari_onprem" / "__init__.py").read_text())
+    runtime = next((ast.literal_eval(node.value) for node in tree.body
+                    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "__version__"
+                                                           for target in node.targets)), "")
+    return {
+        "runtime": str(runtime),
+        "source": (source_root / "VERSION").read_text().strip(),
+        "package": str(tomllib.loads((source_root / "pyproject.toml").read_text())["project"]["version"]),
+    }
+
+
+def _install_tooling_archive(layout: RuntimeLayout, archive: Path, expected_version: str) -> None:
     parent = layout.tooling_root.parent
     parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="packetsafari-ops-tooling-") as tmp:
@@ -398,6 +413,9 @@ def _install_tooling_archive(layout: RuntimeLayout, archive: Path) -> None:
         extract_dir.mkdir(parents=True)
         shutil.unpack_archive(str(archive), str(extract_dir))
         source_root = _find_tooling_root(extract_dir)
+        identities = _tooling_archive_identity(source_root)
+        if any(value != expected_version for value in identities.values()):
+            raise RuntimeError(f"Ops archive version mismatch: target={expected_version}, identities={identities}")
         new_root = parent / f".onprem-new-{os.getpid()}"
         backup_root = parent / f".onprem-previous-{utc_now().replace(':', '').replace('+', '-')}"
         shutil.rmtree(new_root, ignore_errors=True)
@@ -422,6 +440,10 @@ def maybe_self_update_tooling(args, layout: RuntimeLayout, manifest: dict, *, bu
     status = tooling_update_status(manifest)
     if not bool(status.get("available")):
         return {"updated": False, **status}
+    if os.getenv("PACKETSAFARI_OPS_SELF_UPDATE_REEXEC") == "1":
+        installed = layout.tooling_root / "VERSION"
+        identity = installed.read_text().strip() if installed.exists() else "missing"
+        raise RuntimeError(f"Ops self-update stopped after one re-exec: running={version()}, installed={identity}, target={status.get('targetVersion')}")
     if layout.kind != "onprem-runtime-root":
         return {"updated": False, "skipped": True, "reason": "local_data_root", **status}
     source = _tooling_archive_source(manifest, bundle_dir=bundle_dir)
@@ -440,11 +462,12 @@ def maybe_self_update_tooling(args, layout: RuntimeLayout, manifest: dict, *, bu
     tooling = _manifest_tooling_requirements(manifest)
     _verify_sha256(archive, str(tooling.get("sha256") or ""), "packetsafari-ops archive")
     write_helper_status(layout, status="upgrading", message=f"Updating packetsafari-ops {version()} -> {status.get('targetVersion')}.")
-    _install_tooling_archive(layout, archive)
+    _install_tooling_archive(layout, archive, str(status.get("targetVersion") or ""))
     write_helper_status(layout, status="ok", message=f"packetsafari-ops updated to {status.get('targetVersion')}.")
     if _truthy(os.getenv("PACKETSAFARI_OPS_SELF_UPDATE_NO_REEXEC")):
         return {"updated": True, "reexec": False, **status}
     cli_path = layout.tooling_root / "packetsafari_onprem" / "cli.py"
+    os.environ["PACKETSAFARI_OPS_SELF_UPDATE_REEXEC"] = "1"
     os.execv(sys.executable, [sys.executable, str(cli_path), *sys.argv[1:]])
     raise RuntimeError("Failed to re-exec updated packetsafari-ops.")
 
@@ -4185,6 +4208,10 @@ def check_for_update(args) -> dict:
 
 def _deployment_plan(args, layout, current, target, backup_mode):
     """Explain selection only; execution still enforces all runtime checks."""
+    activation = _read_json(layout.state_dir / 'rolling/activation.json', {})
+    if activation:
+        return {'mode': 'activation-resume', 'pending': True, 'phase': activation.get('phase'),
+                'message': 'The signed application release is pinned; repeat the same maintenance and activation command.'}
     pending = _read_json(layout.state_dir / 'rolling/transaction.json', {})
     if pending.get('mode') in ('fleet', 'maintenance'):
         return {'mode': pending['mode'], 'pending': True, 'phase': pending.get('phase'),
@@ -4205,6 +4232,44 @@ def _deployment_plan(args, layout, current, target, backup_mode):
                 'message': f'{exc}. Use update --maintenance with your chosen backup policy.'}
     return {'mode': 'fleet', 'pending': False,
             'message': 'Replace the application generation, switch traffic, drain and retire old work. Runtime checks still apply.'}
+
+
+def _activation_report(layout, manifest: dict, active_manifest: dict, backup_mode: str) -> dict:
+    pending = _read_json(layout.state_dir / 'rolling/activation.json', {})
+    policy_path = Path(pending.get('ingressPolicy') or layout.state_dir / 'rolling/ingress-policy.json')
+    policy = _read_json(policy_path, {})
+    jobs: dict[str, object] = {}
+    for action in ('active', 'reserved'):
+        try:
+            response = subprocess.run(['docker', 'exec', 'packetsafari-worker', 'celery', '-A',
+                                       'packetsafari.celery_app', 'inspect', action, '--timeout=3', '--json'],
+                                      text=True, capture_output=True, timeout=6)
+            values = json.loads(response.stdout) if response.returncode == 0 else None
+            jobs[action] = sum(len(items or []) for items in values.values()) if isinstance(values, dict) else None
+        except (OSError, ValueError, subprocess.TimeoutExpired, TypeError):
+            jobs[action] = None
+    image = (manifest.get('images') or {}).get('deployment-proxy')
+    proxy_ref = image.get('image', '') if isinstance(image, dict) else str(image or '')
+    contract = manifest.get('runtimeContract') or {}
+    flags = f'--backup-mode {backup_mode}' + (' --allow-unbacked-upgrade' if backup_mode == 'skip' else '')
+    command = (f'sudo env HOME=/root packetsafari-ops update --maintenance {flags} '
+               f'--activate-deployment-proxy --ingress-policy {policy_path}') if policy else None
+    return {
+        'signedTargetVersion': manifest.get('version'),
+        'installedManifestMatchesTarget': bool(active_manifest == manifest),
+        'prerequisites': {'runtimeContract': bool(contract),
+                          'workerDrain': contract.get('workerDrainVersion') == 1,
+                          'digestPinnedProxy': '@sha256:' in proxy_ref,
+                          'ingressPolicyPresent': bool(policy),
+                          'ingressMode': policy.get('mode'),
+                          'trustedCidrs': policy.get('trustedCidrs') or [],
+                          'viewerHttpsOnly': policy.get('viewerHttpsOnly') is True},
+        'jobsNow': jobs,
+        'expectedInterruption': 'First adoption stops current app containers and can interrupt requests and jobs.',
+        'cloudFrontOriginPeer': 'Verify current VPC origin ENI/address against trustedCidrs before activation.',
+        'nextCommand': command,
+        'resumePhase': pending.get('phase'),
+    }
 
 
 def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> dict:
@@ -4235,7 +4300,7 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
     }
     ops = tooling_update_status(manifest)
     sizing_status = sizing_state_status(layout)
-    return {
+    payload = {
         **app,
         "channel": str(manifest.get("channel") or ""),
         "profile": profile,
@@ -4255,6 +4320,9 @@ def _update_check_payload(args, layout: RuntimeLayout, manifest_path: Path) -> d
         "tooling": ops,
         "sizingStatus": sizing_status,
     }
+    if payload['deploymentPlan']['mode'] in ('activation-required', 'activation-resume'):
+        payload['activation'] = _activation_report(layout, manifest, active_manifest, payload['backupMode'])
+    return payload
 
 
 _UPDATE_PLAN_PRINTED_ENV = "PACKETSAFARI_OPS_INTERNAL_UPDATE_PLAN_PRINTED"
@@ -4334,7 +4402,7 @@ def _attach_update_summary(
     original_ops = str(os.getenv(_UPDATE_ORIGINAL_OPS_ENV) or ((check_payload.get("ops") or {}).get("currentVersion")) or version())
     installed_ops = version()
     backup_mode = str(result.get("backupMode") or check_payload.get("backupMode") or "")
-    if result.get("status") == "noop":
+    if result.get("status") in ("noop", "tooling-only"):
         installed_app = str(app.get("currentVersion") or "")
         verification = "not needed"
         rollback = "unchanged"
@@ -4357,7 +4425,7 @@ def _attach_update_summary(
     elif backup_mode == "skip":
         rollback += "; no PacketSafari data backup was captured"
     result["updateSummary"] = {
-        "installedRelease": app.get("currentRelease") if result.get("status") in ("noop", "draining", "rolled_back") else app.get("targetRelease"),
+        "installedRelease": app.get("currentRelease") if result.get("status") in ("noop", "tooling-only", "draining", "rolled_back") else app.get("targetRelease"),
         "previousApplicationVersion": str(app.get("currentVersion") or ""),
         "installedApplicationVersion": installed_app,
         "previousOpsVersion": original_ops,
@@ -4375,6 +4443,18 @@ def _attach_update_summary(
 def apply_update(args) -> dict:
     layout = runtime_layout(args.runtime_root, args.container_runtime_root)
     ensure_runtime_dirs(layout)
+    activation_file = layout.state_dir / "rolling" / "activation.json"
+    activation = _read_json(activation_file, {})
+    if activation:
+        if not getattr(args, "activate_deployment_proxy", False):
+            raise RuntimeError("Proxy activation is pending; repeat update with --maintenance --activate-deployment-proxy and the original backup flags.")
+        args.manifest_url = activation["manifest"]
+        args.manifest_signature = activation["signature"]
+    if getattr(args, "activate_deployment_proxy", False):
+        if not getattr(args, "maintenance", False):
+            raise ValueError("First proxy activation requires --maintenance")
+        if not activation and not getattr(args, "ingress_policy", None):
+            raise ValueError("First proxy activation requires --ingress-policy")
     human_output = bool(getattr(args, "human_output", False))
     with update_progress(args, "Checking host requirements and sizing"):
         host_requirements = host_requirements_report(layout) if human_output else warn_if_host_below_requirements(layout)
@@ -4388,8 +4468,12 @@ def apply_update(args) -> dict:
         os.environ[_UPDATE_PLAN_PRINTED_ENV] = "true"
     manifest = _read_json(manifest_path, {})
     pending_generation = _read_json(layout.state_dir / 'rolling/transaction.json', {}).get('mode') in ('fleet', 'maintenance')
-    if not check_payload["available"] and not bool(getattr(args, "force", False)) and not pending_generation:
-        return _attach_update_summary({"status": "noop", **check_payload}, check_payload, host_requirements, args)
+    if not check_payload["available"] and not bool(getattr(args, "force", False)) and not pending_generation and not getattr(args, "activate_deployment_proxy", False):
+        if ops_status.get("available"):
+            maybe_self_update_tooling(args, layout, manifest)
+        original_ops = str(os.getenv(_UPDATE_ORIGINAL_OPS_ENV) or version())
+        status = "tooling-only" if _version_key(original_ops) < _version_key(version()) else "noop"
+        return _attach_update_summary({"status": status, **check_payload}, check_payload, host_requirements, args)
     acknowledge_unbacked_upgrade(args, backup_mode=str(check_payload.get("backupMode") or ""))
     maybe_self_update_tooling(args, layout, manifest)
     setattr(args, "manifest", str(manifest_path))
@@ -4398,7 +4482,52 @@ def apply_update(args) -> dict:
     setattr(args, "_sizing_status_report", sizing_status)
     if not str(getattr(args, "profile", "") or "").strip():
         setattr(args, "profile", _active_deployment_profile(layout))
-    result = upgrade_release(args)
+    if getattr(args, "activate_deployment_proxy", False):
+        from . import deployment_proxy, rolling_update
+        from .rolling_update import save as save_rolling
+        if args.profile != "saas" or rolling_update.enabled(layout) and not activation:
+            raise ValueError("First-time SaaS proxy activation requires an unactivated SaaS host")
+        if not activation:
+            policy = deployment_proxy.ingress_policy(_read_json(args.ingress_policy, {}))
+            if policy["mode"] != "cloudfront-https":
+                raise ValueError("SaaS activation requires cloudfront-https ingress policy")
+            directory = activation_file.parent
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            pinned = directory / "activation-release.json"
+            signature = Path(str(pinned) + ".sig")
+            shutil.copy2(manifest_path, pinned)
+            shutil.copy2(Path(str(manifest_path) + ".sig"), signature)
+            stored_policy = directory / "activation-ingress.json"
+            save_rolling(stored_policy, policy)
+            activation = {"phase": "applying", "version": manifest["version"],
+                          "manifest": str(pinned), "signature": str(signature),
+                          "ingressPolicy": str(stored_policy)}
+            save_rolling(activation_file, activation)
+        installed = _release_version(layout.release_manifest_path) if layout.release_manifest_path.exists() else ""
+        if installed != activation["version"]:
+            result = upgrade_release(args)
+            if result.get("status") in ("draining", "rolled_back"):
+                return _attach_update_summary(result, check_payload, host_requirements, args)
+            if result.get("version") != activation["version"]:
+                raise RuntimeError("Maintenance did not install the pinned activation release; repeat the same update command")
+        else:
+            result = {"version": installed, "backupMode": check_payload.get("backupMode"),
+                      "message": "Signed application release already installed; resuming proxy activation."}
+        activation["phase"] = "app-installed"
+        save_rolling(activation_file, activation)
+        if rolling_update.enabled(layout):
+            enabled = {"status": "already-enabled"}
+        else:
+            enable_args = copy.copy(args)
+            enable_args.action = "enable"
+            enable_args.manifest = activation["manifest"]
+            enable_args.manifest_signature = activation["signature"]
+            enable_args.ingress_policy = Path(activation["ingressPolicy"])
+            enabled = rolling_update.manage_host(enable_args)
+        activation_file.unlink()
+        result["activation"] = enabled
+    else:
+        result = upgrade_release(args)
     result["hostRequirements"] = host_requirements
     result["sizingStatus"] = sizing_status
     result["imageRetention"] = maybe_offer_docker_image_prune(args, layout) if result.get('status') != 'draining' else {'status': 'deferred_until_drain'}
@@ -6301,6 +6430,8 @@ def upgrade_release(args) -> dict:
                 services_to_recreate.append("egress-ironproxy")
             render_logging_config(layout)
             validate_rendered_security_consumer(layout)
+            if profile == "saas" and manifest.get("runtimeContract") and not rolling_update.enabled(layout):
+                rolling_update.preflight_activation(layout, manifest, sys.modules[__name__])
             maybe_fail_upgrade_simulation(layout, args, "compose")
             if source == "manifest" and not bool(getattr(args, "skip_image_pull", False)):
                 write_helper_status(layout, status="upgrading", message="Pulling target release images before stopping running services.")

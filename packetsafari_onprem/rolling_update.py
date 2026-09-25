@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import deployment_proxy as proxy
@@ -46,9 +47,8 @@ def fingerprints(paths):
 
 
 def activation_base(compose_command):
-    # The sizing overlay includes dormant logging services even when disabled.
-    # Retain their definitions, including images and profiles, in the snapshot.
-    result = subprocess.run([*compose_command, '--profile', 'logging', 'config', '--format', 'json'],
+    # Sizing overlays retain services in dormant profiles. Snapshot all of them.
+    result = subprocess.run([*compose_command, '--profile', '*', 'config', '--format', 'json'],
                             text=True, capture_output=True, check=True)
     return json.loads(result.stdout)
 
@@ -112,8 +112,26 @@ class Runtime:
             config = configuration(stack, self.directory)
         else:
             config = compose_config(read(self.directory / 'base.json'), stack, self.directory)
+        self.validate_config(config)
         save(self.compose_file, config)
-        self.dc('config', '--quiet')
+
+    def validate_config(self, config):
+        """Validate every merged profile without replacing the serving Compose file."""
+        self.compose_file.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', prefix='.rolling-preflight-', suffix='.yml',
+                                         dir=self.compose_file.parent, delete=False) as handle:
+            json.dump(config, handle)
+            candidate = Path(handle.name)
+        try:
+            command = [str(candidate) if part == str(self.compose_file) else part for part in self.command]
+            if command == self.command:
+                raise ValueError('Compose command does not reference the active Compose file')
+            result = subprocess.run([*command, '--profile', '*', 'config', '--quiet'],
+                                    text=True, capture_output=True, timeout=180)
+            if result.returncode:
+                raise RuntimeError(f'Merged Compose preflight failed: {result.stderr[-1500:]}')
+        finally:
+            candidate.unlink(missing_ok=True)
 
     def schema(self, container):
         script = """import hashlib,pathlib
@@ -241,12 +259,7 @@ def manage_host(args):
         return result
 
 
-def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingress=None):
-    """One-time port transfer; caller owns the runtime lock. Existing data is shared."""
-    directory = runtime.directory
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if runtime.stack_file.exists():
-        raise ValueError('Rolling runtime already enabled')
+def bootstrap_stack(base, *, proxy_name, proxy_image):
     backend = base['services']['backend']
     ports = [dict(port, target=8080) for port in backend.get('ports', []) if int(port['target']) == 80]
     if not ports:
@@ -259,8 +272,52 @@ def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingre
         if any(int(port['target']) != 4448 for port in sharkd_ports):
             raise ValueError('Unexpected Sharkd published port; cannot transfer it safely')
         stack['sharkdPorts'] = sharkd_ports
+    return stack
+
+
+def preflight_activation(layout, manifest, ops):
+    """Check the first-adoption topology before maintenance stops the old stack."""
+    from .fleet_update import configuration
+    runtime = Runtime(layout.state_dir / 'rolling', layout.compose_file, ops._compose_base_command(layout))
+    base = activation_base(runtime.command)
+    stack = bootstrap_stack(base, proxy_name='packetsafari-deployment-proxy',
+                            proxy_image=image_ref(manifest.get('images', {}).get('deployment-proxy')))
+    runtime.validate_config(compose_config(base, stack, runtime.directory))
+    full = {**stack, 'fleetBases': {'backend': base, 'backend-green': copy.deepcopy(base)}}
+    runtime.validate_config(configuration(full, runtime.directory))
+
+
+def initialize_bootstrap_proxy(directory, ingress):
+    state_file = directory / 'state.json'
+    config_file = directory / 'nginx.conf'
+    if not state_file.exists() and not config_file.exists():
+        proxy.initialize(directory, ingress)
+        return
+    if not state_file.is_file() or not config_file.is_file():
+        raise RuntimeError('Incomplete proxy bootstrap state; inspect before retrying')
+    state = read(state_file)
+    expected = proxy.configuration(None, 'unconfigured', ingress)
+    if (state.get('generation') != 'unconfigured' or
+            state.get('ingressPolicy') != proxy.ingress_policy(ingress) or
+            config_file.read_text() != expected or
+            state.get('configSha256') != hashlib.sha256(expected.encode()).hexdigest()):
+        raise RuntimeError('Proxy bootstrap state changed; refusing to overwrite it')
+
+
+def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingress=None):
+    """One-time port transfer; caller owns the runtime lock. Existing data is shared."""
+    directory = runtime.directory
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if runtime.stack_file.exists():
+        raise ValueError('Rolling runtime already enabled')
+    stack = bootstrap_stack(base, proxy_name=proxy_name, proxy_image=proxy_image)
+    runtime.validate_config(compose_config(base, stack, directory))
+    if 'frontend' not in base['services']:
+        from .fleet_update import configuration
+        full = {**stack, 'fleetBases': {'backend': base, 'backend-green': copy.deepcopy(base)}}
+        runtime.validate_config(configuration(full, directory))
     save(directory / 'base.json', base)
-    proxy.initialize(directory / 'proxy', ingress)
+    initialize_bootstrap_proxy(directory / 'proxy', ingress)
     before = runtime.compose_file.read_text()
     save(runtime.stack_file, stack)
     started = False
