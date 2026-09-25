@@ -3872,6 +3872,7 @@ def docker_compose_run(
     extra_volumes: list[str] | None = None,
     stdin_path: Path | None = None,
     stdout_path: Path | None = None,
+    log_output: bool = False,
 ) -> None:
     container_name = f"packetsafari-ops-{os.getpid()}-{secrets.token_hex(4)}"
     command = [
@@ -3889,7 +3890,8 @@ def docker_compose_run(
     stdin = stdin_path.open("rb") if stdin_path else None
     stdout = stdout_path.open("wb") if stdout_path else None
     try:
-        subprocess.run(command, check=True, stdin=stdin, stdout=stdout)
+        subprocess.run(command, check=True, stdin=stdin,
+                       stdout=stdout if stdout is not None else (sys.stderr if log_output else None))
     except (Exception, KeyboardInterrupt):
         # Killing the attached Docker CLI does not prove the one-off stopped.
         # In particular a migration must stop before rollback touches its DB.
@@ -5760,6 +5762,7 @@ def run_target_migrations(layout: RuntimeLayout) -> None:
         layout,
         "backend",
         ["sh", "-c", "PACKETSAFARI_SKIP_SERVICE_INIT=true python3 /app/scripts/sql_storage_upgrade.py upgrade"],
+        log_output=True,
     )
 
 

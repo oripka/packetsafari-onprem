@@ -1,10 +1,23 @@
 import json
 import signal
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from packetsafari_onprem import operations
+
+
+def test_migration_child_logs_do_not_corrupt_json_stdout(monkeypatch, capfd):
+    monkeypatch.setattr(operations, "docker_compose_up", lambda *a, **kw: None)
+    monkeypatch.setattr(operations, "_compose_base_command", lambda _: [
+        sys.executable, "-c", "print('migration progress')",
+    ])
+    operations.run_target_migrations(object())
+    print(json.dumps({"status": "ok"}))
+    output = capfd.readouterr()
+    assert json.loads(output.out) == {"status": "ok"}
+    assert "migration progress" in output.err
 
 
 def test_data_restore_stops_current_capture_readers_before_replacing_compose(monkeypatch, tmp_path):

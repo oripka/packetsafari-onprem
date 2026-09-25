@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 import time
 import uuid
 
@@ -58,6 +59,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         restore_before_changes(runtime, journal, timeout)
         raise RuntimeError('Previous maintenance aborted before changes; old service restored. Retry update explicitly.')
     if journal['phase'] == 'quiescing':
+        print('Maintenance: pausing ingress and draining connections', file=sys.stderr, flush=True)
         deadline = time.monotonic() + timeout
         while True:
             receipt = proxy.quiesce(runtime.directory / 'proxy', stack['proxyName'])
@@ -69,6 +71,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         journal['phase'] = 'draining'
         save(runtime.journal_file, journal)
     if journal['phase'] == 'draining':
+        print('Maintenance: finishing old jobs before stopping application services', file=sys.stderr, flush=True)
         def persist(worker):
             journal['oldWorker'] = worker
             save(runtime.journal_file, journal)
@@ -90,6 +93,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         journal['phase'] = 'preparing'
         save(runtime.journal_file, journal)
     if journal['phase'] == 'preparing':
+        print('Maintenance: preparing configuration and the selected backup policy', file=sys.stderr, flush=True)
         base = prepare(journal['targetBase'])
         staged = copy.deepcopy(stack)
         staged.update(active='backend', proxyImage=journal['proxyImage'],
@@ -98,6 +102,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         journal.update(phase='starting', targetBase=base, staged=staged)
         save(runtime.journal_file, journal)
     if journal['phase'] == 'starting':
+        print('Maintenance: applying database migrations and starting services', file=sys.stderr, flush=True)
         # Repeat from the saved plan after interruption, never rebuild or rediscover.
         save(runtime.stack_file, journal['staged'])
         runtime.render(journal['staged'])
@@ -107,6 +112,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         journal['phase'] = 'opening'
         save(runtime.journal_file, journal)
     if journal['phase'] == 'opening':
+        print('Maintenance: checking readiness before reopening ingress', file=sys.stderr, flush=True)
         ready(runtime, list(COHORT), timeout)
         proxy.switch(runtime.directory / 'proxy', stack['proxyName'], runtime.container('backend'),
                      sharkd=runtime.container('sharkd'), drain_timeout=0)
@@ -118,6 +124,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         journal['phase'] = 'committing'
         save(runtime.journal_file, journal)
     if journal['phase'] == 'committing':
+        print('Maintenance: verification passed; committing release metadata', file=sys.stderr, flush=True)
         commit()
         journal['phase'] = 'committed'
         save(runtime.journal_file, journal)
@@ -149,7 +156,7 @@ def upgrade(layout, args, manifest, *, source, backup_mode, backup_proof, ops):
             if ops.deployment_profile(args) == 'saas':
                 ops.ensure_ecr_credential_helper_ready(layout)
             for image in sorted({image_ref(value) for value in manifest['images'].values()} - {''}):
-                subprocess.run(['docker', 'pull', image], check=True)
+                subprocess.run(['docker', 'pull', '--quiet', image], check=True, stdout=sys.stderr)
         pin_release(runtime, layout.target_release_manifest_path)
         saved = {'manifest': manifest, 'backupMode': backup_mode, 'snapshot': str(ops.snapshot_runtime(layout))}
         save(metadata, saved)
