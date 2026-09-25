@@ -99,7 +99,8 @@ class ReleaseObservabilityTest(unittest.TestCase):
                                    public_url='https://app.example.test', origin_peer_ip='192.0.2.11')
             error = urllib.error.HTTPError('https://app.example.test/sharkd', 401, 'Unauthorized', {}, None)
             doctor = {'ok': True, 'checks': [{'name': 'intelligence_updates', 'ok': True, 'feeds': [
-                {'id': 'signup_email', 'enabled': True, 'status': 'error', 'updatedAt': ''}]}]}
+                {'id': 'signup_email', 'enabled': True, 'status': 'error', 'updatedAt': '',
+                 'lastAttemptAt': '2026-09-25T08:00:00Z', 'lastError': 'source unavailable'}]}]}
             with patch.object(operations, 'doctor_deployment', return_value=doctor), \
                  patch.object(operations, '_http_probe', return_value={'ok': True, 'status': 200}), \
                  patch.object(operations.urllib.request, 'urlopen', side_effect=error), \
@@ -110,6 +111,7 @@ class ReleaseObservabilityTest(unittest.TestCase):
             self.assertEqual([check['name'] for check in result['checks'] if not check['ok']],
                              ['cloudfront_origin_peer'])
             self.assertEqual(result['feedWarnings'][0]['id'], 'signup_email')
+            self.assertEqual(result['feedWarnings'][0]['lastError'], 'source unavailable')
 
 
 if __name__ == '__main__':

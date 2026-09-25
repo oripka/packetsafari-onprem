@@ -6062,6 +6062,8 @@ try:
                 "enabled": bool(row.get("enabled", False)),
                 "status": str(row.get("last_status") or "never"),
                 "updatedAt": str(row.get("last_updated_at") or ""),
+                "lastAttemptAt": str(row.get("last_attempt_at") or ""),
+                "lastError": str(row.get("last_error") or ""),
                 "version": str(row.get("last_version") or ""),
             }
             for row in feeds
@@ -6263,7 +6265,8 @@ def verify_deployment(args) -> dict:
     add('doctor', doctor['ok'], failed=[check['name'] for check in doctor['checks'] if not check['ok']])
     runtime_intelligence = next((check for check in doctor['checks'] if check['name'] == 'intelligence_updates'), {})
     feed_warnings = [{'id': feed.get('id'), 'status': feed.get('status'),
-                      'updatedAt': feed.get('updatedAt'), 'provenance': 'runtime_update'}
+                      'updatedAt': feed.get('updatedAt'), 'lastAttemptAt': feed.get('lastAttemptAt'),
+                      'lastError': feed.get('lastError'), 'provenance': 'runtime_update'}
                      for feed in runtime_intelligence.get('feeds') or []
                      if feed.get('enabled') and feed.get('status') in ('error', 'never')]
     if stack.get('fleetBases'):
