@@ -174,6 +174,10 @@ The merged Compose configuration, including dormant profiles and sizing overlays
 is checked before maintenance stops services and again before port transfer.
 Do not delete the activation journal to bypass recovery. Existing API-only host
 activations require a reviewed topology migration; do not hand-edit their state.
+If a later signed Ops-only channel revision is needed while activation is pinned,
+run `sudo env HOME=/root packetsafari-ops update --tooling-only` first, then
+repeat the maintenance-and-activation command. Tooling-only verifies the same
+application version and image digests and never replaces app containers.
 The API and Sharkd origin ports transfer once; subsequent updates keep them stable.
 
 ```bash

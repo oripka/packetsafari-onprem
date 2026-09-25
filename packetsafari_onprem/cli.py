@@ -326,6 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--maintenance", action="store_true", help="Explicitly allow schema/shared-service maintenance. Activated generations pause ingress and drain work first; initial bootstrap may interrupt work.")
     update.add_argument("--activate-deployment-proxy", action="store_true", help="After first-time maintenance, activate the signed deployment proxy; repeat this command to resume activation.")
     update.add_argument("--ingress-policy", type=Path, help="Reviewed JSON ingress policy required with --activate-deployment-proxy.")
+    update.add_argument("--tooling-only", action="store_true", help="Apply only a signed Ops tooling revision for the installed app version, including while activation is pending.")
     update.add_argument(
         "--json",
         action="store_true",

@@ -59,3 +59,41 @@ def test_update_resumes_activation_without_repeating_maintenance(tmp_path, monke
     assert ops.apply_update(args)['activation']['status'] == 'enabled'
     assert len(maintenance_calls) == 1
     assert not journal.exists()
+    # A prior failed bootstrap can leave a preliminary stack marker without a
+    # running proxy; it must not be mistaken for completed activation.
+    (layout.state_dir / 'rolling' / 'proxy').mkdir(exist_ok=True)
+    rolling_update.save(layout.state_dir / 'rolling' / 'stack.json',
+                        {'active': 'backend', 'proxyName': 'packetsafari-deployment-proxy'})
+    rolling_update.save(layout.state_dir / 'rolling' / 'proxy' / 'state.json',
+                        {'generation': 'unconfigured'})
+    assert ops.apply_update(args)['activation']['status'] == 'enabled'
+    assert len(activation_calls) == 3
+    assert len(maintenance_calls) == 1
+
+
+def test_tooling_only_can_update_while_activation_is_pinned(tmp_path, monkeypatch):
+    layout = ops.runtime_layout(str(tmp_path / 'runtime'), str(tmp_path / 'runtime'))
+    layout.release_manifest_path.parent.mkdir(parents=True)
+    installed = {'version': '10.0.0-test', 'images': {'backend': 'repo@sha256:' + 'a' * 64}}
+    layout.release_manifest_path.write_text(json.dumps(installed))
+    channel = tmp_path / 'channel.json'
+    channel.write_text(json.dumps({**installed, 'tooling': {'version': '99.0.0', 'minOpsVersion': '99.0.0'}}))
+    (layout.state_dir / 'rolling').mkdir(parents=True)
+    rolling_update.save(layout.state_dir / 'rolling' / 'activation.json',
+                        {'phase': 'app-installed', 'version': '10.0.0-test'})
+    args = SimpleNamespace(runtime_root=str(tmp_path / 'runtime'), container_runtime_root=str(tmp_path / 'runtime'),
+                           tooling_only=True, activate_deployment_proxy=False, maintenance=False,
+                           manifest_url=None, profile='saas', force=False, human_output=False, backup_mode='skip')
+    monkeypatch.setattr(ops, 'warn_if_host_below_requirements', lambda _: {'warnings': []})
+    monkeypatch.setattr(ops, 'warn_if_sizing_state_stale', lambda _: {'stale': False})
+    monkeypatch.setattr(ops, '_download_update_manifest', lambda *a: channel)
+    monkeypatch.setattr(ops, '_update_check_payload', lambda *a: {
+        'available': False, 'app': {'currentVersion': '10.0.0-test', 'targetVersion': '10.0.0-test'},
+        'backupMode': 'skip', 'ops': {'currentVersion': ops.version(), 'available': True},
+    })
+    updated = []
+    monkeypatch.setattr(ops, 'maybe_self_update_tooling', lambda *a: updated.append(True))
+    monkeypatch.setattr(ops, 'upgrade_release', lambda *a: pytest.fail('must not replace app'))
+    ops.apply_update(args)
+    assert updated == [True]
+    assert (layout.state_dir / 'rolling' / 'activation.json').exists()

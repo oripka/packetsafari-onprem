@@ -7,7 +7,7 @@ import pytest
 
 from packetsafari_onprem import operations as ops, maintenance_update as maintenance
 from packetsafari_onprem import fleet_update as fleet
-from packetsafari_onprem.rolling_update import Runtime, activation_base, bootstrap, initialize_bootstrap_proxy, recover_incomplete_bootstrap, save, read
+from packetsafari_onprem.rolling_update import Runtime, activation_base, activation_complete, bootstrap, initialize_bootstrap_proxy, recover_incomplete_bootstrap, save, read
 
 
 def test_activation_snapshot_keeps_dormant_logging_service(monkeypatch):
@@ -103,6 +103,21 @@ def test_retry_retains_proven_pre_transfer_marker(tmp_path, monkeypatch):
     assert recover_incomplete_bootstrap(runtime, SimpleNamespace(state_dir=state_dir), policy)
     assert not runtime.stack_file.exists()
     assert len(list(directory.glob('bootstrap-incomplete-*.json'))) == 1
+
+
+def test_preliminary_stack_is_never_reported_as_completed_activation(tmp_path, monkeypatch):
+    state_dir = tmp_path / 'state'
+    directory = state_dir / 'rolling'
+    (directory / 'proxy').mkdir(parents=True)
+    save(directory / 'stack.json', {'active': 'backend', 'proxyName': 'proxy'})
+    save(directory / 'proxy/state.json', {'generation': 'unconfigured'})
+    layout = SimpleNamespace(state_dir=state_dir)
+    assert not activation_complete(layout)
+    save(directory / 'stack.json', {'active': 'backend', 'proxyName': 'proxy', 'fleetBases': {'backend': {}}})
+    save(directory / 'proxy/state.json', {'generation': 'switched'})
+    monkeypatch.setattr('packetsafari_onprem.rolling_update.proxy.inspect',
+                        lambda _: {'State': {'Running': True}})
+    assert activation_complete(layout)
 
 
 @pytest.mark.parametrize('mode', ['fleet', 'maintenance'])

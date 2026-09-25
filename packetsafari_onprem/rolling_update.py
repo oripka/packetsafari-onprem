@@ -28,6 +28,18 @@ def enabled(layout):
     return (layout.state_dir / 'rolling' / 'stack.json').exists()
 
 
+def activation_complete(layout):
+    directory = layout.state_dir / 'rolling'
+    stack = read(directory / 'stack.json') if (directory / 'stack.json').is_file() else {}
+    state = read(directory / 'proxy/state.json') if (directory / 'proxy/state.json').is_file() else {}
+    if not stack.get('fleetBases') or state.get('generation') in (None, 'unconfigured'):
+        return False
+    try:
+        return bool(proxy.inspect(stack['proxyName'])['State']['Running'])
+    except (KeyError, RuntimeError, subprocess.CalledProcessError):
+        return False
+
+
 def active_service(layout, service='backend'):
     if not enabled(layout):
         return service

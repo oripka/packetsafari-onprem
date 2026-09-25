@@ -4445,7 +4445,10 @@ def apply_update(args) -> dict:
     ensure_runtime_dirs(layout)
     activation_file = layout.state_dir / "rolling" / "activation.json"
     activation = _read_json(activation_file, {})
-    if activation:
+    tooling_only = bool(getattr(args, "tooling_only", False))
+    if tooling_only and getattr(args, "activate_deployment_proxy", False):
+        raise ValueError("--tooling-only and --activate-deployment-proxy are separate operations")
+    if activation and not tooling_only:
         if not getattr(args, "activate_deployment_proxy", False):
             raise RuntimeError("Proxy activation is pending; repeat update with --maintenance --activate-deployment-proxy and the original backup flags.")
         args.manifest_url = activation["manifest"]
@@ -4467,6 +4470,18 @@ def apply_update(args) -> dict:
         print(format_update_plan(check_payload, host_requirements), file=sys.stderr, flush=True)
         os.environ[_UPDATE_PLAN_PRINTED_ENV] = "true"
     manifest = _read_json(manifest_path, {})
+    if tooling_only:
+        pinned_version = str(activation.get('version') or _current_release_version(layout))
+        if str(manifest.get('version') or '') != pinned_version:
+            raise ValueError(f"Ops-only update must retain installed/pinned app version {pinned_version}")
+        installed_manifest = _read_json(layout.release_manifest_path, {})
+        if (manifest.get('images') or {}) != (installed_manifest.get('images') or {}):
+            raise ValueError('Ops-only channel changed application image digests')
+        if ops_status.get('available'):
+            maybe_self_update_tooling(args, layout, manifest)
+        original_ops = str(os.getenv(_UPDATE_ORIGINAL_OPS_ENV) or version())
+        status = 'tooling-only' if _version_key(original_ops) < _version_key(version()) else 'noop'
+        return _attach_update_summary({'status': status, **check_payload}, check_payload, host_requirements, args)
     pending_generation = _read_json(layout.state_dir / 'rolling/transaction.json', {}).get('mode') in ('fleet', 'maintenance')
     if not check_payload["available"] and not bool(getattr(args, "force", False)) and not pending_generation and not getattr(args, "activate_deployment_proxy", False):
         if ops_status.get("available"):
@@ -4485,7 +4500,7 @@ def apply_update(args) -> dict:
     if getattr(args, "activate_deployment_proxy", False):
         from . import deployment_proxy, rolling_update
         from .rolling_update import save as save_rolling
-        if args.profile != "saas" or rolling_update.enabled(layout) and not activation:
+        if args.profile != "saas" or rolling_update.activation_complete(layout) and not activation:
             raise ValueError("First-time SaaS proxy activation requires an unactivated SaaS host")
         if not activation:
             policy = deployment_proxy.ingress_policy(_read_json(args.ingress_policy, {}))
@@ -4495,8 +4510,9 @@ def apply_update(args) -> dict:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             pinned = directory / "activation-release.json"
             signature = Path(str(pinned) + ".sig")
-            shutil.copy2(manifest_path, pinned)
-            shutil.copy2(Path(str(manifest_path) + ".sig"), signature)
+            if manifest_path != pinned:
+                shutil.copy2(manifest_path, pinned)
+                shutil.copy2(Path(str(manifest_path) + ".sig"), signature)
             stored_policy = directory / "activation-ingress.json"
             save_rolling(stored_policy, policy)
             activation = {"phase": "applying", "version": manifest["version"],
@@ -4515,7 +4531,7 @@ def apply_update(args) -> dict:
                       "message": "Signed application release already installed; resuming proxy activation."}
         activation["phase"] = "app-installed"
         save_rolling(activation_file, activation)
-        if rolling_update.enabled(layout):
+        if rolling_update.activation_complete(layout):
             enabled = {"status": "already-enabled"}
         else:
             enable_args = copy.copy(args)
