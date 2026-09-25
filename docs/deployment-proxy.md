@@ -198,7 +198,9 @@ must come from a fresh AWS read, not an old deployment receipt. CloudFront
 frontend publication and an authenticated Sharkd transaction remain separate
 checks. An update writes `state/last-deployment-receipt.json` with app/Ops
 versions, image references, release time, backup semantics, proxy generation,
-and any measured internal switch time. `trafficUnavailableSeconds` stays null
+bundled content/probe provenance and any measured internal switch time.
+`verify-deployment` also includes the runtime intelligence-feed state returned
+by the host doctor, separate from what was bundled. `trafficUnavailableSeconds` stays null
 until independently measured at the public path; a proxy switch timer is not
 an outage measurement. Image cleanup is advisory in update JSON and happens
 only when `--prune-old-images` is explicitly passed.

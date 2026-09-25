@@ -4437,6 +4437,7 @@ def _attach_update_summary(
             'ops': {'version': installed_ops},
             'images': {name: image_ref(images, name) for name in sorted(images)},
             'changedServices': check_payload.get('changedServices') or [],
+            'bundledInputs': _bundled_input_status(installed_manifest),
             'proxy': {'generation': proxy_state.get('generation'), 'switchedAt': proxy_state.get('switchedAt'),
                       'status': proxy_state.get('status')},
             'verification': verification,
@@ -4454,6 +4455,27 @@ def _attach_update_summary(
         result['deploymentReceipt'] = receipt
         result['deploymentReceiptPath'] = str(receipt_path)
     return result
+
+
+def _bundled_input_status(manifest: dict) -> dict:
+    content = manifest.get('embeddedSecurityContent') or {}
+    probes = manifest.get('captureProbes') or {}
+    return {
+        'securityContent': {
+            'channel': content.get('channel'), 'sequence': content.get('sequence'),
+            'packages': [{'id': item.get('id'), 'type': item.get('type'), 'status': 'bundled',
+                          'generatedAt': item.get('generated_at'), 'version': item.get('version'),
+                          'sha256': item.get('sha256'), 'components': item.get('components') or []}
+                         for item in content.get('packages') or []],
+            'unavailableOptionalTypes': content.get('unavailable_optional_package_types') or [],
+        },
+        'captureProbes': [{'os': item.get('os'), 'arch': item.get('arch'),
+                           'status': item.get('status'), 'builtAt': item.get('builtAt'),
+                           'sha256': item.get('sha256'), 'qualification': item.get('qualification')}
+                          for item in probes.get('artifacts') or []],
+        'codexReleaseChecks': manifest.get('codexReleaseChecks') or {},
+        'runtimeFeedState': 'not_measured_in_release_manifest',
+    }
 
 
 def apply_update(args) -> dict:
@@ -6239,6 +6261,11 @@ def verify_deployment(args) -> dict:
 
     doctor = doctor_deployment(args)
     add('doctor', doctor['ok'], failed=[check['name'] for check in doctor['checks'] if not check['ok']])
+    runtime_intelligence = next((check for check in doctor['checks'] if check['name'] == 'intelligence_updates'), {})
+    feed_warnings = [{'id': feed.get('id'), 'status': feed.get('status'),
+                      'updatedAt': feed.get('updatedAt'), 'provenance': 'runtime_update'}
+                     for feed in runtime_intelligence.get('feeds') or []
+                     if feed.get('enabled') and feed.get('status') in ('error', 'never')]
     if stack.get('fleetBases'):
         try:
             live_generation = deployment_proxy.generation(stack['proxyName'])
@@ -6302,6 +6329,8 @@ def verify_deployment(args) -> dict:
     return {'ok': all(check['ok'] for check in checks), 'profile': manifest.get('targetProfile'),
             'applicationVersion': manifest.get('version'), 'opsVersion': version(),
             'releaseBuiltAt': manifest.get('builtAt'), 'checkedAt': utc_now(), 'checks': checks,
+            'bundledInputs': _bundled_input_status(manifest), 'runtimeIntelligence': runtime_intelligence,
+            'feedWarnings': feed_warnings,
             'limits': ['Unauthenticated Sharkd upgrade checks routing/auth only; an authenticated session is still required.',
                        'CloudFront publication and VPC origin identity must be checked with AWS evidence.']}
 

@@ -59,7 +59,10 @@ class ReleaseObservabilityTest(unittest.TestCase):
             layout.release_manifest_path.parent.mkdir(parents=True)
             layout.release_manifest_path.write_text(json.dumps({
                 'version': '10.0.2', 'builtAt': '2026-09-23T12:00:00Z',
-                'gitCommit': 'abc', 'images': {'backend': 'repo@sha256:' + 'a' * 64}}))
+                'gitCommit': 'abc', 'images': {'backend': 'repo@sha256:' + 'a' * 64},
+                'embeddedSecurityContent': {'packages': [{'id': 'suricata-rules', 'type': 'suricata_rules_archive',
+                                                          'generated_at': '2026-09-23T11:00:00Z'}],
+                                            'unavailable_optional_package_types': ['ja4_compact']}}))
             args = SimpleNamespace(runtime_root=root, container_runtime_root=root, skip_health_check=False)
             result = operations._attach_update_summary(
                 {'status': 'ok', 'version': '10.0.2', 'snapshot': '/snapshot/metadata'},
@@ -69,6 +72,8 @@ class ReleaseObservabilityTest(unittest.TestCase):
             self.assertEqual(receipt['backup']['dataBackup'], 'not_captured')
             self.assertEqual(receipt['backup']['snapshotMetadata'], '/snapshot/metadata')
             self.assertIsNone(receipt['timing']['trafficUnavailableSeconds'])
+            self.assertEqual(receipt['bundledInputs']['securityContent']['packages'][0]['status'], 'bundled')
+            self.assertEqual(receipt['bundledInputs']['securityContent']['unavailableOptionalTypes'], ['ja4_compact'])
             self.assertEqual(json.loads(Path(result['deploymentReceiptPath']).read_text()), receipt)
 
     def test_verifier_detects_stale_origin_peer_and_running_image(self):
@@ -93,7 +98,9 @@ class ReleaseObservabilityTest(unittest.TestCase):
             args = SimpleNamespace(runtime_root=root, container_runtime_root=root, profile='saas',
                                    public_url='https://app.example.test', origin_peer_ip='192.0.2.11')
             error = urllib.error.HTTPError('https://app.example.test/sharkd', 401, 'Unauthorized', {}, None)
-            with patch.object(operations, 'doctor_deployment', return_value={'ok': True, 'checks': []}), \
+            doctor = {'ok': True, 'checks': [{'name': 'intelligence_updates', 'ok': True, 'feeds': [
+                {'id': 'signup_email', 'enabled': True, 'status': 'error', 'updatedAt': ''}]}]}
+            with patch.object(operations, 'doctor_deployment', return_value=doctor), \
                  patch.object(operations, '_http_probe', return_value={'ok': True, 'status': 200}), \
                  patch.object(operations.urllib.request, 'urlopen', side_effect=error), \
                  patch.object(deployment_proxy, 'generation', return_value='gen1'), \
@@ -102,6 +109,7 @@ class ReleaseObservabilityTest(unittest.TestCase):
             self.assertFalse(result['ok'])
             self.assertEqual([check['name'] for check in result['checks'] if not check['ok']],
                              ['cloudfront_origin_peer'])
+            self.assertEqual(result['feedWarnings'][0]['id'], 'signup_email')
 
 
 if __name__ == '__main__':
