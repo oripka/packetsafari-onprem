@@ -6321,9 +6321,11 @@ def verify_deployment(args) -> dict:
     if policy.get('mode') == 'cloudfront-https':
         if peer:
             try:
-                trusted = any(ipaddress.ip_address(peer) in ipaddress.ip_network(cidr)
-                              for cidr in policy.get('trustedCidrs') or [])
-                add('cloudfront_origin_peer', trusted, observed=peer,
+                address = ipaddress.ip_address(peer)
+                expected_cidr = str(ipaddress.ip_network(f'{address}/32'))
+                trusted = policy.get('trustedCidrs') or []
+                add('cloudfront_origin_peer', address.version == 4 and trusted == [expected_cidr], observed=peer,
+                    expectedCidrs=[expected_cidr],
                     trustedCidrs=policy.get('trustedCidrs') or [])
             except ValueError as exc:
                 add('cloudfront_origin_peer', False, error=str(exc))

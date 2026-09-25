@@ -192,7 +192,7 @@ sudo env HOME=/root packetsafari-ops verify-deployment --origin-peer-ip <current
 This checks the host doctor, live proxy generation, backend/worker/Sharkd/proxy
 container image references against the installed manifest, public API health,
 the unauthenticated Sharkd WebSocket authentication boundary, and the ingress
-CIDR against the supplied origin IP. The Sharkd check expects HTTP 401 without
+CIDR against the supplied origin IP as an exact `/32`. The Sharkd check expects HTTP 401 without
 a token; it does not prove an authenticated WebSocket session. The origin IP
 must come from a fresh AWS read, not an old deployment receipt. CloudFront
 frontend publication and an authenticated Sharkd transaction remain separate

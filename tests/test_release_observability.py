@@ -107,9 +107,15 @@ class ReleaseObservabilityTest(unittest.TestCase):
                  patch.object(deployment_proxy, 'generation', return_value='gen1'), \
                  patch.object(deployment_proxy, 'inspect', return_value={'Config': {'Image': image}}):
                 result = operations.verify_deployment(args)
+                args.origin_peer_ip = '192.0.2.10'
+                (rolling / 'proxy/state.json').write_text(json.dumps({
+                    'generation': 'gen1', 'ingressPolicy': {'mode': 'cloudfront-https',
+                                                           'trustedCidrs': ['192.0.2.0/24']}}))
+                broad = operations.verify_deployment(args)
             self.assertFalse(result['ok'])
             self.assertEqual([check['name'] for check in result['checks'] if not check['ok']],
                              ['cloudfront_origin_peer'])
+            self.assertFalse(broad['ok'])
             self.assertEqual(result['feedWarnings'][0]['id'], 'signup_email')
             self.assertEqual(result['feedWarnings'][0]['lastError'], 'source unavailable')
 
