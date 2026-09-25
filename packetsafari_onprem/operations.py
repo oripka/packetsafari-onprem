@@ -3654,21 +3654,7 @@ def maybe_offer_docker_image_prune(args, layout: RuntimeLayout) -> dict[str, obj
         return prune_old_docker_images(layout, keep_deployments=keep)
     if not health.get("candidateCount"):
         return health
-    if not health.get("safeToPrune"):
-        print(f"PacketSafari image cleanup: {health.get('message')}", file=sys.stderr)
-        return health
-    print("", file=sys.stderr)
-    print("PacketSafari image cleanup opportunity:", file=sys.stderr)
-    print(f"  {health.get('candidateCount')} unprotected PacketSafari images ({health.get('candidateSize')} estimated reclaim) are outside the current + last {keep} deployment keep set.", file=sys.stderr)
-    print("  These images are not used by running containers and can usually be removed after a healthy update.", file=sys.stderr)
-    print("  To run without prompting next time, pass --prune-old-images; to only report, press Enter or answer no.", file=sys.stderr)
-    if not sys.stdin.isatty():
-        print("  Non-interactive shell detected; leaving images in place.", file=sys.stderr)
-        return health
-    answer = input("Remove old unprotected PacketSafari images now? [y/N]: ").strip().lower()
-    if answer in {"y", "yes"}:
-        return prune_old_docker_images(layout, keep_deployments=keep)
-    return {"status": "skipped", **health}
+    return health
 
 
 def healthcheck_deployment(args) -> dict[str, object]:
@@ -4437,6 +4423,36 @@ def _attach_update_summary(
         "rollback": rollback,
         "hostWarnings": host_requirements.get("warnings") or [],
     }
+    if result.get('status') not in ('noop', 'tooling-only', 'draining', 'rolled_back'):
+        layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+        installed_manifest = _read_json(layout.release_manifest_path, {})
+        proxy_state = _read_json(layout.state_dir / 'rolling/proxy/state.json', {})
+        images = installed_manifest.get('images') or {}
+        receipt = {
+            'schemaVersion': 1,
+            'recordedAt': utc_now(),
+            'outcome': result.get('status') or 'ok',
+            'application': {'version': installed_app, 'builtAt': installed_manifest.get('builtAt'),
+                            'gitCommit': installed_manifest.get('gitCommit')},
+            'ops': {'version': installed_ops},
+            'images': {name: image_ref(images, name) for name in sorted(images)},
+            'changedServices': check_payload.get('changedServices') or [],
+            'proxy': {'generation': proxy_state.get('generation'), 'switchedAt': proxy_state.get('switchedAt'),
+                      'status': proxy_state.get('status')},
+            'verification': verification,
+            'backup': {'policy': backup_mode, 'dataBackup': 'not_captured' if backup_mode == 'skip' else
+                       'external_proof_required' if backup_mode == 'require-recent' else 'inline',
+                       'snapshotMetadata': result.get('snapshot')},
+            'timing': {'updateSeconds': result.get('totalSeconds'),
+                       'readinessAndSwitchSeconds': (result.get('rollingUpdate') or result.get('activation') or {}).get('readinessAndSwitchSeconds'),
+                       'trafficUnavailableSeconds': None},
+            'cloudFront': {'publication': 'unverified_by_host', 'originTrust': 'unverified_by_host'},
+        }
+        from .deployment_proxy import atomic_write
+        receipt_path = layout.state_dir / 'last-deployment-receipt.json'
+        atomic_write(receipt_path, json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+        result['deploymentReceipt'] = receipt
+        result['deploymentReceiptPath'] = str(receipt_path)
     return result
 
 
@@ -4547,6 +4563,7 @@ def apply_update(args) -> dict:
     result["hostRequirements"] = host_requirements
     result["sizingStatus"] = sizing_status
     result["imageRetention"] = maybe_offer_docker_image_prune(args, layout) if result.get('status') != 'draining' else {'status': 'deferred_until_drain'}
+    result['imageCleanupRequested'] = bool(getattr(args, 'prune_old_images', False))
     return _attach_update_summary(result, check_payload, host_requirements, args)
 
 
@@ -6206,6 +6223,87 @@ def doctor_deployment(args) -> dict:
         "manifest": manifest_arg or str(layout.release_manifest_path),
         "checks": checks,
     }
+
+
+def verify_deployment(args) -> dict:
+    """Read-only route, generation and signed-image verification after an update."""
+    from . import deployment_proxy, fleet_update
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    manifest = _read_json(layout.release_manifest_path, {})
+    stack = _read_json(layout.state_dir / 'rolling/stack.json', {})
+    proxy_state = _read_json(layout.state_dir / 'rolling/proxy/state.json', {})
+    checks = []
+
+    def add(name, ok, **details):
+        checks.append({'name': name, 'ok': bool(ok), **details})
+
+    doctor = doctor_deployment(args)
+    add('doctor', doctor['ok'], failed=[check['name'] for check in doctor['checks'] if not check['ok']])
+    if stack.get('fleetBases'):
+        try:
+            live_generation = deployment_proxy.generation(stack['proxyName'])
+            expected = proxy_state.get('generation')
+            add('proxy_generation', bool(expected) and live_generation == expected,
+                expected=expected, observed=live_generation)
+        except Exception as exc:
+            add('proxy_generation', False, error=str(exc))
+        active = stack['active']
+        base_services = stack['fleetBases'][active]['services']
+        names = {service: fleet_update.name(base_services[service].get('container_name', service), active)
+                 for service in ('backend', 'worker', 'sharkd')}
+        names['deployment-proxy'] = stack['proxyName']
+        for service, container in names.items():
+            expected_image = image_ref(manifest.get('images') or {}, service)
+            try:
+                observed = deployment_proxy.inspect(container)['Config']['Image']
+                add(f'image_{service}', bool(expected_image) and observed == expected_image,
+                    expected=expected_image, observed=observed)
+            except Exception as exc:
+                add(f'image_{service}', False, expected=expected_image, error=str(exc))
+    else:
+        add('proxy_generation', False, error='full-generation deployment proxy is not active')
+    public_base = str(getattr(args, 'public_url', '') or '').rstrip('/')
+    if not public_base:
+        runtime_env = _effective_required_env_values(layout) if layout.runtime_env_path.exists() else {}
+        public_base = str(runtime_env.get('PACKETSAFARI_PUBLIC_BASE_URL') or '').rstrip('/')
+    if public_base:
+        api = _http_probe(public_base + '/api/v2/health')
+        add('public_api', api.get('ok') and api.get('status') == 200, status=api.get('status'), error=api.get('error'))
+        request = urllib.request.Request(public_base + '/sharkd', headers={
+            'Connection': 'Upgrade', 'Upgrade': 'websocket', 'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ=='})
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                ws_status = response.status
+        except urllib.error.HTTPError as exc:
+            ws_status = exc.code
+        except Exception as exc:
+            add('public_sharkd_auth_boundary', False, error=str(exc))
+            ws_status = None
+        if ws_status is not None:
+            add('public_sharkd_auth_boundary', ws_status == 401, status=ws_status,
+                scope='unauthenticated_upgrade_only')
+    else:
+        add('public_api', False, error='public URL unavailable')
+        add('public_sharkd_auth_boundary', False, error='public URL unavailable')
+    policy = proxy_state.get('ingressPolicy') or {}
+    peer = str(getattr(args, 'origin_peer_ip', '') or '')
+    if policy.get('mode') == 'cloudfront-https':
+        if peer:
+            try:
+                trusted = any(ipaddress.ip_address(peer) in ipaddress.ip_network(cidr)
+                              for cidr in policy.get('trustedCidrs') or [])
+                add('cloudfront_origin_peer', trusted, observed=peer,
+                    trustedCidrs=policy.get('trustedCidrs') or [])
+            except ValueError as exc:
+                add('cloudfront_origin_peer', False, error=str(exc))
+        else:
+            add('cloudfront_origin_peer', False, error='Supply the freshly observed VPC origin ENI IP with --origin-peer-ip')
+    return {'ok': all(check['ok'] for check in checks), 'profile': manifest.get('targetProfile'),
+            'applicationVersion': manifest.get('version'), 'opsVersion': version(),
+            'releaseBuiltAt': manifest.get('builtAt'), 'checkedAt': utc_now(), 'checks': checks,
+            'limits': ['Unauthenticated Sharkd upgrade checks routing/auth only; an authenticated session is still required.',
+                       'CloudFront publication and VPC origin identity must be checked with AWS evidence.']}
 
 
 def _doctor_failure_message(payload: dict) -> str:

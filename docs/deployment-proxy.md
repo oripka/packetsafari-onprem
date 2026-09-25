@@ -27,8 +27,10 @@ This document owns the proxy transaction and its integration boundary.
 The normal builder now records an image-derived `runtimeContract` in the signed
 manifest. Ops 0.2.41 selects full-generation updates for this contract on an
 activated host. It refuses partial promotion or silent maintenance fallback.
-This implementation has local deterministic and real Celery transaction tests;
-it has **not** been deployed or qualified on production.
+This implementation has local deterministic and real Celery transaction tests.
+The first SaaS host adopted the proxy on 2026-09-25 with beta.133 and Ops
+0.2.47. That qualifies the observed first-adoption path on that host, not a
+subsequent production generation rollout or a three-second outage target.
 
 | Component | Implemented behavior | Boundary |
 | --- | --- | --- |
@@ -179,6 +181,38 @@ run `sudo env HOME=/root packetsafari-ops update --tooling-only` first, then
 repeat the maintenance-and-activation command. Tooling-only verifies the same
 application version and image digests and never replaces app containers.
 The API and Sharkd origin ports transfer once; subsequent updates keep them stable.
+
+After an update, check the host and public route with a freshly observed
+CloudFront VPC origin ENI address:
+
+```bash
+sudo env HOME=/root packetsafari-ops verify-deployment --origin-peer-ip <current-VPC-origin-ENI-IP>
+```
+
+This checks the host doctor, live proxy generation, backend/worker/Sharkd/proxy
+container image references against the installed manifest, public API health,
+the unauthenticated Sharkd WebSocket authentication boundary, and the ingress
+CIDR against the supplied origin IP. The Sharkd check expects HTTP 401 without
+a token; it does not prove an authenticated WebSocket session. The origin IP
+must come from a fresh AWS read, not an old deployment receipt. CloudFront
+frontend publication and an authenticated Sharkd transaction remain separate
+checks. An update writes `state/last-deployment-receipt.json` with app/Ops
+versions, image references, release time, backup semantics, proxy generation,
+and any measured internal switch time. `trafficUnavailableSeconds` stays null
+until independently measured at the public path; a proxy switch timer is not
+an outage measurement. Image cleanup is advisory in update JSON and happens
+only when `--prune-old-images` is explicitly passed.
+
+The beta.133 first adoption used the existing CloudFront origin ports and
+completed with 15/15 host doctor checks and a public API 200. An unauthenticated
+WebSocket upgrade received the expected 401 through CloudFront. A 0.25-second
+public API probe bounded the first-adoption traffic interruption at 21.917
+seconds (last 200 at 09:02:01.174 UTC; next 200 at 09:02:23.306 UTC). Its
+proxy activation phase took 14.622 seconds. Initial app maintenance on the
+same day had a separate 45.839-second public API interruption. Neither is a
+measurement of a future compatible rolling release. The host is single-node,
+2 vCPU below the recommended 4-vCPU baseline, and a proxy restart interrupts
+existing connections.
 
 ```bash
 packetsafari-ops deployment-proxy enable --profile saas --manifest /path/to/signed-installed-manifest.json --ingress-policy /path/to/ingress.json

@@ -38,6 +38,7 @@ if __package__ in {None, ""}:
         status,
         tune_runtime,
         upgrade_release,
+        verify_deployment,
     )
 else:
     from .console import Console
@@ -69,6 +70,7 @@ else:
         status,
         tune_runtime,
         upgrade_release,
+        verify_deployment,
     )
 
 
@@ -339,6 +341,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_download_args(update)
 
+    verify = subparsers.add_parser("verify-deployment", help="Check public API, Sharkd route, proxy generation, running image digests and host doctor.")
+    verify.add_argument("--profile", choices=["onprem", "saas"], default="saas")
+    verify.add_argument("--public-url", help="Public application URL; defaults to the configured public base URL.")
+    verify.add_argument("--origin-peer-ip", help="Freshly observed CloudFront VPC origin ENI IP for trusted-CIDR comparison.")
+
     content = subparsers.add_parser("content", help="Verify and operate the signed data-only security-content channel.")
     content.add_argument("action", choices=["check", "apply", "import", "status", "rollback"])
     content.add_argument("--pack", help="Local path or authenticated URL to a signed security-content pack.")
@@ -416,9 +423,12 @@ def _format_update_result(payload: dict) -> str:
         f"Config reloads       {', '.join(str(item) for item in payload.get('configurationReloadedServices') or []) or 'none'}",
         f"Health/readiness     {summary.get('verification') or 'unknown'}",
         f"Rollback             {summary.get('rollback') or 'unchanged'}",
-        f"Image cleanup        {cleanup}",
         f"Backup cleanup       {backup_cleanup}",
     ]
+    if payload.get('imageCleanupRequested'):
+        lines.append(f"Image cleanup        {cleanup}")
+    if payload.get('deploymentReceiptPath'):
+        lines.append(f"Deployment receipt   {payload['deploymentReceiptPath']}")
     if payload.get("snapshot"):
         lines.append(f"Snapshot             {payload['snapshot']}")
     if status_value == 'draining':
@@ -533,6 +543,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         print(json.dumps(doctor_deployment(args), indent=2))
         return 0
+    if args.command == "verify-deployment":
+        payload = verify_deployment(args)
+        print(json.dumps(payload, indent=2))
+        return 0 if payload['ok'] else 1
     if args.command == "healthcheck":
         payload = healthcheck_deployment(args)
         if args.json:
