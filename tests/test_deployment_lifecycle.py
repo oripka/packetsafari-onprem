@@ -7,7 +7,21 @@ import pytest
 
 from packetsafari_onprem import operations as ops, maintenance_update as maintenance
 from packetsafari_onprem import fleet_update as fleet
-from packetsafari_onprem.rolling_update import Runtime, save, read
+from packetsafari_onprem.rolling_update import Runtime, activation_base, save, read
+
+
+def test_activation_snapshot_keeps_dormant_logging_service(monkeypatch):
+    def config(command, **kwargs):
+        assert command[-5:] == ['--profile', 'logging', 'config', '--format', 'json']
+        assert kwargs['check'] is True
+        return SimpleNamespace(stdout=json.dumps({'services': {
+            'backend': {'image': 'backend'},
+            'audit-forwarder': {'image': 'forwarder', 'profiles': ['logging']},
+        }}))
+
+    monkeypatch.setattr('packetsafari_onprem.rolling_update.subprocess.run', config)
+    services = activation_base(['docker', 'compose'])['services']
+    assert services['audit-forwarder'] == {'image': 'forwarder', 'profiles': ['logging']}
 
 
 @pytest.mark.parametrize('mode', ['fleet', 'maintenance'])

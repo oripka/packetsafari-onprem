@@ -45,6 +45,14 @@ def fingerprints(paths):
             for path in paths}
 
 
+def activation_base(compose_command):
+    # The sizing overlay includes dormant logging services even when disabled.
+    # Retain their definitions, including images and profiles, in the snapshot.
+    result = subprocess.run([*compose_command, '--profile', 'logging', 'config', '--format', 'json'],
+                            text=True, capture_output=True, check=True)
+    return json.loads(result.stdout)
+
+
 def compose_config(base, stack, directory):
     config = copy.deepcopy(base)
     services = config['services']
@@ -209,8 +217,7 @@ def manage_host(args):
         proxy_image = image_ref(manifest.get('images', {}).get('deployment-proxy'))
         if not re.fullmatch(r'.+@sha256:[a-f0-9]{64}', proxy_image):
             raise ValueError('Installed signed release must include a digest-pinned deployment-proxy image')
-        base = json.loads(subprocess.run([*ops._compose_base_command(layout), 'config', '--format', 'json'],
-                        text=True, capture_output=True, check=True).stdout)
+        base = activation_base(ops._compose_base_command(layout))
         firewall = layout.runtime_root / 'configuration/egress-firewall/run_egress_firewall.sh'
         policy = firewall.read_text()
         if 'backend-green:172.20.0.27' not in policy or 'deployment-proxy:172.20.0.26' not in policy:
