@@ -83,7 +83,7 @@ def upgrade(layout, args, current, manifest, *, source, backup_mode, backup_proo
             if ops.deployment_profile(args) == 'saas':
                 ops.ensure_ecr_credential_helper_ready(layout)
             for image in sorted(set(images.values())):
-                subprocess.run(['docker', 'pull', image], check=True)
+                subprocess.run(['docker', 'pull', '--quiet', image], check=True, stdout=sys.stderr)
         pin_release(runtime, layout.target_release_manifest_path)
         snapshot = ops.snapshot_runtime(layout)
         if backup_proof:
@@ -102,12 +102,12 @@ def upgrade(layout, args, current, manifest, *, source, backup_mode, backup_proo
         container = runtime.container(read(runtime.stack_file)['active'])
         subprocess.run(['docker', 'exec', '--user', '0', '-e', 'PACKETSAFARI_STORAGE_SUBDIRS=capture-agent',
                         '-e', 'PACKETSAFARI_STORAGE_REPAIR_SUBDIRS=', container,
-                        '/usr/local/bin/setvolumepermissions.sh', '/'], check=True)
+                        '/usr/local/bin/setvolumepermissions.sh', '/'], check=True, stdout=sys.stderr)
         subprocess.run(['docker', 'exec', '--user', '0', '-e', 'PACKETSAFARI_SKIP_SERVICE_INIT=true',
-                        container, 'python3', '/app/scripts/bootstrap_embedded_security_content.py'], check=True)
+                        container, 'python3', '/app/scripts/bootstrap_embedded_security_content.py'], check=True, stdout=sys.stderr)
         subprocess.run(['docker', 'exec', '--user', '0', '-e', 'PACKETSAFARI_STORAGE_SUBDIRS=',
                         '-e', 'PACKETSAFARI_STORAGE_REPAIR_SUBDIRS=intelligence', container,
-                        '/usr/local/bin/setvolumepermissions.sh', '/'], check=True)
+                        '/usr/local/bin/setvolumepermissions.sh', '/'], check=True, stdout=sys.stderr)
         result.update(ops._promote_release(layout, manifest, Path(saved['snapshot']), source=source,
                       profile=ops.deployment_profile(args), backup_mode=backup_mode))
     outcome = deploy(runtime, target, verify=verify, commit=commit, timeout=getattr(args, 'health_timeout', 180))
