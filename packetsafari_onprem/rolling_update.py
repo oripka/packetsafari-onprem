@@ -54,6 +54,13 @@ def image_ref(value):
     return value.get('image', '') if isinstance(value, dict) else value or ''
 
 
+def same_application_release(installed, signed):
+    """Ops-only channel metadata may advance without changing app bytes."""
+    excluded = {'tooling', 'opsOnlyPublication'}
+    return ({key: value for key, value in installed.items() if key not in excluded} ==
+            {key: value for key, value in signed.items() if key not in excluded})
+
+
 def fingerprints(paths):
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
             for path in paths}
@@ -242,8 +249,8 @@ def manage_host(args):
         if not args.manifest:
             raise ValueError('Enable requires --manifest pointing to the signed installed release')
         verified = read(ops.materialize_verified_release_manifest(layout, args.manifest, args))
-        if verified != manifest:
-            raise ValueError('Enable manifest does not match the installed release')
+        if not same_application_release(manifest, verified):
+            raise ValueError('Enable manifest does not match the installed application release')
         ops.validate_manifest_profile(manifest, expected_profile=args.profile)
         proxy_image = image_ref(manifest.get('images', {}).get('deployment-proxy'))
         if not re.fullmatch(r'.+@sha256:[a-f0-9]{64}', proxy_image):

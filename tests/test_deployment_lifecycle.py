@@ -7,7 +7,7 @@ import pytest
 
 from packetsafari_onprem import operations as ops, maintenance_update as maintenance
 from packetsafari_onprem import fleet_update as fleet
-from packetsafari_onprem.rolling_update import Runtime, activation_base, activation_complete, bootstrap, initialize_bootstrap_proxy, recover_incomplete_bootstrap, save, read
+from packetsafari_onprem.rolling_update import Runtime, activation_base, activation_complete, bootstrap, initialize_bootstrap_proxy, recover_incomplete_bootstrap, same_application_release, save, read
 
 
 def test_activation_snapshot_keeps_dormant_logging_service(monkeypatch):
@@ -118,6 +118,16 @@ def test_preliminary_stack_is_never_reported_as_completed_activation(tmp_path, m
     monkeypatch.setattr('packetsafari_onprem.rolling_update.proxy.inspect',
                         lambda _: {'State': {'Running': True}})
     assert activation_complete(layout)
+
+
+def test_activation_accepts_signed_ops_only_revision_but_not_app_change():
+    installed = {'version': '10.0.0-test', 'builtAt': '2026-09-25T00:00:00Z',
+                 'images': {'backend': 'repo@sha256:' + 'a' * 64},
+                 'tooling': {'version': '0.2.44'}}
+    signed = {**installed, 'tooling': {'version': '0.2.47'},
+              'opsOnlyPublication': {'imageDigestsReused': True}}
+    assert same_application_release(installed, signed)
+    assert not same_application_release(installed, {**signed, 'images': {'backend': 'repo@sha256:' + 'b' * 64}})
 
 
 @pytest.mark.parametrize('mode', ['fleet', 'maintenance'])
