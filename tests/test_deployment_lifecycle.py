@@ -7,7 +7,7 @@ import pytest
 
 from packetsafari_onprem import operations as ops, maintenance_update as maintenance
 from packetsafari_onprem import fleet_update as fleet
-from packetsafari_onprem.rolling_update import Runtime, activation_base, initialize_bootstrap_proxy, save, read
+from packetsafari_onprem.rolling_update import Runtime, activation_base, bootstrap, initialize_bootstrap_proxy, recover_incomplete_bootstrap, save, read
 
 
 def test_activation_snapshot_keeps_dormant_logging_service(monkeypatch):
@@ -54,6 +54,55 @@ def test_failed_activation_can_reuse_only_unchanged_unconfigured_proxy(tmp_path)
     assert (tmp_path / 'nginx.conf').read_bytes() == original
     with pytest.raises(RuntimeError, match='refusing to overwrite'):
         initialize_bootstrap_proxy(tmp_path, {**policy, 'trustedCidrs': ['192.0.2.11/32']})
+
+
+def test_bootstrap_sharkd_failure_restores_compose_and_removes_marker(tmp_path, monkeypatch):
+    current = tmp_path / 'compose.yml'
+    current.write_text('serving-compose')
+    runtime = Runtime(tmp_path / 'rolling', current, ['docker', 'compose', '-f', str(current)])
+    base = {'services': {'backend': {'image': 'backend', 'container_name': 'packetsafari-backend',
+                                    'networks': {'app': {}}, 'ports': [{'target': 80, 'published': '8080'}]},
+                         'sharkd': {'image': 'sharkd', 'networks': {'app': {}},
+                                    'ports': [{'target': 4448, 'published': '4448'}]}},
+            'networks': {'app': {}}}
+    monkeypatch.setattr(runtime, 'validate_config', lambda _: None)
+    monkeypatch.setattr(runtime, 'render', lambda _: None)
+    calls = []
+    failed = [False]
+
+    def compose(*args):
+        calls.append(args)
+        if args[:4] == ('up', '-d', '--no-deps', 'sharkd') and not failed[0]:
+            failed[0] = True
+            raise RuntimeError('simulated Sharkd startup failure')
+        return ''
+
+    monkeypatch.setattr(runtime, 'dc', compose)
+    monkeypatch.setattr('packetsafari_onprem.rolling_update.proxy.docker',
+                        lambda *a, **kw: SimpleNamespace(returncode=0))
+    with pytest.raises(RuntimeError, match='simulated Sharkd'):
+        bootstrap(runtime, base, proxy_name='packetsafari-deployment-proxy', proxy_image='proxy')
+    assert ('up', '-d', '--no-deps', 'sharkd') in calls
+    assert current.read_text() == 'serving-compose'
+    assert not runtime.stack_file.exists()
+
+
+def test_retry_retains_proven_pre_transfer_marker(tmp_path, monkeypatch):
+    state_dir = tmp_path / 'state'
+    directory = state_dir / 'rolling'
+    directory.mkdir(parents=True)
+    runtime = Runtime(directory, tmp_path / 'compose.yml', ['docker', 'compose', '-f', str(tmp_path / 'compose.yml')])
+    policy = {'mode': 'cloudfront-https', 'trustedCidrs': ['192.0.2.10/32'], 'viewerHttpsOnly': True}
+    initialize_bootstrap_proxy(directory / 'proxy', policy)
+    save(directory / 'activation.json', {'phase': 'app-installed'})
+    save(runtime.stack_file, {'active': 'backend', 'proxyName': 'proxy'})
+    monkeypatch.setattr('packetsafari_onprem.rolling_update.proxy.docker',
+                        lambda *a, **kw: SimpleNamespace(returncode=1))
+    monkeypatch.setattr('packetsafari_onprem.rolling_update.activation_base',
+                        lambda _: {'services': {'backend': {'ports': [{'published': '8080'}]}}})
+    assert recover_incomplete_bootstrap(runtime, SimpleNamespace(state_dir=state_dir), policy)
+    assert not runtime.stack_file.exists()
+    assert len(list(directory.glob('bootstrap-incomplete-*.json'))) == 1
 
 
 @pytest.mark.parametrize('mode', ['fleet', 'maintenance'])

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 from . import deployment_proxy as proxy
 
@@ -216,13 +217,13 @@ def manage_host(args):
                 ops._restore_metadata_snapshot(layout, Path(snapshot))
                 runtime.render(read(runtime.stack_file))
             return result
-        if enabled(layout):
-            raise ValueError('Rolling updates already enabled')
         if not args.ingress_policy:
             raise ValueError('Host activation requires an explicit --ingress-policy')
         ingress = proxy.ingress_policy(read(args.ingress_policy))
         if args.profile == 'saas' and ingress['mode'] != 'cloudfront-https':
             raise ValueError('SaaS activation requires cloudfront-https ingress policy')
+        if enabled(layout) and not recover_incomplete_bootstrap(runtime, layout, ingress):
+            raise ValueError('Rolling updates already enabled')
         manifest = read(layout.release_manifest_path)
         if not manifest.get('runtimeContract'):
             raise ValueError('New activation requires a drain-capable generation release; API-only activation is retired')
@@ -304,6 +305,27 @@ def initialize_bootstrap_proxy(directory, ingress):
         raise RuntimeError('Proxy bootstrap state changed; refusing to overwrite it')
 
 
+def recover_incomplete_bootstrap(runtime, layout, ingress):
+    """Retain and retire only a proven pre-port-transfer activation marker."""
+    activation = read(layout.state_dir / 'rolling/activation.json') if (layout.state_dir / 'rolling/activation.json').exists() else {}
+    if activation.get('phase') != 'app-installed':
+        return False
+    stack = read(runtime.stack_file)
+    if stack.get('fleetBases') or stack.get('active') != 'backend':
+        return False
+    if not (runtime.directory / 'proxy/state.json').is_file() or not (runtime.directory / 'proxy/nginx.conf').is_file():
+        return False
+    initialize_bootstrap_proxy(runtime.directory / 'proxy', ingress)
+    if proxy.docker('inspect', stack['proxyName'], check=False).returncode == 0:
+        return False
+    serving = activation_base(runtime.command)['services']
+    if 'deployment-proxy' in serving or not serving.get('backend', {}).get('ports'):
+        return False
+    retained = runtime.directory / f'bootstrap-incomplete-{uuid.uuid4().hex}.json'
+    runtime.stack_file.replace(retained)
+    return True
+
+
 def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingress=None):
     """One-time port transfer; caller owns the runtime lock. Existing data is shared."""
     directory = runtime.directory
@@ -311,6 +333,7 @@ def bootstrap(runtime, base, *, proxy_name, proxy_image=proxy.PROXY_IMAGE, ingre
     if runtime.stack_file.exists():
         raise ValueError('Rolling runtime already enabled')
     stack = bootstrap_stack(base, proxy_name=proxy_name, proxy_image=proxy_image)
+    sharkd_ports = stack.get('sharkdPorts')
     runtime.validate_config(compose_config(base, stack, directory))
     if 'frontend' not in base['services']:
         from .fleet_update import configuration

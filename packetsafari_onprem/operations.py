@@ -4243,7 +4243,7 @@ def _activation_report(layout, manifest: dict, active_manifest: dict, backup_mod
         try:
             response = subprocess.run(['docker', 'exec', 'packetsafari-worker', 'celery', '-A',
                                        'packetsafari.celery_app', 'inspect', action, '--timeout=3', '--json'],
-                                      text=True, capture_output=True, timeout=6)
+                                      text=True, capture_output=True, timeout=15)
             values = json.loads(response.stdout) if response.returncode == 0 else None
             jobs[action] = sum(len(items or []) for items in values.values()) if isinstance(values, dict) else None
         except (OSError, ValueError, subprocess.TimeoutExpired, TypeError):
