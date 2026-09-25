@@ -20,8 +20,10 @@ def main():
     job = root / 'job.py'
     job.write_text('''import os,signal,sys,time
 from pathlib import Path
-signal.signal(signal.SIGTERM, lambda *_: None)
 name,delay,code=sys.argv[1:]
+def term(*_):
+ with Path('/evidence/'+name+'.signals').open('a') as stream: stream.write('TERM\\n')
+signal.signal(signal.SIGTERM, term)
 Path('/evidence/'+name+'.started').write_text(str(os.getpid()))
 time.sleep(float(delay))
 Path('/evidence/'+name+'.finished').write_text(str(time.time()))
@@ -42,7 +44,7 @@ worker_wait
 '''
         subprocess.run(['docker', 'run', '-d', '--name', container, '--restart', 'always',
                         '-v', f'{supervisor}:/supervisor.sh:ro', '-v', f'{job}:/job.py:ro',
-                        '-v', f'{evidence}:/evidence', image, 'bash', '-lc', command], check=True, capture_output=True)
+                        '-v', f'{evidence}:/evidence', image, 'bash', '-c', command], check=True, capture_output=True)
         for _ in range(100):
             if (evidence/'fast.started').exists() and (evidence/'slow.started').exists():
                 break
@@ -63,6 +65,7 @@ worker_wait
             assert failure
             result = {'status': 'failed-as-expected'}
         assert (evidence/'slow.finished').exists(), 'Slow job was killed'
+        assert (evidence/'slow.signals').read_text().splitlines() == ['TERM'], 'Drain must signal each child exactly once'
         info = drain.proxy.inspect(container)
         assert not info['State']['Running']
         assert info['HostConfig']['RestartPolicy']['Name'] == 'no'

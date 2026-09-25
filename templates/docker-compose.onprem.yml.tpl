@@ -307,7 +307,7 @@ services:
       CURL_CA_BUNDLE: /etc/packetsafari/egress-proxy/ca.crt
     command:
       - /bin/bash
-      - -lc
+      - -c
       - |
         set -euo pipefail
         {{ worker_supervisor_init }}

@@ -1585,7 +1585,7 @@ def _render_sizing_compose(layout: RuntimeLayout, plan: dict[str, object]) -> st
         "      - PYTHONPATH=/app",
         "    command:",
         "      - /bin/bash",
-        "      - -lc",
+        "      - -c",
         "      - |",
         "        set -euo pipefail",
         "        PIDS=()",

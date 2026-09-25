@@ -320,3 +320,17 @@ readiness rejection. It also checks abort after candidate worker readiness failu
 maintenance job drain/HTTP 503, and interrupted maintenance startup resume without
 re-preparing. It does not execute a real Agent or Triage analysis, nor
 qualify signed ECR delivery, CloudFront, on-prem ingress or production RAM headroom.
+
+### Maintenance drain failure recovery
+
+Ops 0.2.53 restores the old worker and verified API/Sharkd route when worker
+shutdown fails before service changes or migrations. The failed transaction is
+retained as `maintenance-aborted-<id>.json`; the command fails rather than claiming
+a successful drain. A recovery interrupted before reopening remains in the
+`restoring` phase and can be resumed. Once preparation/migrations start, this
+recovery is forbidden: use forward resume or the documented backup restore.
+
+Worker launch commands in the base template and sizing overlay use `bash -c`.
+A login shell (`-lc`) executes `.bash_logout`; Debian's console-clearing hook
+can change a successful drain into exit 1 under `errexit`. Local qualification
+must include the actual launcher flags, not only the supervisor function.

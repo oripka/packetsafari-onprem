@@ -386,3 +386,41 @@ def test_onprem_plan_defaults_to_maintenance_without_cloudfront(tmp_path, activa
     save(layout.state_dir/'rolling/transaction.json', {'mode': 'fleet', 'phase': 'draining'})
     assert ops._deployment_plan(SimpleNamespace(), layout, {}, {}, 'inline')['mode'] == 'fleet'
     assert not ops._default_onprem_maintenance('onprem', {'mode': 'fleet'})
+
+
+def test_failed_drain_restores_old_service_before_any_changes(runtime, monkeypatch):
+    instance, base, events = runtime
+    def fail(*args):
+        raise RuntimeError('worker exit 1')
+    monkeypatch.setattr(maintenance.workload_drain, 'wait_worker', fail)
+    with pytest.raises(RuntimeError, match='old service restored'):
+        maintenance.deploy(instance, prepare=lambda _: pytest.fail('no migrations or rendering'),
+                           start=lambda: pytest.fail('no new services'), target=base)
+    assert ('start', 'worker') in events
+    assert ('switch',) in events
+    assert not instance.journal_file.exists()
+    archived = list(instance.directory.glob('maintenance-aborted-*.json'))
+    assert len(archived) == 1
+    assert read(archived[0])['phase'] == 'aborted-before-changes'
+    assert not any(event[0] == 'stop' for event in events)
+
+
+def test_restore_failure_remains_resumable_without_preparing(runtime, monkeypatch):
+    instance, base, events = runtime
+    monkeypatch.setattr(maintenance.workload_drain, 'wait_worker', lambda *args: (_ for _ in ()).throw(RuntimeError('worker failed')))
+    monkeypatch.setattr(maintenance, 'ready', lambda *args: (_ for _ in ()).throw(RuntimeError('not ready')))
+    with pytest.raises(RuntimeError, match='not ready'):
+        maintenance.deploy(instance, prepare=lambda _: pytest.fail('no changes'), start=lambda: None, target=base)
+    assert read(instance.journal_file)['phase'] == 'restoring'
+    monkeypatch.setattr(maintenance, 'ready', lambda *args: None)
+    with pytest.raises(RuntimeError, match='old service restored'):
+        maintenance.deploy(instance, prepare=lambda _: pytest.fail('no changes'), start=lambda: None, target=base)
+    assert not instance.journal_file.exists()
+
+
+@pytest.mark.parametrize('phase', ['preparing', 'starting', 'opening', 'committing'])
+def test_cannot_restore_old_code_after_maintenance_changes(runtime, phase):
+    instance, base, events = runtime
+    with pytest.raises(RuntimeError, match='after maintenance changes'):
+        maintenance.restore_before_changes(instance, {'phase': phase}, 1)
+    assert not events

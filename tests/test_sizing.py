@@ -218,6 +218,8 @@ def test_sizing_compose_resolves_worker_concurrency_at_container_start(tmp_path)
     }
 
     rendered = operations._render_sizing_compose(layout, plan)
+    assert "      - -lc" not in rendered
+    assert "      - -c" in rendered
 
     assert "python3 /app/scripts/resolve_worker_concurrency.py index" in rendered
     assert 'CELERY_INDEX_CONCURRENCY:-auto' in rendered
@@ -242,6 +244,8 @@ def test_sizing_compose_omits_frontend_when_base_compose_has_no_frontend(tmp_pat
     }
 
     rendered = operations._render_sizing_compose(layout, plan)
+    assert "      - -lc" not in rendered
+    assert "      - -c" in rendered
 
     assert "  frontend:" not in rendered
     assert "  backend:" in rendered

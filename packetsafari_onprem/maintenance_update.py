@@ -10,6 +10,30 @@ from .fleet_update import COHORT, name, ready
 from .rolling_update import read, save
 
 
+def restore_before_changes(runtime, journal, timeout):
+    """A failed drain is reversible only before any service/migration changes."""
+    if journal['phase'] not in ('quiescing', 'draining', 'restoring'):
+        raise RuntimeError('Cannot restore serving traffic after maintenance changes began')
+    journal['phase'] = 'restoring'
+    save(runtime.journal_file, journal)
+    stack = journal['oldStack']
+    active = stack['active']
+    worker = runtime.container(name('worker', active))
+    policy = journal['oldWorker'].get('restartPolicy', {'Name': 'always'})
+    restart = policy.get('Name') or 'no'
+    if restart == 'on-failure' and policy.get('MaximumRetryCount'):
+        restart += ':' + str(policy['MaximumRetryCount'])
+    proxy.docker('update', '--restart=' + restart, worker)
+    proxy.docker('start', worker)
+    ready(runtime, [name(service, active) for service in COHORT], timeout)
+    proxy.switch(runtime.directory / 'proxy', stack['proxyName'],
+                 runtime.container(active), sharkd=runtime.container(name('sharkd', active)),
+                 drain_timeout=0)
+    journal['phase'] = 'aborted-before-changes'
+    save(runtime.journal_file, journal)
+    runtime.journal_file.replace(runtime.directory / f'maintenance-aborted-{journal["id"]}.json')
+
+
 def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
            target=None, proxy_image=None, timeout=120):
     """Drain first; migrations/infra may interrupt service and are never auto-undone."""
@@ -30,6 +54,9 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
                    'proxyImage': proxy_image or stack['proxyImage']}
         save(runtime.journal_file, journal)
     stack = journal['oldStack']
+    if journal['phase'] == 'restoring':
+        restore_before_changes(runtime, journal, timeout)
+        raise RuntimeError('Previous maintenance aborted before changes; old service restored. Retry update explicitly.')
     if journal['phase'] == 'quiescing':
         deadline = time.monotonic() + timeout
         while True:
@@ -45,9 +72,14 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         def persist(worker):
             journal['oldWorker'] = worker
             save(runtime.journal_file, journal)
-        worker = workload_drain.request_worker(journal['oldWorker'], persist)
-        worker = workload_drain.wait_worker(worker, timeout)
-        persist(worker)
+        try:
+            worker = workload_drain.request_worker(journal['oldWorker'], persist)
+            worker = workload_drain.wait_worker(worker, timeout)
+            persist(worker)
+        except Exception as exc:
+            journal['drainFailure'] = type(exc).__name__ + ': ' + str(exc)
+            restore_before_changes(runtime, journal, timeout)
+            raise RuntimeError('Maintenance drain failed before changes; old service restored. ' + str(exc)) from exc
         if worker['status'] != 'drained':
             return {'status': 'draining', 'scope': 'maintenance', 'message': 'Ingress paused; jobs and dependencies retained. Repeat update.'}
         # Inactive services are included explicitly so no old code can survive a migration.
@@ -99,7 +131,7 @@ def upgrade(layout, args, manifest, *, source, backup_mode, backup_proof, ops):
     import subprocess
     from pathlib import Path
     from .fleet_update import pin_release
-    from .rolling_update import Runtime, image_ref, fingerprints
+    from .rolling_update import Runtime, image_ref, fingerprints, activation_base
     runtime = Runtime(layout.state_dir / 'rolling', layout.compose_file, ops._compose_base_command(layout))
     if getattr(args, 'skip_health_check', False):
         raise ValueError('Maintenance requires health verification')
@@ -130,9 +162,7 @@ def upgrade(layout, args, manifest, *, source, backup_mode, backup_proof, ops):
         ops.refresh_managed_sizing_profile(layout)
         ops.render_compose(layout, layout.target_release_manifest_path, profile=ops.deployment_profile(args), maintenance=True)
         ops.render_logging_config(layout)
-        result = subprocess.run([*runtime.command, 'config', '--format', 'json'], capture_output=True, text=True, check=True)
-        import json
-        return json.loads(result.stdout)
+        return activation_base(runtime.command)
     def start():
         ops.run_target_migrations(layout)
         ops.docker_compose_up(layout, pull_policy='never')

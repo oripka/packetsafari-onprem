@@ -25,6 +25,7 @@ def test_evidence_runner_is_pinned_isolated_and_rollback_compatible(tmp_path, wi
         "--template", str(Path(__file__).resolve().parents[1] / "templates/docker-compose.onprem.yml.tpl"),
     ])
     services = yaml.safe_load(output.read_text())["services"]
+    assert services["worker"]["command"][:2] == ["/bin/bash", "-c"]
     assert ("agent-cli-runner" in services) is with_runner
     assert ("agent-cli-runner" in services["worker"]["depends_on"]) is with_runner
     assert "packetsafari-agentcli-runtime:/run/packetsafari-cli" in services["worker"]["volumes"]
