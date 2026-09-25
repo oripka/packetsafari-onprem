@@ -4,6 +4,14 @@
   "destinations": [
     {
       "classification": "feature-optional",
+      "host": "disposable.github.io",
+      "notes": "Daily disposable email domain refresh for PacketSafari-operated shared SaaS.",
+      "owners": ["worker"],
+      "port": 443,
+      "purpose": "Security intelligence"
+    },
+    {
+      "classification": "feature-optional",
       "host": "eu.i.posthog.com",
       "notes": "Personless lead and free-evaluation events for PacketSafari-operated shared SaaS.",
       "owners": [

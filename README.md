@@ -217,6 +217,13 @@ packetsafari-ops iam show-initial-admin-command --email admin@example.com
 packetsafari-ops diagnostics restart
 ```
 
+The shared-SaaS egress overlay includes `disposable.github.io:443` for the
+daily signup disposable-email list refresh. Rendering applies both the
+security-intelligence approval baseline and the IronProxy route. On-prem and
+dedicated profiles do not receive this SaaS-only destination. Existing hosts
+missing it can use `egress approve-intelligence-host --url https://disposable.github.io`;
+the explicit approval is preserved across subsequent configuration renders.
+
 AI and identity approvals are host-only operations, also available to SaaS
 platform operators. SaaS endpoints must use public HTTPS destinations. On-prem
 endpoints may use customer-network addresses and HTTP. Metadata, loopback, and
