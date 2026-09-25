@@ -198,6 +198,8 @@ worker_wait
                 "SELECT to_regclass('online_schema_fixture') IS NOT NULL").stdout.strip() == 't'
             assert samples and not any(s['error'] for s in samples)
             events.append({'check': 'real online schema migration, API switch, worker drain, retirement with no sampled HTTP failures'})
+            from online_schema_fixture import test_followup_updates
+            test_followup_updates(root, runtime, target, samples, events)
             save(root/'result.json', {'events': events, 'requests': len(samples), 'errors': 0, 'schemaPlan': schema})
             print(json.dumps({'events': events, 'evidence': str(root)}, indent=2))
             return

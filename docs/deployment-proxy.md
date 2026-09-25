@@ -269,6 +269,14 @@ Never annotate or rewrite historical migrations to bypass the check.
 On an activated compatible fleet, the usual `update` command applies these migrations
 from the immutable target image before starting replacement services. Old traffic
 and workers remain active. `update check` lists `deploymentPlan.onlineMigrations`.
+From Ops 0.2.58, both the normal JSON-output update and the human plan explain
+the strategy on stderr, including the exact online revisions and that no
+`--maintenance` flag is needed. `interruption: none-planned` describes intent,
+not a guarantee. An incompatible signed release reports `interruption: required`,
+prints `WARNING: maintenance required` with the reason, and stops before service
+replacement. Repeat the same command with `--maintenance` and its existing source
+and backup options only when that interruption is intended. No silent SaaS
+maintenance fallback is introduced.
 Unchanged migration history with model-only changes needs no SQL; model compatibility
 still requires normal application review. Legacy manifests can acquire metadata only
 with identical schema inputs. Changed migration environment or missing baseline

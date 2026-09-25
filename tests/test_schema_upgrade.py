@@ -5,6 +5,7 @@ import pytest
 from packetsafari_onprem.schema_upgrade import plan
 from packetsafari_onprem import fleet_update as fleet
 from packetsafari_onprem.rolling_update import Runtime, save, read
+from packetsafari_onprem import operations as ops
 
 
 def contract(rows=None, identity='a'):
@@ -110,3 +111,65 @@ def test_existing_migration_container_is_not_replaced_or_killed(monkeypatch):
     with pytest.raises(RuntimeError, match='still exists'):
         fleet.run_online_migration(None, journal)
     assert calls == [('inspect', 'packetsafari-online-schema-test')]
+
+
+@pytest.mark.parametrize('reviewed', [True, False])
+def test_normal_cli_plan_explains_online_or_required_downtime(tmp_path, capsys, reviewed):
+    layout = ops.runtime_layout(str(tmp_path), '/storage/onprem')
+    (layout.state_dir/'rolling').mkdir(parents=True)
+    save(layout.state_dir/'rolling/stack.json', {'fleetBases': {'backend': {}}})
+    images = {service: 'repo/'+service+'@sha256:'+'a'*64 for service in fleet.COHORT}
+    old = {'runtimeContract': contract(), 'images': images}
+    new = {'runtimeContract': contract([row('old', None), row('new', 'old', reviewed)], 'b'), 'images': images}
+    result = ops._deployment_plan(SimpleNamespace(profile='saas'), layout, old, new, 'skip')
+    ops.report_update_strategy(result)
+    output = capsys.readouterr()
+    assert output.out == ''  # Keep machine-readable stdout clean.
+    if reviewed:
+        assert result['mode'] == 'fleet'
+        assert result['interruption'] == 'none-planned'
+        assert result['onlineMigrations'] == ['new']
+        assert 'No --maintenance flag is needed' in output.err
+        assert 'Online schema revisions: new' in output.err
+    else:
+        assert result['mode'] == 'maintenance-required'
+        assert result['interruption'] == 'required'
+        assert 'WARNING: maintenance required' in output.err
+        assert 'Downtime is required' in output.err
+        assert 'Repeat the same command with --maintenance' in output.err
+
+
+@pytest.mark.parametrize('reviewed', [True, False])
+def test_host_dispatch_never_silently_selects_maintenance(tmp_path, monkeypatch, capsys, reviewed):
+    from packetsafari_onprem import rolling_update, maintenance_update
+    layout = ops.runtime_layout(str(tmp_path), str(tmp_path))
+    ops.ensure_runtime_dirs(layout)
+    (layout.state_dir/'rolling').mkdir(parents=True)
+    save(layout.state_dir/'rolling/stack.json', {'fleetBases': {'backend': {}}})
+    images = {s: 'repo/'+s+'@sha256:'+'a'*64 for s in fleet.COHORT}
+    save(layout.release_manifest_path, {'runtimeContract': contract(), 'images': images})
+    save(layout.target_release_manifest_path, {'runtimeContract': contract(
+        [row('old', None), row('new', 'old', reviewed)], 'b'), 'images': images})
+    layout.compose_file.write_text('fixture')
+    for method in ('sync_bundle', 'report_backup_storage_preflight', 'maybe_self_update_tooling',
+                   'validate_tooling_requirement', 'validate_upgrade_path', 'validate_manifest_profile',
+                   'verify_saas_operator_authorization', 'validate_required_env', 'assert_upgrade_preflight_doctor'):
+        monkeypatch.setattr(ops, method, lambda *a, **k: None)
+    monkeypatch.setattr(ops, 'ensure_generated_upgrade_env', lambda *a, **k: [])
+    monkeypatch.setattr(ops, 'supports_upgrade_host_actions', lambda *a, **k: True)
+    monkeypatch.setattr(ops, 'prepare_connected_manifest', lambda *a, **k: layout.target_release_manifest_path)
+    monkeypatch.setattr(rolling_update, 'enabled', lambda *a: True)
+    called = []
+    monkeypatch.setattr(rolling_update, 'upgrade', lambda *a, **k: called.append('fleet') or {'status': 'ok'})
+    monkeypatch.setattr(maintenance_update, 'upgrade', lambda *a, **k: pytest.fail('no maintenance authorization'))
+    args = SimpleNamespace(runtime_root=str(tmp_path), container_runtime_root=str(tmp_path),
+        profile='saas', backup_mode='skip', allow_unbacked_upgrade=True, manifest='saved',
+        _host_requirements_report={}, _sizing_status_report={}, simulate_failure_phase='')
+    if reviewed:
+        assert ops.upgrade_release(args)['status'] == 'ok'
+        assert called == ['fleet']
+    else:
+        with pytest.raises(RuntimeError, match='Upgrade failed during preflight:.*Downtime is required'):
+            ops.upgrade_release(args)
+        assert called == []
+        assert 'WARNING: maintenance required' in capsys.readouterr().err

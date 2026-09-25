@@ -4232,10 +4232,27 @@ def _deployment_plan(args, layout, current, target, backup_mode):
         release_images(current, target, backup_mode)
     except ValueError as exc:
         return {'mode': 'maintenance-required', 'pending': False,
-                'message': f'{exc}. Use update --maintenance with your chosen backup policy.'}
+                'interruption': 'required',
+                'message': f'{exc}. Downtime is required; this update will stop before service replacement. '
+                           'Repeat the same command with --maintenance, keeping the same source and backup options.'}
     schema = schema_plan(current.get('runtimeContract'), target.get('runtimeContract'))
     return {'mode': 'fleet', 'pending': False, 'onlineMigrations': schema['migrations'],
-            'message': 'Replace the application generation, switch traffic, drain and retire old work. Runtime checks still apply.'}
+            'interruption': 'none-planned',
+            'message': ('Apply reviewed compatible schema migrations while the old API and jobs stay active; '
+                        if schema['migrations'] else '') +
+                       'replace the application generation, switch traffic, drain and retire old work. '
+                       'No --maintenance flag is needed. Runtime checks still apply; this is not a downtime guarantee.'}
+
+
+def report_update_strategy(plan):
+    """Always explain interruption on stderr, including the normal JSON CLI path."""
+    if plan.get('pending'):
+        print(f"Update strategy: resuming {plan['mode']} at {plan.get('phase', 'saved phase')}", file=sys.stderr, flush=True)
+        return
+    label = 'WARNING: maintenance required' if plan['mode'] == 'maintenance-required' else f"Update strategy: {plan['mode']}"
+    print(f"{label}. {plan['message']}", file=sys.stderr, flush=True)
+    if plan.get('onlineMigrations'):
+        print('Online schema revisions: ' + ', '.join(plan['onlineMigrations']), file=sys.stderr, flush=True)
 
 
 def _activation_report(layout, manifest: dict, active_manifest: dict, backup_mode: str) -> dict:
@@ -4383,6 +4400,8 @@ def format_update_plan(payload: dict, host_requirements: dict[str, object]) -> s
     if plan:
         lines.append(f"Update procedure     {plan['mode']}" + (f"; resuming {plan.get('phase')}" if plan.get('pending') else ''))
         lines.append(f"                     {plan['message']}")
+        if plan.get('onlineMigrations'):
+            lines.append('Online migrations    ' + ', '.join(plan['onlineMigrations']))
     warnings = [str(item) for item in host_requirements.get("warnings") or [] if str(item).strip()]
     sizing = payload.get("sizingStatus") if isinstance(payload.get("sizingStatus"), dict) else {}
     if sizing.get("stale"):
@@ -6570,6 +6589,10 @@ def upgrade_release(args) -> dict:
             maintenance = getattr(args, 'maintenance', False) or default_maintenance
             from . import rolling_update
             if rolling_update.enabled(layout):
+                plan = _deployment_plan(args, layout, _read_json(layout.release_manifest_path, {}), manifest, backup_mode)
+                report_update_strategy(plan)
+                if plan['mode'] == 'maintenance-required':
+                    raise ValueError(plan['message'])
                 import sys as _sys
                 if maintenance or pending_update.get('mode') == 'maintenance':
                     from . import maintenance_update
