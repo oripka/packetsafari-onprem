@@ -223,7 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Acknowledge an unbacked non-interactive upgrade. Interactive execution asks for confirmation instead.",
     )
     upgrade.add_argument("--health-timeout", type=int, default=180)
-    upgrade.add_argument("--maintenance", action="store_true", help="Explicitly allow schema/shared-service maintenance. Activated generations pause ingress and drain work first; initial bootstrap may interrupt work.")
+    upgrade.add_argument("--maintenance", action="store_true", help="Allow schema/shared-service maintenance (already the default for onprem). Activated generations pause ingress and drain work first; initial bootstrap may interrupt work.")
     upgrade.add_argument("--skip-health-check", action="store_true")
     upgrade.add_argument(
         "--skip-image-pull",
@@ -328,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--prune-old-images", action="store_true", help="After a successful update, remove unprotected PacketSafari images without prompting.")
     update.add_argument("--skip-image-retention-check", action="store_true")
     update.add_argument("--force", action="store_true", help="Apply even when the target version is not newer.")
-    update.add_argument("--maintenance", action="store_true", help="Explicitly allow schema/shared-service maintenance. Activated generations pause ingress and drain work first; initial bootstrap may interrupt work.")
+    update.add_argument("--maintenance", action="store_true", help="Allow schema/shared-service maintenance (already the default for onprem). Activated generations pause ingress and drain work first; initial bootstrap may interrupt work.")
     update.add_argument("--activate-deployment-proxy", action="store_true", help="After first-time maintenance, activate the signed deployment proxy; repeat this command to resume activation.")
     update.add_argument("--ingress-policy", type=Path, help="Reviewed JSON ingress policy required with --activate-deployment-proxy.")
     update.add_argument("--tooling-only", action="store_true", help="Apply only a signed Ops tooling revision for the installed app version, including while activation is pending.")

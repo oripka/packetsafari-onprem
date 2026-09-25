@@ -328,7 +328,7 @@ def test_host_generation_resume_uses_saved_target_without_registry_pulls(tmp_pat
 def test_update_plan_explains_adoption_maintenance_and_pending_resume(tmp_path):
     layout = ops.runtime_layout(str(tmp_path), '/storage/onprem')
     (layout.state_dir/'rolling').mkdir(parents=True)
-    args = SimpleNamespace()
+    args = SimpleNamespace(profile='saas')
     manifest = {'runtimeContract': {'protocolVersion': 1, 'workerDrainVersion': 1, 'schemaInputs': 'a'*64},
                 'images': {service: 'repo/'+service+'@sha256:'+'a'*64 for service in fleet.COHORT}}
     assert ops._deployment_plan(args, layout, manifest, manifest, 'skip')['mode'] == 'activation-required'
@@ -341,29 +341,48 @@ def test_update_plan_explains_adoption_maintenance_and_pending_resume(tmp_path):
     assert 'resuming committing' in ops.format_update_plan({'deploymentPlan': plan}, {})
 
 
-@pytest.mark.parametrize('mode', ['fleet', 'maintenance'])
-def test_pending_host_update_uses_controller_checks_instead_of_installed_release_doctor(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('mode,profile,pending', [('fleet', 'saas', True), ('maintenance', 'saas', True), ('fleet', 'onprem', True), ('maintenance', 'onprem', False)])
+def test_pending_host_update_uses_controller_checks_instead_of_installed_release_doctor(tmp_path, monkeypatch, mode, profile, pending):
     from packetsafari_onprem import rolling_update
     layout = ops.runtime_layout(str(tmp_path), str(tmp_path))
     ops.ensure_runtime_dirs(layout)
     (layout.state_dir/'rolling').mkdir(parents=True)
-    save(layout.state_dir/'rolling/transaction.json', {'mode': mode, 'phase': 'draining'})
+    if pending:
+        save(layout.state_dir/'rolling/transaction.json', {'mode': mode, 'phase': 'draining'})
     save(layout.target_release_manifest_path, {'version': 'target', 'images': {}})
     layout.compose_file.write_text('fixture')
     for method in ('sync_bundle', 'report_backup_storage_preflight', 'maybe_self_update_tooling',
                    'validate_tooling_requirement', 'validate_upgrade_path', 'validate_manifest_profile',
-                   'verify_saas_operator_authorization', 'validate_required_env'):
+                   'verify_saas_operator_authorization', 'verify_license_allows_release', 'validate_required_env'):
         monkeypatch.setattr(ops, method, lambda *a, **k: None)
     monkeypatch.setattr(ops, 'ensure_generated_upgrade_env', lambda *a, **k: [])
     monkeypatch.setattr(ops, 'supports_upgrade_host_actions', lambda *a, **k: True)
     monkeypatch.setattr(ops, 'prepare_connected_manifest', lambda *a, **k: layout.target_release_manifest_path)
-    monkeypatch.setattr(ops, 'assert_upgrade_preflight_doctor', lambda *a: pytest.fail('old-release checks reject intentional drain'))
+    monkeypatch.setattr(ops, 'assert_upgrade_preflight_doctor', lambda *a: pytest.fail('old-release checks reject intentional drain') if pending else None)
     monkeypatch.setattr(rolling_update, 'enabled', lambda *a: True)
     visited = []
     owner = maintenance if mode == 'maintenance' else rolling_update
     monkeypatch.setattr(owner, 'upgrade', lambda *a, **k: visited.append(mode) or {'status': 'draining'})
     args = SimpleNamespace(runtime_root=str(tmp_path), container_runtime_root=str(tmp_path),
-        profile='saas', backup_mode='skip', allow_unbacked_upgrade=True, manifest='saved',
+        profile=profile, backup_mode='skip', allow_unbacked_upgrade=True, manifest='saved',
         _host_requirements_report={}, _sizing_status_report={}, simulate_failure_phase='')
     assert ops.upgrade_release(args)['status'] == 'draining'
     assert visited == [mode]
+
+
+@pytest.mark.parametrize('activated', [False, True])
+def test_onprem_plan_defaults_to_maintenance_without_cloudfront(tmp_path, activated):
+    layout = ops.runtime_layout(str(tmp_path), str(tmp_path))
+    ops.ensure_runtime_dirs(layout)
+    (layout.state_dir/'rolling').mkdir(parents=True)
+    save(layout.deployment_state_path, {'deployment': {'profile': 'onprem'}})
+    if activated:
+        save(layout.state_dir/'rolling/stack.json', {'fleetBases': {'backend': {}}})
+    plan = ops._deployment_plan(SimpleNamespace(), layout, {}, {'runtimeContract': {'protocolVersion': 1}}, 'inline')
+    assert plan['mode'] == 'maintenance'
+    assert plan['selectedBy'] == 'onprem-default'
+    assert 'interrupt' in plan['message']
+    assert 'No AWS or proxy activation is required' in plan['message']
+    save(layout.state_dir/'rolling/transaction.json', {'mode': 'fleet', 'phase': 'draining'})
+    assert ops._deployment_plan(SimpleNamespace(), layout, {}, {}, 'inline')['mode'] == 'fleet'
+    assert not ops._default_onprem_maintenance('onprem', {'mode': 'fleet'})

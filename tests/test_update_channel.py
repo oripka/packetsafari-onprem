@@ -584,7 +584,8 @@ def test_image_retention_prunes_only_unprotected_managed_images(monkeypatch, tmp
     ("skip", ""), ("inline", ""), ("inline", "backup"),
     ("inline", "migrate"), ("skip", "migrate"), ("inline", "pull"),
 ])
-def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatch, tmp_path, backup_mode, interrupt_phase):
+@pytest.mark.parametrize("profile", ["saas", "onprem"])
+def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatch, tmp_path, backup_mode, interrupt_phase, profile):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     operations.ensure_runtime_dirs(layout)
     layout.release_manifest_path.write_text(
@@ -596,12 +597,14 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     layout.deployment_state_path.write_text('{"deployment":{"installedVersion":"10.0.0-beta.1"}}\n', encoding="utf-8")
     target_manifest = tmp_path / "target-manifest.json"
     target_manifest.write_text(
-        json.dumps({"version": "10.0.0-beta.2", "images": {
+        json.dumps({"version": "10.0.0-beta.2", "runtimeContract": {"protocolVersion": 1} if profile == "onprem" else None, "images": {
             "backend": f"repo/backend:{1 if backup_mode == 'inline' else 2}",
             "worker": f"repo/worker:{1 if backup_mode == 'inline' else 2}",
         }}),
         encoding="utf-8",
     )
+    monkeypatch.setattr(operations, "verify_license_allows_release", lambda *a: None)
+    monkeypatch.setattr(operations, "supports_upgrade_host_actions", lambda *a, **kw: True)
     calls: list[str] = []
     restores = []
 
@@ -656,7 +659,7 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     args = SimpleNamespace(
             runtime_root=str(tmp_path),
             container_runtime_root=str(tmp_path),
-            profile="saas",
+            profile=profile,
             backup_mode=backup_mode,
             allow_unbacked_upgrade=True,
             bundle=None,

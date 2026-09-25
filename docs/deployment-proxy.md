@@ -249,6 +249,18 @@ ingress. Maintenance never automatically rolls back database changes: resume for
 or use the established backup restoration procedure. This is an interruption, not
 general on-prem full-stack zero-downtime support.
 
+### On-prem update default
+
+From Ops 0.2.52, `packetsafari-ops update` and `upgrade --bundle ...` select
+maintenance automatically for the onprem profile, including container-fronted
+installations. No CloudFront, AWS address lookup, or proxy activation is required.
+`update check` reports this choice before applying it. Inline backup remains the
+default; entitlement, signatures, readiness and recovery checks still apply.
+Services are interrupted. Hosts without an activated fleet can interrupt jobs
+and connections; activated fleets use the existing maintenance drain controller.
+An already pending fleet transaction retains its original controller when resumed.
+SaaS still requires explicit `--maintenance` for interrupting application updates.
+
 ### Trusted ingress
 
 Host activation requires an explicit JSON policy. Direct on-prem ingress uses

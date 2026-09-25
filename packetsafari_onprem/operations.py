@@ -4192,6 +4192,11 @@ def check_for_update(args) -> dict:
     return _update_check_payload(args, layout, manifest_path)
 
 
+def _default_onprem_maintenance(profile, pending):
+    # Never change the controller of an already-started transaction.
+    return profile == 'onprem' and pending.get('mode') != 'fleet'
+
+
 def _deployment_plan(args, layout, current, target, backup_mode):
     """Explain selection only; execution still enforces all runtime checks."""
     activation = _read_json(layout.state_dir / 'rolling/activation.json', {})
@@ -4203,6 +4208,11 @@ def _deployment_plan(args, layout, current, target, backup_mode):
         return {'mode': pending['mode'], 'pending': True, 'phase': pending.get('phase'),
                 'message': 'Resume saved release; channel discovery and new builds wait until completion.'}
     stack = _read_json(layout.state_dir / 'rolling/stack.json', {})
+    if _default_onprem_maintenance(_requested_or_active_profile(args, layout), pending):
+        return {'mode': 'maintenance', 'pending': False, 'selectedBy': 'onprem-default',
+                'message': 'On-prem updates use maintenance by default. Services are interrupted; '
+                           'hosts without an activated fleet can interrupt jobs and connections. '
+                           'The selected backup policy is preserved. No AWS or proxy activation is required.'}
     if getattr(args, 'maintenance', False):
         return {'mode': 'maintenance', 'pending': False,
                 'message': 'Ingress pauses and work drains before changes.' if stack.get('fleetBases') else
@@ -6544,10 +6554,16 @@ def upgrade_release(args) -> dict:
                     max_age_minutes=int(getattr(args, "max_backup_age_minutes", 180) or 180),
                 )
 
+            default_maintenance = _default_onprem_maintenance(profile, pending_update)
+            if default_maintenance:
+                print('PacketSafari update: on-prem maintenance selected by default; service interruption '
+                      'is expected. Unactivated hosts may interrupt jobs and connections. '
+                      f'Backup policy: {backup_mode}. No AWS or proxy activation is required.', file=sys.stderr)
+            maintenance = getattr(args, 'maintenance', False) or default_maintenance
             from . import rolling_update
             if rolling_update.enabled(layout):
                 import sys as _sys
-                if getattr(args, 'maintenance', False) or pending_update.get('mode') == 'maintenance':
+                if maintenance or pending_update.get('mode') == 'maintenance':
                     from . import maintenance_update
                     return maintenance_update.upgrade(layout, args, manifest, source=source,
                         backup_mode=backup_mode, backup_proof=external_backup_proof,
@@ -6556,7 +6572,7 @@ def upgrade_release(args) -> dict:
                     backup_mode=backup_mode, backup_proof=external_backup_proof,
                     ops=_sys.modules[__name__])
 
-            if manifest.get('runtimeContract') and not getattr(args, 'maintenance', False):
+            if manifest.get('runtimeContract') and not maintenance:
                 raise ValueError('This host has not activated full-generation updates. Bootstrap the drain-capable release once with --maintenance (interrupts work), then verify ingress policy and enable deployment-proxy. Normal updates must not silently kill jobs.')
 
             backup_message = {
