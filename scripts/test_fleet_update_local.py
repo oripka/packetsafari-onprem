@@ -72,7 +72,7 @@ for queue in aichat aichat_priority index index_priority security; do
 done
 worker_wait
 '''
-    services['worker']['command'] = ['bash', '-lc', command.replace('$', '$$')]
+    services['worker']['command'] = ['bash', '-c', command.replace('$', '$$')]
     services['redis'] = {'image': redis_image, 'container_name': project+'-redis',
                          'networks': {'app': {'ipv4_address': '172.20.0.11'}},
                          'command': ['redis-server', '--save', '', '--appendonly', 'no']}

@@ -700,7 +700,8 @@ def test_upgrade_pulls_target_images_before_stopping_changed_services(monkeypatc
     assert calls.index("doctor:1") < calls.index("promote")
 
 
-def test_security_queue_consumer_probe_requires_real_celery_process(monkeypatch, tmp_path):
+@pytest.mark.parametrize("shell", ["/bin/bash -lc", "/bin/bash -c", "/bin/sh -c"])
+def test_security_queue_consumer_probe_requires_real_celery_process(monkeypatch, tmp_path, shell):
     layout = operations.runtime_layout(str(tmp_path), str(tmp_path))
     operations.ensure_runtime_dirs(layout)
     layout.compose_file.write_text("services:\n  worker:\n", encoding="utf-8")
@@ -710,7 +711,7 @@ def test_security_queue_consumer_probe_requires_real_celery_process(monkeypatch,
             returncode=0,
             stdout=(
                 "PID ARGS\n"
-                "10 /bin/bash -lc celery --queues=security\n"
+                f"10 {shell} celery --queues=security\n"
                 "11 /venv/bin/python3 /venv/bin/celery -A packetsafari.celery_app worker --queues=index\n"
             ),
             stderr="",

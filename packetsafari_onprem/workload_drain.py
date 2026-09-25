@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 import json
 import sys
+import subprocess
 
 from . import deployment_proxy as proxy
 
@@ -19,7 +20,10 @@ replies=celery.control.ping(destination=sorted(expected), timeout=1)
 actual={name for reply in replies for name,value in reply.items() if value.get('ok')=='pong'}
 print('DRAIN_READY='+json.dumps(expected <= actual))
 '''
-    result = proxy.docker('exec', container, 'python3', '-c', script, check=False)
+    try:
+        result = proxy.docker('exec', container, 'python3', '-c', script, check=False, timeout=60)
+    except subprocess.TimeoutExpired:
+        return False  # Startup imports can exceed one probe; caller owns readiness deadline.
     lines = [line for line in result.stdout.splitlines() if line.startswith('DRAIN_READY=')]
     return result.returncode == 0 and bool(lines) and json.loads(lines[-1].split('=', 1)[1]) is True
 

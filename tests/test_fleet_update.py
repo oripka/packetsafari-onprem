@@ -104,3 +104,22 @@ def test_candidate_http_readiness_is_required_before_workers_start(monkeypatch, 
     else:
         with pytest.raises(RuntimeError, match='readiness timed out'):
             fleet.ready(runtime, ['backend-green'], timeout=0)
+
+
+def test_worker_readiness_timeout_is_not_ready_not_fatal(monkeypatch):
+    import subprocess
+    def slow(*args, **kwargs):
+        raise subprocess.TimeoutExpired('docker exec', 15)
+    monkeypatch.setattr(drain.proxy, 'docker', slow)
+    assert drain.worker_ready('candidate') is False
+
+
+def test_worker_readiness_uses_bounded_startup_probe_timeout(monkeypatch):
+    calls = []
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout='DRAIN_READY=true\n')
+    monkeypatch.setattr(drain.proxy.subprocess, 'run', run)
+    assert drain.worker_ready('candidate') is True
+    assert calls[0][0][:3] == ['docker', 'exec', 'candidate']
+    assert calls[0][1]['timeout'] == 60

@@ -5945,8 +5945,7 @@ def _security_queue_consumer_probe(layout: RuntimeLayout) -> dict[str, object]:
         for line in top.stdout.splitlines()
         if "celery" in line.lower()
         and queue_pattern.search(line)
-        and "/bin/bash -lc" not in line
-        and "/bin/sh -lc" not in line
+        and not any(shell in line for shell in ("/bin/bash -lc", "/bin/bash -c", "/bin/sh -lc", "/bin/sh -c"))
     ]
     return {
         "ok": bool(consumers),

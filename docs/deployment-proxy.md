@@ -334,3 +334,8 @@ Worker launch commands in the base template and sizing overlay use `bash -c`.
 A login shell (`-lc`) executes `.bash_logout`; Debian's console-clearing hook
 can change a successful drain into exit 1 under `errexit`. Local qualification
 must include the actual launcher flags, not only the supervisor function.
+
+Worker readiness allows 60 seconds for one cold Python/Celery import and ping.
+A subprocess timeout means not ready; the enclosing controller retains its
+readiness deadline. The security consumer check excludes both login and
+non-login shell wrappers, so shell command text cannot masquerade as a worker.

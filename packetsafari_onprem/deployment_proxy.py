@@ -16,8 +16,8 @@ import uuid
 PROXY_IMAGE = "nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236"
 
 
-def docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], text=True, capture_output=True, check=check, timeout=15)
+def docker(*args: str, check: bool = True, timeout: float = 15) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *args], text=True, capture_output=True, check=check, timeout=timeout)
 
 
 def inspect(name: str) -> dict:
