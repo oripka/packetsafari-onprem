@@ -310,7 +310,8 @@ def test_host_generation_resume_uses_saved_target_without_registry_pulls(tmp_pat
                                  'configurationFingerprint': fingerprints([frozen])})
     target = {'services': {service: {'image': 'saved'} for service in fleet.COHORT}}
     save(directory/'transaction.json', {'mode': 'fleet', 'phase': 'draining', 'targetBase': target})
-    manifest = {'version': 'target'}
+    contract = {'protocolVersion': 1, 'workerDrainVersion': 1, 'schemaInputs': 'a'*64}
+    manifest = {'version': 'target', 'runtimeContract': contract}
     save(directory/'fleet-release.json', {'manifest': manifest, 'backupMode': 'skip', 'snapshot': str(tmp_path)})
     monkeypatch.setattr(fleet, 'release_images', lambda *a: dict.fromkeys(fleet.COHORT, 'signed'))
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: pytest.fail('resume must not pull or rediscover'))
@@ -320,7 +321,7 @@ def test_host_generation_resume_uses_saved_target_without_registry_pulls(tmp_pat
     monkeypatch.setattr(fleet, 'deploy', resume)
     adapter = SimpleNamespace(_compose_base_command=lambda _: [])
     kwargs = dict(source='manifest', backup_mode='skip', backup_proof=None, ops=adapter)
-    assert fleet.upgrade(layout, SimpleNamespace(), {}, manifest, **kwargs)['status'] == 'draining'
+    assert fleet.upgrade(layout, SimpleNamespace(), {'runtimeContract': contract}, manifest, **kwargs)['status'] == 'draining'
     with pytest.raises(RuntimeError, match='original backup policy'):
         fleet.upgrade(layout, SimpleNamespace(), {}, manifest, **{**kwargs, 'backup_mode': 'require-recent'})
 

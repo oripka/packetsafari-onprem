@@ -34,7 +34,7 @@ subsequent production generation rollout or a three-second outage target.
 
 | Component | Implemented behavior | Boundary |
 | --- | --- | --- |
-| Backend API | Candidate readiness, proxy switch, connection drain, retirement. | Same schema and task protocol required. |
+| Backend API | Candidate readiness, proxy switch, connection drain, retirement. | Compatible schema and same task protocol required. |
 | Worker, Agent runner, Sharkd | Both generations run; TERM stops old Celery intake and waits for every worker child. Old runner/socket/workspaces and Sharkd remain until jobs and proxy connections drain. | No forced termination on timeout. External unmanaged consumers are outside this ownership contract. |
 | Agent stream gateway | Separate generation; old gateway remains while old jobs and proxy connections exist. | Real Agent model-backed continuity remains unqualified. |
 | DNS, outbound proxy, firewall, deployment proxy | Reused when unchanged; changed image/configuration is rejected. | No overlap contract; explicit maintenance transition required. |
@@ -236,7 +236,7 @@ resuming old images without the helper fails. Maintainers must bump protocolVers
 for incompatible task/interprocess messages. Matching hashes do not prove semantic
 compatibility by themselves. All five application images must be digest-pinned;
 the gateway inherits backend when omitted. Changes outside this cohort, deployment
-profiles, required environment, schema or frozen runtime configuration are rejected.
+profiles, required environment, incompatible schema or frozen runtime configuration are rejected.
 Inline backups and skipped health checks are rejected for overlapping application
 updates. For explicit maintenance on an activated fleet, use the usual update
 command plus `--maintenance` and the chosen backup policy. The controller pauses
@@ -248,6 +248,55 @@ Startup/migration failures retain their saved plan. Verification failure re-paus
 ingress. Maintenance never automatically rolls back database changes: resume forward
 or use the established backup restoration procedure. This is an interruption, not
 general on-prem full-stack zero-downtime support.
+
+### Reviewed online schema migrations (Ops 0.2.57)
+
+The image contract also includes `schemaMigrations`: migration file hashes,
+revision/parent relationships, and a hash of the migration environment. The
+signed release binds this metadata for both backend and worker. Existing history
+must remain identical, with a single head and linear additions. Each new migration
+must explicitly declare the literal `rolling_compatible = True`; omission requires
+maintenance. This is a reviewed compatibility assertion, not an SQL safety detector.
+
+Use expand/apply/contract: add nullable columns or independent tables that old code
+tolerates, roll out code using them, then remove obsolete fields in a later release
+only after verifying the retiring API **and all jobs/workers** no longer need them.
+Review every intermediate revision, locking, execution time, and rollback behavior.
+Do not mark table rewrites, large backfills, external side effects, manual commits,
+or Alembic autocommit blocks compatible. Run backfills as separately controlled work.
+Never annotate or rewrite historical migrations to bypass the check.
+
+On an activated compatible fleet, the usual `update` command applies these migrations
+from the immutable target image before starting replacement services. Old traffic
+and workers remain active. `update check` lists `deploymentPlan.onlineMigrations`.
+Unchanged migration history with model-only changes needs no SQL; model compatibility
+still requires normal application review. Legacy manifests can acquire metadata only
+with identical schema inputs. Changed migration environment or missing baseline
+metadata requires maintenance. Installing this implementation initially requires
+maintenance because it also fixes URL escaping in the migration environment.
+
+The database must be at the signed source revision, or already at the exact target
+for an idempotent retry. An advisory lock excludes concurrent upgraders; DDL uses a
+100 ms lock timeout and 30 s statement timeout. These limits bound waiting, not a
+universal zero-latency guarantee. A failure retains the `migrating` journal while
+the old generation serves: inspect the error, resolve contention, and repeat the
+same update. An existing named migration container blocks resume/abort until the
+operator establishes its state; retries never replace an unknown active process.
+Application rollback leaves compatible schema additions in place. Database downgrade
+is never automatic. Nontransactional changes are outside this contract.
+
+Source mounts over migration/application code are refused for online SQL. Normal
+hot-reload dev rebuilds therefore use maintenance for schema migrations; immutable
+local fixture images exercise the production flow. The on-prem CLI retains its
+maintenance selection; this change does not enable online on-prem updates.
+Shared infrastructure changes still require maintenance.
+
+For the isolated PostgreSQL + HTTP + Celery fixture, set
+`PACKETSAFARI_TEST_ONLINE_SCHEMA_IMAGE` to a locally available current worker image
+and run `scripts/test_fleet_update_local.py`. It creates immutable local test images
+and a disposable database without published database ports, verifies old jobs finish
+before retirement, and retains results below the external data root. It never
+publishes a release or modifies the development/production database.
 
 ### On-prem update default
 

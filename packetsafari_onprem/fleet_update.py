@@ -11,6 +11,7 @@ import shutil
 
 from . import deployment_proxy as proxy
 from . import workload_drain
+from .schema_upgrade import plan as schema_plan
 from .rolling_update import read, save, compose_config
 
 COHORT = ('backend', 'worker', 'agent-stream-gateway', 'agent-cli-runner', 'sharkd')
@@ -31,11 +32,7 @@ def pin_release(runtime, manifest_path):
 def release_images(current, target, backup_mode):
     if backup_mode == 'inline':
         raise ValueError('Full-generation updates cannot use a quiescing inline backup')
-    old, new = current.get('runtimeContract'), target.get('runtimeContract')
-    if not isinstance(old, dict) or old != new or new.get('protocolVersion') != 1 or new.get('workerDrainVersion') != 1:
-        raise ValueError('Release runtime/schema contracts differ or are missing; explicit maintenance bootstrap required')
-    if not re.fullmatch('[a-f0-9]{64}', str(new.get('schemaInputs', ''))):
-        raise ValueError('Release schema identity is invalid')
+    schema_plan(current.get('runtimeContract'), target.get('runtimeContract'))
     for key in ('deploymentProfiles', 'requiredEnv', 'profileRequiredEnv', 'requiredEnvByProfile'):
         if current.get(key) != target.get(key):
             raise ValueError(f'{key} changed; no automatic maintenance fallback')
@@ -110,7 +107,8 @@ def upgrade(layout, args, current, manifest, *, source, backup_mode, backup_proo
                         '/usr/local/bin/setvolumepermissions.sh', '/'], check=True, stdout=sys.stderr)
         result.update(ops._promote_release(layout, manifest, Path(saved['snapshot']), source=source,
                       profile=ops.deployment_profile(args), backup_mode=backup_mode))
-    outcome = deploy(runtime, target, verify=verify, commit=commit, timeout=getattr(args, 'health_timeout', 180))
+    outcome = deploy(runtime, target, verify=verify, commit=commit, timeout=getattr(args, 'health_timeout', 180),
+                     schema=schema_plan(current.get('runtimeContract'), manifest.get('runtimeContract')))
     return {**result, **outcome}
 
 
@@ -206,10 +204,39 @@ def ready(runtime, services, timeout=120):
         time.sleep(.25)
 
 
+def migration_container(journal):
+    return 'packetsafari-online-schema-' + journal['id']
+
+
+def validate_migration_mounts(service):
+    for volume in service.get('volumes', []):
+        mount = volume.get('target', '') if isinstance(volume, dict) else ''
+        if any(mount == path or path.startswith(mount.rstrip('/') + '/') or mount.startswith(path + '/')
+               for path in ('/app/alembic', '/app/packetsafari', '/app/scripts', '/app/alembic.ini')):
+            raise ValueError('Online migrations require immutable image code, without source mounts')
+
+
+def run_online_migration(runtime, journal):
+    from . import operations as ops
+    schema = journal['schemaPlan']
+    validate_migration_mounts(journal['targetBase']['services']['backend'])
+    container = migration_container(journal)
+    if proxy.docker('inspect', container, check=False).returncode == 0:
+        raise RuntimeError('Saved migration container still exists; inspect it before resuming or aborting')
+    print('Generation update: applying reviewed online migrations; old traffic and jobs stay active',
+          file=sys.stderr, flush=True)
+    ops.docker_compose_run(None, name('backend', journal['candidate']),
+        ['PACKETSAFARI_SKIP_SERVICE_INIT=true', 'python3', '/app/scripts/sql_storage_upgrade.py',
+         'online-upgrade', schema['targetRevision'], '--from-revision', schema['fromRevision']],
+        compose_command=runtime.command, container_name=container, entrypoint='/usr/bin/env', log_output=True)
+
+
 def recover_preparing(runtime):
     journal = read(runtime.journal_file)
-    if journal.get('mode') != 'fleet' or journal['phase'] != 'preparing':
+    if journal.get('mode') != 'fleet' or journal['phase'] not in ('migrating', 'preparing'):
         raise RuntimeError('Candidate workers may own jobs; repeat the normal update to resume their drain')
+    if journal['phase'] == 'migrating' and proxy.docker('inspect', migration_container(journal), check=False).returncode == 0:
+        raise RuntimeError('Migration container still exists; do not abort a possibly active migration')
     slot = journal['candidate']
     configured = read(runtime.compose_file)['services']
     worker = name('worker', slot)
@@ -224,9 +251,9 @@ def recover_preparing(runtime):
     return {'status': 'rolled_back', 'message': 'Candidate failed before workers started; original generation kept serving'}
 
 
-def deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=120):
+def deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=120, schema=None):
     try:
-        return _deploy(runtime, target_base, verify=verify, commit=commit, timeout=timeout)
+        return _deploy(runtime, target_base, verify=verify, commit=commit, timeout=timeout, schema=schema)
     except BaseException:
         if runtime.journal_file.exists():
             journal = read(runtime.journal_file)
@@ -242,7 +269,7 @@ def abort(runtime, timeout=120):
     journal = read(runtime.journal_file)
     if journal.get('mode') != 'fleet':
         raise RuntimeError('This is not an application generation transaction')
-    if journal['phase'] == 'preparing':
+    if journal['phase'] in ('migrating', 'preparing'):
         return recover_preparing(runtime)
     if journal['phase'] in ('committing', 'committed'):
         raise RuntimeError('Release commit has begun; repeat update to finish, then deploy a signed rollback release')
@@ -269,7 +296,7 @@ def abort(runtime, timeout=120):
     return deploy(runtime, journal['targetBase'], timeout=timeout)
 
 
-def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=120):
+def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=120, schema=None):
     """Caller holds the deployment lock and verifies signed compatibility first."""
     if runtime.journal_file.exists():
         journal = read(runtime.journal_file)
@@ -296,10 +323,22 @@ def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt:
                    'id': uuid.uuid4().hex, 'retiringSlot': active,
                    'candidate': candidate, 'oldWorker': worker, 'targetBase': target_base,
                    'oldContainers': {s: runtime.container(name(s, active)) for s in COHORT if s in old_base['services']}}
+        journal['schemaPlan'] = schema
+        if schema and schema['migrations']:
+            journal['phase'] = 'migrating'
         journal['oldStarts'] = {s: proxy.inspect(c)['State']['StartedAt'] for s, c in journal['oldContainers'].items()}
         save(runtime.journal_file, journal)
     staged, candidate = journal['staged'], journal['candidate']
     candidate_services = [name(s, candidate) for s in COHORT if s in target_base['services']]
+    schema = journal.get('schemaPlan')
+    if journal['phase'] == 'migrating':
+        if runtime.schema(journal['oldContainers']['backend']) != schema['inputs'][0]:
+            raise RuntimeError('Serving schema inputs differ from the signed migration plan')
+        runtime.validate_config(configuration(staged, runtime.directory))
+        save(runtime.compose_file, configuration(staged, runtime.directory))
+        run_online_migration(runtime, journal)
+        journal['phase'] = 'preparing'
+        save(runtime.journal_file, journal)
     if journal['phase'] == 'preparing':
         print(f'Generation update: preparing {candidate}; serving generation and dependencies stay running', file=sys.stderr, flush=True)
         save(runtime.compose_file, configuration(staged, runtime.directory))
@@ -308,7 +347,8 @@ def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt:
         ready(runtime, dependencies, timeout)
         runtime.dc('up', '-d', '--no-deps', '--pull', 'never', '--force-recreate', name('backend', candidate))
         ready(runtime, [name('backend', candidate)], timeout)
-        if runtime.schema(journal['oldContainers']['backend']) != runtime.schema(runtime.container(candidate)):
+        observed = [runtime.schema(journal['oldContainers']['backend']), runtime.schema(runtime.container(candidate))]
+        if (schema and observed != schema['inputs']) or (not schema and observed[0] != observed[1]):
             raise RuntimeError('Schema/model inputs changed; retained generations require compatible schema')
         # Save intent before candidate workers can consume messages. Any failure
         # after this boundary must retain both generations rather than kill jobs.

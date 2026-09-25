@@ -48,6 +48,11 @@ def long(seconds):
     for slot in ('blue', 'green'):
         created = proxy.docker('create', worker_image, 'true').stdout.strip()
         images[slot] = proxy.docker('commit', '--change', f'LABEL fixture.generation={slot}', created).stdout.strip()
+    online = os.environ.get('PACKETSAFARI_TEST_ONLINE_SCHEMA_IMAGE')
+    schema = None
+    if online:
+        from online_schema_fixture import prepare_images
+        images, schema = prepare_images(root, online)
     services = {}
     addresses = {'backend': 20, 'worker': 21, 'agent-stream-gateway': 22, 'sharkd': 23}
     for logical in fleet.COHORT:
@@ -64,6 +69,11 @@ def long(seconds):
         else:
             services[logical]['network_mode'] = 'none'
             services[logical]['command'] = ['sleep', '3600']
+    if online:
+        for service in services.values():
+            service['volumes'] = service['volumes'][:2]
+            service['environment'].update(PACKETSAFARI_RUNTIME_POSTGRES_URL='postgresql+psycopg2://postgres@postgres:5432/postgres',
+                                          PACKETSAFARI_AUTH_JWT_SECRET_KEY='isolated-fixture-only')
     command = '''set -eu
 source /app/scripts/worker_supervisor.sh
 for queue in aichat aichat_priority index index_priority security; do
@@ -76,6 +86,10 @@ worker_wait
     services['redis'] = {'image': redis_image, 'container_name': project+'-redis',
                          'networks': {'app': {'ipv4_address': '172.20.0.11'}},
                          'command': ['redis-server', '--save', '', '--appendonly', 'no']}
+    if online:
+        services['postgres'] = {'image': proxy.inspect('postgres')['Image'], 'container_name': project+'-postgres',
+            'networks': {'app': {'ipv4_address': '172.20.0.10'}},
+            'environment': {'POSTGRES_HOST_AUTH_METHOD': 'trust'}}
     for logical in ('backend', 'agent-stream-gateway', 'sharkd'):
         port = services[logical]['environment']['PORT']
         services[logical]['healthcheck'] = {'test': ['CMD', 'python3', '-c', f'import urllib.request; urllib.request.urlopen("http://127.0.0.1:{port}/api/v2/health", timeout=1)'], 'interval': '1s', 'timeout': '2s', 'retries': 3}
@@ -102,6 +116,13 @@ worker_wait
     try:
         runtime.dc('up', '-d', '--pull', 'never')
         fleet.ready(runtime, list(fleet.COHORT), timeout=120)
+        if online:
+            for _ in range(100):
+                if proxy.docker('exec', runtime.container('postgres'), 'pg_isready', '-U', 'postgres', check=False).returncode == 0:
+                    break
+                time.sleep(.1)
+            proxy.docker('exec', runtime.container('backend'), '/usr/bin/env',
+                'PACKETSAFARI_SKIP_SERVICE_INIT=true', 'python3', '/app/scripts/sql_storage_upgrade.py', 'upgrade', 'head')
         proxy.switch(root/'proxy', stack['proxyName'], runtime.container('backend'), sharkd=runtime.container('sharkd'))
         port = int(runtime.dc('port', 'deployment-proxy', '8080').rsplit(':', 1)[1])
         def poll():
@@ -145,7 +166,7 @@ worker_wait
             target['services'][logical]['image'] = images['green']
             target['services'][logical]['environment']['SLOT'] = 'green'
         commits = []
-        outcome = fleet.deploy(runtime, target, commit=lambda r: commits.append(r), timeout=5)
+        outcome = fleet.deploy(runtime, target, commit=lambda r: commits.append(r), timeout=5, schema=schema)
         assert outcome['status'] == 'draining', outcome
         assert commits == []
         assert all(proxy.inspect(container)['State']['Running'] for container in old.values())
@@ -169,6 +190,17 @@ worker_wait
         assert all(not proxy.inspect(container)['State']['Running'] for container in old.values())
         assert all(proxy.inspect(runtime.container(fleet.name(name, 'backend-green')))['Image'] == images['green'] for name in fleet.COHORT)
         events.append({'check': 'old task completed on blue; all old application containers stopped after drain; all green images verified'})
+        if online:
+            revision = proxy.docker('exec', runtime.container('postgres'), 'psql', '-U', 'postgres', '-Atc',
+                'SELECT version_num FROM alembic_version').stdout.strip()
+            assert revision == schema['targetRevision'], revision
+            assert proxy.docker('exec', runtime.container('postgres'), 'psql', '-U', 'postgres', '-Atc',
+                "SELECT to_regclass('online_schema_fixture') IS NOT NULL").stdout.strip() == 't'
+            assert samples and not any(s['error'] for s in samples)
+            events.append({'check': 'real online schema migration, API switch, worker drain, retirement with no sampled HTTP failures'})
+            save(root/'result.json', {'events': events, 'requests': len(samples), 'errors': 0, 'schemaPlan': schema})
+            print(json.dumps({'events': events, 'evidence': str(root)}, indent=2))
+            return
         # Verification fails after the replacement worker has accepted work.
         # Roll traffic back, but preserve that worker and its dependencies too.
         rollback_tasks = []
@@ -281,7 +313,7 @@ worker_wait
         save(root/'availability.json', samples)
         # This fixture has no customer tasks or storage. Retain stopped containers/logs.
         runtime.dc('stop', '--timeout', '1', *fleet.COHORT,
-                   *[fleet.name(s, 'backend-green') for s in fleet.COHORT], 'deployment-proxy', 'redis')
+                   *[fleet.name(s, 'backend-green') for s in fleet.COHORT], 'deployment-proxy', 'redis', *(['postgres'] if online else []))
 
 
 if __name__ == '__main__':

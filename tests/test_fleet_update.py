@@ -55,7 +55,7 @@ def test_regular_release_accepts_all_application_image_changes():
     new['images'] = {name: value.replace('a'*64, 'b'*64) for name, value in new['images'].items()}
     assert set(fleet.release_images(current, new, 'skip')) == set(fleet.COHORT)
     new['runtimeContract']['schemaInputs'] = 'b'*64
-    with pytest.raises(ValueError, match='contracts differ'):
+    with pytest.raises(ValueError, match='maintenance required'):
         fleet.release_images(current, new, 'skip')
 
 

@@ -3873,10 +3873,13 @@ def docker_compose_run(
     stdin_path: Path | None = None,
     stdout_path: Path | None = None,
     log_output: bool = False,
+    compose_command: list[str] | None = None,
+    container_name: str | None = None,
+    entrypoint: str | None = None,
 ) -> None:
-    container_name = f"packetsafari-ops-{os.getpid()}-{secrets.token_hex(4)}"
+    container_name = container_name or f"packetsafari-ops-{os.getpid()}-{secrets.token_hex(4)}"
     command = [
-        *_compose_base_command(layout),
+        *(compose_command if compose_command is not None else _compose_base_command(layout)),
         "run",
         "--rm",
         "--name", container_name,
@@ -3884,6 +3887,8 @@ def docker_compose_run(
         "--pull",
         "never",
     ]
+    if entrypoint:
+        command.extend(["--entrypoint", entrypoint])
     for volume in extra_volumes or []:
         command.extend(["-v", volume])
     command.extend([service, *args])
@@ -4222,13 +4227,14 @@ def _deployment_plan(args, layout, current, target, backup_mode):
     if not stack.get('fleetBases'):
         return {'mode': 'activation-required', 'pending': False,
                 'message': 'Full-generation updates require one-time maintenance bootstrap and proxy activation; see deployment-proxy.md.'}
-    from .fleet_update import release_images
+    from .fleet_update import release_images, schema_plan
     try:
         release_images(current, target, backup_mode)
     except ValueError as exc:
         return {'mode': 'maintenance-required', 'pending': False,
                 'message': f'{exc}. Use update --maintenance with your chosen backup policy.'}
-    return {'mode': 'fleet', 'pending': False,
+    schema = schema_plan(current.get('runtimeContract'), target.get('runtimeContract'))
+    return {'mode': 'fleet', 'pending': False, 'onlineMigrations': schema['migrations'],
             'message': 'Replace the application generation, switch traffic, drain and retire old work. Runtime checks still apply.'}
 
 
