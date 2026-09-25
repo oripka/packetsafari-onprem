@@ -20,6 +20,7 @@ if __package__ in {None, ""}:
         diagnostics_logs,
         diagnostics_restart,
         doctor_deployment,
+        refresh_component_inventory,
         format_healthcheck_report,
         healthcheck_deployment,
         configure_required_env,
@@ -52,6 +53,7 @@ else:
         diagnostics_logs,
         diagnostics_restart,
         doctor_deployment,
+        refresh_component_inventory,
         format_healthcheck_report,
         healthcheck_deployment,
         configure_required_env,
@@ -165,6 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show installer/runtime status.")
     status_parser.add_argument("--json", action="store_true")
 
+    subparsers.add_parser("inventory", help="Refresh the timestamped component inventory used by the admin UI.")
     doctor = subparsers.add_parser("doctor", help="Run deployment readiness checks.")
     doctor.add_argument("--profile", choices=["onprem", "saas"], default="onprem")
     doctor.add_argument("--manifest", help="Release manifest to use for required env checks. Defaults to the active manifest.")
@@ -540,6 +543,10 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("No deployment state found.")
         return 0
+    if args.command == "inventory":
+        payload = refresh_component_inventory(args)
+        print(json.dumps(payload, indent=2))
+        return 0 if payload.get("status") == "observed" else 1
     if args.command == "doctor":
         print(json.dumps(doctor_deployment(args), indent=2))
         return 0

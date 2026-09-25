@@ -4454,6 +4454,11 @@ def _attach_update_summary(
         atomic_write(receipt_path, json.dumps(receipt, indent=2, sort_keys=True) + '\n')
         result['deploymentReceipt'] = receipt
         result['deploymentReceiptPath'] = str(receipt_path)
+        from .component_inventory import publish
+        try:
+            result['componentInventory'] = publish(layout, _compose_base_command(layout), installed_ops)
+        except OSError:
+            result['componentInventory'] = {'status': 'unavailable'}
     return result
 
 
@@ -6852,3 +6857,10 @@ def set_password(args) -> dict:
         ],
     )
     return {"message": f"Password updated for {args.username}."}
+
+
+def refresh_component_inventory(args) -> dict:
+    """Refresh the UI's observation file without changing running services."""
+    from .component_inventory import publish
+    layout = runtime_layout(args.runtime_root, args.container_runtime_root)
+    return publish(layout, _compose_base_command(layout), version())
