@@ -209,7 +209,8 @@ WebSocket upgrade received the expected 401 through CloudFront. A 0.25-second
 public API probe bounded the first-adoption traffic interruption at 21.917
 seconds (last 200 at 09:02:01.174 UTC; next 200 at 09:02:23.306 UTC). Its
 proxy activation phase took 14.622 seconds. Initial app maintenance on the
-same day had a separate 45.839-second public API interruption. Neither is a
+same day had a separate 48.249-second last-good/next-good bound (45.836
+seconds between first and last failed samples). Neither is a
 measurement of a future compatible rolling release. The host is single-node,
 2 vCPU below the recommended 4-vCPU baseline, and a proxy restart interrupts
 existing connections.
