@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import subprocess
 import time
@@ -172,11 +173,18 @@ def validate_shared(old, new):
             raise ValueError(f'Shared {field} changed; explicit maintenance required')
 
 
-def ready(runtime, services, timeout=120):
+# Slow hosts (and busy development machines) can need several minutes to start
+# a generation; ready() returns as soon as services are healthy.
+READY_TIMEOUT = int(os.environ.get('PACKETSAFARI_GENERATION_READY_TIMEOUT', '600'))
+
+
+def ready(runtime, services, timeout=None):
+    timeout = READY_TIMEOUT if timeout is None else timeout
     configured = read(runtime.compose_file)['services']
     expected = {service: proxy.inspect(configured[service]['image'])['Id'] for service in services}
     controller = read(runtime.stack_file)['proxyName']
     deadline = time.monotonic() + timeout
+    next_progress = time.monotonic() + 15
     while True:
         pending = []
         for service in services:
@@ -201,6 +209,9 @@ def ready(runtime, services, timeout=120):
             return
         if time.monotonic() >= deadline:
             raise RuntimeError(f'Generation readiness timed out: {", ".join(pending)}')
+        if time.monotonic() >= next_progress:
+            print(f'Generation update: waiting for {", ".join(pending)} to become ready', file=sys.stderr, flush=True)
+            next_progress = time.monotonic() + 15
         time.sleep(.25)
 
 
@@ -251,7 +262,7 @@ def recover_preparing(runtime):
     return {'status': 'rolled_back', 'message': 'Candidate failed before workers started; original generation kept serving'}
 
 
-def deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=120, schema=None):
+def deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=None, schema=None):
     try:
         return _deploy(runtime, target_base, verify=verify, commit=commit, timeout=timeout, schema=schema)
     except BaseException:
@@ -262,7 +273,7 @@ def deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: 
         raise
 
 
-def abort(runtime, timeout=120):
+def abort(runtime, timeout=None):
     """Return traffic, warm-drain candidate jobs, then use the normal retirement path."""
     if not runtime.journal_file.exists():
         return {'status': 'noop'}
@@ -296,8 +307,9 @@ def abort(runtime, timeout=120):
     return deploy(runtime, journal['targetBase'], timeout=timeout)
 
 
-def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=120, schema=None):
+def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt: None, timeout=None, schema=None):
     """Caller holds the deployment lock and verifies signed compatibility first."""
+    timeout = READY_TIMEOUT if timeout is None else timeout
     if runtime.journal_file.exists():
         journal = read(runtime.journal_file)
         if journal.get('mode') != 'fleet' or journal['targetBase'] != target_base:
@@ -408,9 +420,21 @@ def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt:
         def save_worker(receipt):
             journal['oldWorker'] = receipt
             save(runtime.journal_file, journal)
-        receipt = workload_drain.request_worker(journal['oldWorker'], save_worker)
-        result = workload_drain.wait_worker(receipt, timeout)
-        save_worker(result)
+        retiring_worker = name(journal['staged']['fleetBases'][journal['retiringSlot']]['services']['worker']
+                               .get('container_name', 'worker'), journal['retiringSlot'])
+        if journal['oldWorker'].get('status') == 'drained':
+            # A resumed update waits only for retiring proxy connections: the
+            # drained worker has exited and must not be looked up as running.
+            result = journal['oldWorker']
+        else:
+            rearmed = workload_drain.rearm_worker(journal['oldWorker'], runtime.container(retiring_worker))
+            if rearmed:
+                print(f'Generation update: {retiring_worker} restarted before the drain request; draining its current instance',
+                      file=sys.stderr, flush=True)
+                save_worker(rearmed)
+            receipt = workload_drain.request_worker(journal['oldWorker'], save_worker)
+            result = workload_drain.wait_worker(receipt, timeout)
+            save_worker(result)
         connections = set(read(runtime.directory / 'proxy/state.json').get('retiringWorkers', [])) & proxy.workers(staged['proxyName'])
         if result['status'] != 'drained' or connections:
             return {'status': 'draining', 'worker': result['status'], 'retiringProxyWorkers': sorted(connections),
@@ -438,7 +462,10 @@ def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt:
         if proxy.inspect(old_name)['Id'] != container:
             raise RuntimeError('Old generation identity changed; refusing cleanup')
         if info['State']['StartedAt'] != journal['oldStarts'][service]:
-            raise RuntimeError('Old dependency restarted; its idle state is no longer proven')
+            # Its worker is drained and its traffic switched away, so nothing can
+            # depend on this retired container even though it restarted.
+            print(f'Generation update: {old_name} restarted during the update; stopping it after the drain',
+                  file=sys.stderr, flush=True)
         if info['State']['Running']:
             runtime.dc('stop', name(service, journal['retiringSlot']))
     save(runtime.directory / 'base.json', staged['fleetBases'][staged['active']])

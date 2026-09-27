@@ -146,7 +146,12 @@ verification checks remain authoritative. `update check` includes a preliminary
 Before metadata commit, recovery can abort: restore original traffic, stop candidate
 intake, drain its jobs/connections, then retire dependencies. This also handles
 failed readiness after a candidate worker accepted a job. Repeat recovery on exit 3.
-Changed container identities fail closed. Once commit begins, finish the update;
+Changed container identities fail closed, with two exceptions: a retiring
+worker that restarted before its TERM request is re-armed and drained as its
+current instance (it must still advertise the warm-drain supervisor), and a
+retired dependency that restarted is stopped once its worker and proxy
+connections have drained. A restart after the TERM request still fails closed.
+Once commit begins, finish the update;
 use a subsequent signed release for application rollback. Failed post-switch checks
 use the same drain path automatically. Drain timeout retains both generations.
 Do not delete state files to bypass drift, drain or recovery checks.
@@ -394,5 +399,7 @@ must include the actual launcher flags, not only the supervisor function.
 
 Worker readiness allows 60 seconds for one cold Python/Celery import and ping.
 A subprocess timeout means not ready; the enclosing controller retains its
-readiness deadline. The security consumer check excludes both login and
+readiness deadline. That deadline defaults to 600 seconds per readiness step
+(`PACKETSAFARI_GENERATION_READY_TIMEOUT`), printing the pending services every
+15 seconds; readiness returns as soon as services are healthy. The security consumer check excludes both login and
 non-login shell wrappers, so shell command text cannot masquerade as a worker.

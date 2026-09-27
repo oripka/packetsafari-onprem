@@ -55,6 +55,22 @@ def poll_worker(receipt: dict) -> dict:
     return {**receipt, 'status': 'drained'}
 
 
+def rearm_worker(receipt: dict, container: str) -> dict | None:
+    """Re-arm a retiring worker that restarted before any drain signal was sent.
+
+    A drain contract is only meaningful once TERM is requested; before that the
+    goal is simply to drain whatever worker currently occupies the retiring
+    slot. A restart after the request still means the drain is unproven.
+    """
+    if receipt.get('status') != 'prepared':
+        return None
+    info = proxy.inspect(container)
+    if (info['Id'] == receipt['containerId'] and info['State']['StartedAt'] == receipt['startedAt']
+            and info['Image'] == receipt['imageId']):
+        return None
+    return begin_worker(container)
+
+
 def request_worker(receipt: dict, save_receipt) -> dict:
     """Persist intent before signaling; the qualified supervisor ignores repeat TERM."""
     info = proxy.inspect(receipt['containerId'])

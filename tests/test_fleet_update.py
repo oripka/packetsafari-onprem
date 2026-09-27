@@ -123,3 +123,46 @@ def test_worker_readiness_uses_bounded_startup_probe_timeout(monkeypatch):
     assert drain.worker_ready('candidate') is True
     assert calls[0][0][:3] == ['docker', 'exec', 'candidate']
     assert calls[0][1]['timeout'] == 60
+
+
+def test_worker_restarted_before_drain_request_is_rearmed(monkeypatch):
+    monkeypatch.setattr(drain.proxy, 'inspect', lambda _: worker(started='two'))
+    monkeypatch.setattr(drain.proxy, 'docker', lambda *a, **kw: SimpleNamespace(stdout='running\n'))
+    receipt = {'containerId': 'worker-id', 'imageId': 'image', 'startedAt': 'one', 'status': 'prepared'}
+    rearmed = drain.rearm_worker(receipt, 'worker-green')
+    assert rearmed['startedAt'] == 'two' and rearmed['status'] == 'prepared'
+
+
+def test_unchanged_worker_is_not_rearmed(monkeypatch):
+    monkeypatch.setattr(drain.proxy, 'inspect', lambda _: worker())
+    receipt = {'containerId': 'worker-id', 'imageId': 'image', 'startedAt': 'one', 'status': 'prepared'}
+    assert drain.rearm_worker(receipt, 'worker-green') is None
+
+
+@pytest.mark.parametrize('status', ['requested', 'draining'])
+def test_worker_restarted_after_drain_request_stays_unproven(monkeypatch, status):
+    monkeypatch.setattr(drain.proxy, 'inspect', lambda _: worker(started='two'))
+    receipt = {'containerId': 'worker-id', 'imageId': 'image', 'startedAt': 'one', 'status': status}
+    assert drain.rearm_worker(receipt, 'worker-green') is None
+    with pytest.raises(RuntimeError):
+        drain.poll_worker(receipt)
+
+
+def test_rearm_refuses_worker_without_warm_drain_supervisor(monkeypatch):
+    monkeypatch.setattr(drain.proxy, 'inspect', lambda _: worker(started='two'))
+    monkeypatch.setattr(drain.proxy, 'docker', lambda *a, **kw: SimpleNamespace(stdout='\n'))
+    receipt = {'containerId': 'worker-id', 'imageId': 'image', 'startedAt': 'one', 'status': 'prepared'}
+    with pytest.raises(RuntimeError, match='warm-drain supervisor'):
+        drain.rearm_worker(receipt, 'worker-green')
+
+
+def test_readiness_uses_configurable_default_timeout(monkeypatch):
+    assert fleet.READY_TIMEOUT >= 300
+    runtime = SimpleNamespace(compose_file='compose', stack_file='stack', container=lambda _: 'container')
+    monkeypatch.setattr(fleet, 'read', lambda path: {'proxyName': 'proxy'} if path == 'stack' else
+                        {'services': {'sharkd-green': {'image': 'image'}}})
+    monkeypatch.setattr(fleet.proxy, 'inspect', lambda _: {'Id': 'image', 'Image': 'image',
+                                                           'State': {'Running': True, 'Health': {'Status': 'starting'}}})
+    monkeypatch.setattr(fleet, 'READY_TIMEOUT', 0)
+    with pytest.raises(RuntimeError, match='readiness timed out'):
+        fleet.ready(runtime, ['sharkd-green'])
