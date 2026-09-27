@@ -52,6 +52,7 @@ def test_shared_dependency_change_fails_closed():
 def test_drain_resume_resolves_compose_service_when_container_name_differs(tmp_path, monkeypatch, retiring_slot, service):
     from packetsafari_onprem.rolling_update import Runtime, save, read
     runtime = Runtime(tmp_path, tmp_path / 'compose.json', [])
+    (tmp_path / 'proxy').mkdir()
     save(tmp_path / 'proxy/state.json', {'retiringWorkers': []})
     target = base()
     target['services']['worker']['container_name'] = 'packetsafari-worker'
