@@ -420,8 +420,7 @@ def _deploy(runtime, target_base, *, verify=lambda: None, commit=lambda receipt:
         def save_worker(receipt):
             journal['oldWorker'] = receipt
             save(runtime.journal_file, journal)
-        retiring_worker = name(journal['staged']['fleetBases'][journal['retiringSlot']]['services']['worker']
-                               .get('container_name', 'worker'), journal['retiringSlot'])
+        retiring_worker = name('worker', journal['retiringSlot'])
         if journal['oldWorker'].get('status') == 'drained':
             # A resumed update waits only for retiring proxy connections: the
             # drained worker has exited and must not be looked up as running.

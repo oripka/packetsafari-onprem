@@ -48,6 +48,39 @@ def test_shared_dependency_change_fails_closed():
         fleet.validate_shared(old, new)
 
 
+@pytest.mark.parametrize('retiring_slot,service', [('backend', 'worker'), ('backend-green', 'worker-green')])
+def test_drain_resume_resolves_compose_service_when_container_name_differs(tmp_path, monkeypatch, retiring_slot, service):
+    from packetsafari_onprem.rolling_update import Runtime, save, read
+    runtime = Runtime(tmp_path, tmp_path / 'compose.json', [])
+    save(tmp_path / 'proxy/state.json', {'retiringWorkers': []})
+    target = base()
+    target['services']['worker']['container_name'] = 'packetsafari-worker'
+    receipt = {'containerId': 'retiring-id', 'status': 'prepared'}
+    save(runtime.journal_file, {
+        'mode': 'fleet', 'phase': 'draining', 'targetBase': target,
+        'candidate': 'backend-green' if retiring_slot == 'backend' else 'backend',
+        'retiringSlot': retiring_slot, 'oldWorker': receipt, 'oldContainers': {'worker': 'retiring-id'},
+        'staged': {'proxyName': 'proxy', 'fleetBases': {retiring_slot: target}},
+    })
+    calls = []
+    def compose(*args):
+        calls.append(args)
+        assert args == ('ps', '-q', service), 'Compose requires the service key, not container_name'
+        return 'retiring-id'
+    monkeypatch.setattr(runtime, 'dc', compose)
+    def rearm(old, container):
+        assert old == receipt and container == 'retiring-id'
+        return None
+    monkeypatch.setattr(drain, 'rearm_worker', rearm)
+    monkeypatch.setattr(drain, 'request_worker', lambda old, save: {**old, 'status': 'requested'})
+    monkeypatch.setattr(drain, 'wait_worker', lambda old, timeout: {**old, 'status': 'draining'})
+    monkeypatch.setattr(fleet.proxy, 'workers', lambda _: set())
+    result = fleet._deploy(runtime, target, timeout=0)
+    assert result['status'] == 'draining'
+    assert calls == [('ps', '-q', service)]
+    assert read(runtime.journal_file)['oldWorker']['status'] == 'draining'
+
+
 def test_regular_release_accepts_all_application_image_changes():
     current = {'runtimeContract': {'protocolVersion': 1, 'workerDrainVersion': 1, 'schemaInputs': 'a'*64},
                'images': {name: 'repo/' + name + '@sha256:'+'a'*64 for name in fleet.COHORT}}
