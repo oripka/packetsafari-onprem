@@ -65,13 +65,17 @@ class ReleaseObservabilityTest(unittest.TestCase):
                                             'unavailable_optional_package_types': ['ja4_compact']}}))
             args = SimpleNamespace(runtime_root=root, container_runtime_root=root, skip_health_check=False)
             result = operations._attach_update_summary(
-                {'status': 'ok', 'version': '10.0.2', 'snapshot': '/snapshot/metadata'},
+                {'status': 'ok', 'version': '10.0.2', 'snapshot': '/snapshot/metadata',
+                 'maintenanceTiming': {'totalSeconds': 100, 'controllerIngressPauseSeconds': 95,
+                                       'phaseSeconds': {'opening': 60}}},
                 {'app': {'currentVersion': '10.0.1', 'targetVersion': '10.0.2'},
                  'backupMode': 'skip', 'changedServices': ['backend']}, {}, args)
             receipt = result['deploymentReceipt']
             self.assertEqual(receipt['backup']['dataBackup'], 'not_captured')
             self.assertEqual(receipt['backup']['snapshotMetadata'], '/snapshot/metadata')
             self.assertIsNone(receipt['timing']['trafficUnavailableSeconds'])
+            self.assertEqual(receipt['timing']['updateSeconds'], 100)
+            self.assertEqual(receipt['timing']['maintenance']['phaseSeconds']['opening'], 60)
             self.assertEqual(receipt['bundledInputs']['securityContent']['packages'][0]['status'], 'bundled')
             self.assertEqual(receipt['bundledInputs']['securityContent']['unavailableOptionalTypes'], ['ja4_compact'])
             self.assertEqual(json.loads(Path(result['deploymentReceiptPath']).read_text()), receipt)

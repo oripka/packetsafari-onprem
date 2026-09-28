@@ -425,3 +425,43 @@ def test_cannot_restore_old_code_after_maintenance_changes(runtime, phase):
     with pytest.raises(RuntimeError, match='after maintenance changes'):
         maintenance.restore_before_changes(instance, {'phase': phase}, 1)
     assert not events
+
+
+def test_maintenance_timing_survives_resume_and_separates_controller_from_public_availability(runtime, monkeypatch):
+    instance, base, events = runtime
+    clock = [100.0]
+    monkeypatch.setattr(maintenance.time, 'time', lambda: clock[0])
+    def drain(*args):
+        clock[0] = 110.0
+        return {'status': 'draining'}
+    monkeypatch.setattr(maintenance.workload_drain, 'wait_worker', drain)
+    assert maintenance.deploy(instance, prepare=lambda target: target, start=lambda: None, target=base)['status'] == 'draining'
+    clock[0] = 130.0  # Includes time between operator retries.
+    monkeypatch.setattr(maintenance.workload_drain, 'wait_worker', lambda *args: {'status': 'drained'})
+    def prepare(target):
+        clock[0] += 5
+        return target
+    def start():
+        clock[0] += 10
+    def ready(*args):
+        clock[0] += 20
+    monkeypatch.setattr(maintenance, 'ready', ready)
+    result = maintenance.deploy(instance, prepare=prepare, start=start, target=base)
+    timing = result['maintenanceTiming']
+    assert timing['totalSeconds'] == 65
+    assert timing['controllerIngressPauseSeconds'] == 65
+    assert timing['phaseSeconds']['draining'] == 30
+    assert timing['phaseSeconds']['preparing'] == 5
+    assert timing['phaseSeconds']['starting'] == 10
+    assert timing['phaseSeconds']['opening'] == 20
+    assert 'trafficUnavailableSeconds' not in timing
+
+
+def test_failed_verification_does_not_claim_one_continuous_pause(runtime, monkeypatch):
+    instance, base, events = runtime
+    def fail():
+        raise RuntimeError('verification failed')
+    with pytest.raises(RuntimeError, match='verification failed'):
+        maintenance.deploy(instance, prepare=lambda target: target, start=lambda: None, verify=fail, target=base)
+    result = maintenance.deploy(instance, prepare=lambda _: pytest.fail('already prepared'), start=lambda: None, target=base)
+    assert result['maintenanceTiming']['controllerIngressPauseSeconds'] is None

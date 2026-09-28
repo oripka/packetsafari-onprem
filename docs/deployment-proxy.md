@@ -403,3 +403,11 @@ readiness deadline. That deadline defaults to 600 seconds per readiness step
 (`PACKETSAFARI_GENERATION_READY_TIMEOUT`), printing the pending services every
 15 seconds; readiness returns as soon as services are healthy. The security consumer check excludes both login and
 non-login shell wrappers, so shell command text cannot masquerade as a worker.
+
+Maintenance timing is persisted with the transaction and returned as
+`maintenanceTiming`; the deployment receipt includes it under `timing.maintenance`.
+`phaseSeconds` covers quiescing, draining, preparing, starting, opening, and
+committing, including waits between retries. `controllerIngressPauseSeconds`
+measures pause request through reopening; it is not a public availability probe.
+If verification reopens then re-pauses traffic, this aggregate is unknown.
+Legacy journals without a recorded start keep unknown totals.

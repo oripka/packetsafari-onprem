@@ -11,6 +11,20 @@ from .fleet_update import COHORT, name, ready
 from .rolling_update import read, save
 
 
+def phase(runtime, journal, name):
+    """Persist wall-clock boundaries so resumed transactions retain elapsed time."""
+    now = time.time()
+    timing = journal.setdefault('timing', {})
+    previous = timing.get('phaseStartedAt')
+    if previous is not None:
+        seconds = timing.setdefault('phaseSeconds', {})
+        old = journal['phase']
+        seconds[old] = round(seconds.get(old, 0) + max(0, now - previous), 3)
+    timing['phaseStartedAt'] = now
+    journal['phase'] = name
+    save(runtime.journal_file, journal)
+
+
 def restore_before_changes(runtime, journal, timeout):
     """A failed drain is reversible only before any service/migration changes."""
     if journal['phase'] not in ('quiescing', 'draining', 'restoring'):
@@ -52,7 +66,8 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         worker = workload_drain.begin_worker(runtime.container(name('worker', stack['active'])))
         journal = {'mode': 'maintenance', 'id': uuid.uuid4().hex, 'phase': 'quiescing',
                    'oldStack': stack, 'oldWorker': worker, 'targetBase': target,
-                   'proxyImage': proxy_image or stack['proxyImage']}
+                   'proxyImage': proxy_image or stack['proxyImage'],
+                   'timing': {'startedAt': time.time(), 'phaseStartedAt': time.time()}}
         save(runtime.journal_file, journal)
     stack = journal['oldStack']
     if journal['phase'] == 'restoring':
@@ -60,6 +75,8 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         raise RuntimeError('Previous maintenance aborted before changes; old service restored. Retry update explicitly.')
     if journal['phase'] == 'quiescing':
         print('Maintenance: pausing ingress and draining connections', file=sys.stderr, flush=True)
+        journal.setdefault('timing', {}).setdefault('ingressPauseRequestedAt', time.time())
+        save(runtime.journal_file, journal)
         deadline = time.monotonic() + timeout
         while True:
             receipt = proxy.quiesce(runtime.directory / 'proxy', stack['proxyName'])
@@ -68,8 +85,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
             if time.monotonic() >= deadline:
                 return {'status': 'draining', 'scope': 'maintenance', 'message': 'Ingress paused; existing connections retained. Repeat update.'}
             time.sleep(.25)
-        journal['phase'] = 'draining'
-        save(runtime.journal_file, journal)
+        phase(runtime, journal, 'draining')
     if journal['phase'] == 'draining':
         print('Maintenance: finishing old jobs before stopping application services', file=sys.stderr, flush=True)
         def persist(worker):
@@ -90,8 +106,7 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         services = [name(service, slot) for slot in ('backend', 'backend-green') for service in COHORT
                     if name(service, slot) in configured]
         runtime.dc('stop', *services)
-        journal['phase'] = 'preparing'
-        save(runtime.journal_file, journal)
+        phase(runtime, journal, 'preparing')
     if journal['phase'] == 'preparing':
         print('Maintenance: preparing configuration and the selected backup policy', file=sys.stderr, flush=True)
         base = prepare(journal['targetBase'])
@@ -99,8 +114,8 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         staged.update(active='backend', proxyImage=journal['proxyImage'],
                       images=dict.fromkeys(('backend', 'backend-green'), base['services']['backend']['image']),
                       fleetBases={'backend': base, 'backend-green': copy.deepcopy(base)})
-        journal.update(phase='starting', targetBase=base, staged=staged)
-        save(runtime.journal_file, journal)
+        journal.update(targetBase=base, staged=staged)
+        phase(runtime, journal, 'starting')
     if journal['phase'] == 'starting':
         print('Maintenance: applying database migrations and starting services', file=sys.stderr, flush=True)
         # Repeat from the saved plan after interruption, never rebuild or rediscover.
@@ -109,28 +124,39 @@ def deploy(runtime, *, prepare, start, verify=lambda: None, commit=lambda: None,
         start()
         proxy.docker('update', '--restart=' + journal['targetBase']['services']['worker'].get('restart', 'always'),
                      runtime.container('worker'))
-        journal['phase'] = 'opening'
-        save(runtime.journal_file, journal)
+        phase(runtime, journal, 'opening')
     if journal['phase'] == 'opening':
         print('Maintenance: checking readiness before reopening ingress', file=sys.stderr, flush=True)
         ready(runtime, list(COHORT), timeout)
         proxy.switch(runtime.directory / 'proxy', stack['proxyName'], runtime.container('backend'),
                      sharkd=runtime.container('sharkd'), drain_timeout=0)
+        journal.setdefault('timing', {})['ingressReopenedAt'] = time.time()
+        save(runtime.journal_file, journal)
         try:
             verify()
         except BaseException:
+            journal['timing'].pop('ingressReopenedAt', None)
+            journal['timing']['reopenedBeforeVerificationFailure'] = True
+            save(runtime.journal_file, journal)
             proxy.quiesce(runtime.directory / 'proxy', stack['proxyName'])
             raise
-        journal['phase'] = 'committing'
-        save(runtime.journal_file, journal)
+        phase(runtime, journal, 'committing')
     if journal['phase'] == 'committing':
         print('Maintenance: verification passed; committing release metadata', file=sys.stderr, flush=True)
         commit()
-        journal['phase'] = 'committed'
-        save(runtime.journal_file, journal)
+        phase(runtime, journal, 'committed')
     save(runtime.directory / 'base.json', journal['targetBase'])
+    timing = journal.get('timing', {})
+    timing['totalSeconds'] = round(max(0, time.time() - timing['startedAt']), 3) if 'startedAt' in timing else None
+    # Controller interval, not measured public availability. Retries may have
+    # briefly reopened traffic before verification failed; leave that unknown.
+    paused, opened = timing.get('ingressPauseRequestedAt'), timing.get('ingressReopenedAt')
+    timing['controllerIngressPauseSeconds'] = (round(max(0, opened - paused), 3)
+        if paused is not None and opened is not None and not timing.get('reopenedBeforeVerificationFailure') else None)
+    save(runtime.journal_file, journal)
     runtime.journal_file.replace(runtime.directory / f'maintenance-{journal["id"]}.json')
-    return {'status': 'ok', 'scope': 'maintenance', 'message': 'Maintenance verified; generation mode retained.'}
+    return {'status': 'ok', 'scope': 'maintenance', 'message': 'Maintenance verified; generation mode retained.',
+            'maintenanceTiming': timing}
 
 
 def upgrade(layout, args, manifest, *, source, backup_mode, backup_proof, ops):

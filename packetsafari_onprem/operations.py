@@ -4481,7 +4481,8 @@ def _attach_update_summary(
             'backup': {'policy': backup_mode, 'dataBackup': 'not_captured' if backup_mode == 'skip' else
                        'external_proof_required' if backup_mode == 'require-recent' else 'inline',
                        'snapshotMetadata': result.get('snapshot')},
-            'timing': {'updateSeconds': result.get('totalSeconds'),
+            'timing': {'updateSeconds': result.get('totalSeconds', (result.get('maintenanceTiming') or {}).get('totalSeconds')),
+                       'maintenance': result.get('maintenanceTiming'),
                        'readinessAndSwitchSeconds': (result.get('rollingUpdate') or result.get('activation') or {}).get('readinessAndSwitchSeconds'),
                        'trafficUnavailableSeconds': None},
             'cloudFront': {'publication': 'unverified_by_host', 'originTrust': 'unverified_by_host'},
