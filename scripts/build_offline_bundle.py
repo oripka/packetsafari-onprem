@@ -80,7 +80,7 @@ def create_onprem_tooling_archive(output_dir: Path, version: str) -> Path:
     archive_path = output_dir / f"packetsafari-onprem-{version}.tar.gz"
     ignored = {
         ".git",
-        ".guard",
+        ".nosy",
         ".pytest_cache",
         ".venv",
         "build",

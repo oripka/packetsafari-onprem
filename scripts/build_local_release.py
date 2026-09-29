@@ -345,7 +345,7 @@ def create_onprem_archive(output_dir: Path) -> Path:
             archive_root,
             ignore=shutil.ignore_patterns(
                 ".git",
-                ".guard",
+                ".nosy",
                 ".pytest_cache",
                 ".venv",
                 "__pycache__",

@@ -381,7 +381,7 @@ def _copy_tooling_tree(source: Path, destination: Path) -> None:
         destination,
         ignore=shutil.ignore_patterns(
             ".git",
-            ".guard",
+            ".nosy",
             ".pytest_cache",
             ".venv",
             "__pycache__",
